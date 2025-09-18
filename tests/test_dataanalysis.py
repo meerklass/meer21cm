@@ -299,3 +299,23 @@ def test_get_jackknife_patches():
     # check nu makes sense
     nu_pixel = mask_arr.sum((0, 1, 2, 3, 4))
     assert nu_pixel.std() / nu_pixel.mean() < 1e-2
+
+
+def test_create_white_noise_map():
+    ra_range_MK = (334, 357)
+    dec_range_MK = (-35, -26.5)
+    ps = Specification(
+        band="L",  # band and survey will produce some pre-defined cuts to select
+        survey="meerklass_2021",  # the clean frequency sub-band
+        ra_range=ra_range_MK,
+        dec_range=dec_range_MK,
+    )
+    noise_map = ps.create_white_noise_map(
+        0.1,
+    )
+    std = ((noise_map * np.sqrt(ps.counts))[ps.counts > 0]).std()
+    assert np.allclose(std, 0.1, rtol=5e-3)
+    ps.counts = np.random.uniform(1, 100, size=ps.data.shape) * ps.W_HI
+    noise_map = ps.create_white_noise_map(0.1, counts=ps.counts)
+    std = ((noise_map * np.sqrt(ps.counts))[ps.counts > 0]).std()
+    assert np.allclose(std, 0.1, rtol=5e-3)

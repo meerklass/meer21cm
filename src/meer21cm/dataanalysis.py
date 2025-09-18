@@ -1026,3 +1026,42 @@ class Specification:
                     )[None, None, :]
                     mask_arr[i, j, k] = W_ijk
         return mask_arr
+
+    def create_white_noise_map(self, sigma_N, counts=None, seed=None, inf_to_zero=True):
+        """
+        Create a white noise map with the given standard deviation.
+        The sigma in each pixel is then scaled by the counts 1/sqrt(counts).
+
+        Note that, the default seed is **fixed** to the class attribute ``self.seed``.
+        If you want to generate multiple random catalogues, you need to set a different seed manually for each catalogue.
+
+        If you want to use different noise level per pixel, you can either pass a 3D
+        array of sigma_N, or a single number and a 3D array of counts.
+        You can usually pass ``self.counts`` as the counts array, but do check the counts
+        are set up correctly by ``plot_map(self.counts, self.wproj)``.
+
+        Finally, note that the noise map is not masked by the survey selection function.
+        You can mask the noise map manually by ``noise_map *= self.W_HI``.
+
+        Parameters
+        ----------
+        sigma_N: float or array.
+            The standard deviation of the white noise.
+        counts: array, default None.
+            The counts in each pixel. If None, the counts will be one across the cube.
+        seed: int, default None.
+            The seed for the random number generator. Default uses the class attribute ``self.seed``.
+        inf_to_zero: bool, default True.
+            If True, the inf values in the noise map will be set to zero.
+        Returns
+        -------
+        noise_map: array.
+            The white noise map.
+        """
+        if counts is None:
+            counts = np.ones(self.data.shape)
+        rng = np.random.default_rng(seed=seed)
+        noise_map = rng.normal(scale=sigma_N / np.sqrt(counts), size=self.data.shape)
+        if inf_to_zero:
+            noise_map[np.isinf(noise_map)] = 0.0
+        return noise_map

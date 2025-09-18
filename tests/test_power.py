@@ -962,23 +962,3 @@ def test_average_model_hi_temp():
         ps.model_hi_temp_in_box * ps.counts_in_box
     ).sum() / ps.counts_in_box.sum()
     assert np.allclose(temp_box_avg, ps.average_model_hi_temp, rtol=1e-3)
-
-
-def test_create_white_noise_map():
-    ra_range_MK = (334, 357)
-    dec_range_MK = (-35, -26.5)
-    ps = PowerSpectrum(
-        band="L",  # band and survey will produce some pre-defined cuts to select
-        survey="meerklass_2021",  # the clean frequency sub-band
-        ra_range=ra_range_MK,
-        dec_range=dec_range_MK,
-    )
-    noise_map = ps.create_white_noise_map(
-        0.1,
-    )
-    std = ((noise_map * np.sqrt(ps.counts))[ps.counts > 0]).std()
-    assert np.allclose(std, 0.1, rtol=5e-3)
-    ps.counts = np.random.uniform(1, 100, size=ps.data.shape) * ps.W_HI
-    noise_map = ps.create_white_noise_map(0.1, counts=ps.counts)
-    std = ((noise_map * np.sqrt(ps.counts))[ps.counts > 0]).std()
-    assert np.allclose(std, 0.1, rtol=5e-3)
