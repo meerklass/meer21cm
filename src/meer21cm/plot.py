@@ -132,3 +132,16 @@ def plot_projected_map(A, data, wproj, W=None):
     for i in range(A.shape[1]):
         res_i = np.einsum("ij,abj->abi", S_pca_full[:, :, i], np.nan_to_num(data))
         plot_map(res_i, wproj, W=W)
+
+
+def visualise_patch_split(mask_arr, wproj):
+    """
+    Visualise the patch split by plotting the mask array.
+    """
+    for nu_indx in range(mask_arr.shape[2]):
+        mask_map = np.zeros_like(mask_arr[0, 0, 0, :, :, 0]) + np.nan
+        for i in range(mask_arr.shape[0]):
+            for j in range(mask_arr.shape[1]):
+                sel = mask_arr[i, j, nu_indx].sum(-1) > 0
+                mask_map[sel] = i + j * mask_arr.shape[0]
+        plot_map(mask_map, wproj, have_cbar=False, title=f"frequency bin {nu_indx}")

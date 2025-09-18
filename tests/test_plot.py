@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from meer21cm.plot import *
 from meer21cm.util import create_wcs, pca_clean
+from meer21cm.dataanalysis import Specification
 
 
 def test_plt(test_W, test_nu, test_wproj):
@@ -19,4 +20,16 @@ def test_plot_projected_map():
     test_arr[:, :, :20] = np.nan
     test_res, test_A = pca_clean(test_arr, 1, return_A=True, ignore_nan=True)
     plot_projected_map(test_A, test_res, wcs)
+    plt.close("all")
+
+
+def test_plot_patch_split():
+    ps = Specification(
+        survey="meerklass_2021",
+        band="L",
+        ra_range=(334, 357),
+        dec_range=(-35, -26.5),
+    )
+    mask_arr = ps.get_jackknife_patches(ra_patch_num=8, dec_patch_num=4, nu_patch_num=2)
+    visualise_patch_split(mask_arr, ps.wproj)
     plt.close("all")

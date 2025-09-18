@@ -943,3 +943,86 @@ class Specification:
                 shape[-1] = 2 * shape[-1] - 2
                 weights = np.ones(shape)
         return weights
+
+    def get_jackknife_patches(
+        self,
+        ra_patch_num,
+        dec_patch_num,
+        nu_patch_num,
+        ra_range=None,
+        dec_range=None,
+        nu_range=None,
+    ):
+        """
+        Split the map into roughly equal patches. Each patch can then be
+        masked, which can be used for jackknife resampling for covariance estimation.
+        Note that the masks=True is where the pixels **should be masked**.
+        So for example, if you want to exclude a patch, the correct survey window
+        is then ``self.W_HI * (1-mask_arr[i])`` and the weights
+        ``self.w_HI * (1-mask_arr[i])``.
+
+        If you want to examine the patch splits, you can visualise the mask array
+        by using :func:`meer21cm.plot.visualise_patch_split`.
+
+        Parameters
+        ----------
+        ra_patch_num: int
+            The number of patche grids in the right ascension direction.
+        dec_patch_num: int
+            The number of patche grids in the declination direction.
+        nu_patch_num: int
+            The number of patche grids in the frequency direction.
+        ra_range: tuple, default None
+            The range of the right ascension of the map data in degrees.
+            Default uses ``self.ra_range``.
+        dec_range: tuple, default None
+            The range of the declination of the map data in degrees.
+            Default uses ``self.dec_range``.
+        nu_range: tuple, default None
+            The range of the frequency of the map data in Hz.
+            Default uses ``[self.nu.min() - self.freq_resol/2, self.nu.max() + self.freq_resol/2]``.
+        """
+        if ra_range is None:
+            ra_range = self.ra_range
+        if dec_range is None:
+            dec_range = self.dec_range
+        assert (
+            dec_range[0] < dec_range[1]
+        ), "dec_range[0] must be less than dec_range[1]"
+        assert dec_range[0] >= -90, "dec must be between -90 and 90"
+        assert dec_range[1] <= 90, "dec must be between -90 and 90"
+        if nu_range is None:
+            nu_range = [
+                self.nu.min() - self.freq_resol / 2,
+                self.nu.max() + self.freq_resol / 2,
+            ]
+        assert nu_range[0] < nu_range[1], "nu_range[0] must be less than nu_range[1]"
+        assert not (
+            ra_range[0] == 0 and ra_range[1] == 360
+        ), "ra_range is whole sky 0-360, check if you have passed a value to it"
+        ra_delta_map = (self.ra_map - ra_range[0]) % 360
+        ra_delta_bins = np.linspace(
+            0, (ra_range[1] - ra_range[0]) % 360, ra_patch_num + 1
+        )
+        dec_bins = np.linspace(dec_range[0], dec_range[1], dec_patch_num + 1)
+        nu_bins = np.linspace(nu_range[0], nu_range[1], nu_patch_num + 1)
+        ra_indx = np.digitize(ra_delta_map, ra_delta_bins)
+        ra_indx[ra_indx == 0] = len(ra_delta_bins)
+        dec_indx = np.digitize(self.dec_map, dec_bins)
+        dec_indx[dec_indx == 0] = len(dec_bins)
+        nu_indx = np.digitize(self.nu, nu_bins)
+        nu_indx[nu_indx == 0] = len(nu_bins)
+        ra_indx -= 1
+        dec_indx -= 1
+        nu_indx -= 1
+        mask_arr = np.zeros(
+            (ra_patch_num, dec_patch_num, nu_patch_num) + self.W_HI.shape
+        )
+        for i in range(len(ra_delta_bins) - 1):
+            for j in range(len(dec_bins) - 1):
+                for k in range(len(nu_bins) - 1):
+                    W_ijk = ((ra_indx == i) * (dec_indx == j))[:, :, None] * (
+                        nu_indx == k
+                    )[None, None, :]
+                    mask_arr[i, j, k] = W_ijk
+        return mask_arr

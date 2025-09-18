@@ -274,3 +274,28 @@ def test_trim_gal():
     sp._dec_gal = np.array([0, -2, 0])
     sp._z_gal = np.array([0.42, 0.42, 0.42])
     assert np.allclose(sp.trim_gal_to_range(), [1, 0, 0])
+
+
+def test_get_jackknife_patches():
+    ps = Specification(
+        survey="meerklass_2021",
+        band="L",
+    )
+    with pytest.raises(AssertionError):
+        ps.get_jackknife_patches(
+            ra_patch_num=4,
+            dec_patch_num=4,
+            nu_patch_num=2,
+        )
+    ps.ra_range = (334, 357)
+    ps.dec_range = (-35, -26.5)
+    mask_arr = ps.get_jackknife_patches(ra_patch_num=8, dec_patch_num=4, nu_patch_num=2)
+    assert mask_arr.shape == (8, 4, 2, ps.num_pix_x, ps.num_pix_y, ps.nu.size)
+    # check ra dec makes sense
+    mask_pixel = mask_arr.sum((2, 3, 4, 5))
+    mask_pixel_mean = mask_pixel.mean()
+    mask_pixel_std = mask_pixel.std()
+    assert mask_pixel_std / mask_pixel_mean < 5e-2
+    # check nu makes sense
+    nu_pixel = mask_arr.sum((0, 1, 2, 3, 4))
+    assert nu_pixel.std() / nu_pixel.mean() < 1e-2
