@@ -77,6 +77,8 @@ class MockSimulation(PowerSpectrum):
         parallel_plane=True,
         rsd_from_field=False,
         discrete_source_dndz=np.ones_like,
+        mock_amp_1=None,
+        mock_amp_2=None,
         **params,
     ):
         super().__init__(**params)
@@ -120,6 +122,8 @@ class MockSimulation(PowerSpectrum):
         if not rsd_from_field and not parallel_plane:
             warnings.warn("rsd_from_field is False, parallel_plane will be ignored")
         self.discrete_source_dndz = discrete_source_dndz
+        self.mock_amp_1 = mock_amp_1
+        self.mock_amp_2 = mock_amp_2
 
     @property
     def tot_num_source_in_box(self):
