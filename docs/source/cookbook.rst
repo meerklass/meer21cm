@@ -28,3 +28,4 @@ Mock Recipes
     :maxdepth: 1
 
     cookbook/resolution
+    cookbook/gal_dndz
