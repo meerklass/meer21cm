@@ -1065,3 +1065,46 @@ class Specification:
         if inf_to_zero:
             noise_map[np.isinf(noise_map)] = 0.0
         return noise_map
+
+    def check_is_map_noise_like_with_pca(self, A_mat, sigma_N=1.0):
+        """
+        Use the source mixing matrix from eigendecomposition of the covariance matrix,
+        project out the map data with more and more modes,
+        and check if the variance of the residual map
+        behaves like white noise.
+
+        You can use :func:`meer21cm.util.pca_clean` to retrieve the source mixing matrix:
+        .. code-block:: python
+
+            N_fg = 15 # check 15 modes removed
+            res_map, A_mat = pca_clean(ps.data, N_fg, weights=ps.W_HI, return_A=True)
+            res, noise = ps.check_is_map_noise_like_with_pca(A_mat)
+            plt.plot(res / noise)
+
+        If the residual map is noise-like, the plot should decrease and
+        eventually reach a plateau.
+
+        If you know the expected std of the map, you can pass it to
+        ``sigma_N`` to scale the noise variance, and the plateau should
+        be close to 1.
+
+
+        Parameters
+        ----------
+        A_mat: array.
+            The source mixing matrix.
+        sigma_N: float.
+        """
+        res_var = []
+        noise_var = []
+        for i in range(A_mat.shape[1]):
+            R_mat = np.eye(self.nu.size) - np.dot(
+                A_mat[:, : i + 1], A_mat[:, : i + 1].T
+            )
+            var_attenuation = np.trace(R_mat.T @ R_mat) / self.nu.size
+            data_res = np.einsum("ij, abj -> abi", R_mat, self.data)
+            res_var.append(data_res[self.W_HI > 0].var())
+            noise_var.append(var_attenuation)
+        res_var = np.array(res_var)
+        noise_var = np.array(noise_var) * sigma_N**2
+        return res_var, noise_var

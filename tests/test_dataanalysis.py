@@ -4,7 +4,7 @@ import numpy as np
 from astropy import units, constants
 import pytest
 from astropy.wcs.utils import proj_plane_pixel_area
-from meer21cm.util import freq_to_redshift, center_to_edges, f_21, create_wcs_with_range
+from meer21cm.util import freq_to_redshift, center_to_edges, f_21, pca_clean
 from meer21cm.telescope import dish_beam_sigma
 
 
@@ -319,3 +319,26 @@ def test_create_white_noise_map():
     noise_map = ps.create_white_noise_map(0.1, counts=ps.counts)
     std = ((noise_map * np.sqrt(ps.counts))[ps.counts > 0]).std()
     assert np.allclose(std, 0.1, rtol=5e-3)
+
+
+def test_check_is_map_noise_like_with_pca():
+    ra_range_MK = (334, 357)
+    dec_range_MK = (-35, -26.5)
+    ps = Specification(
+        band="L",  # band and survey will produce some pre-defined cuts to select
+        survey="meerklass_2021",  # the clean frequency sub-band
+        ra_range=ra_range_MK,
+        dec_range=dec_range_MK,
+    )
+    noise_map = ps.create_white_noise_map(
+        0.1,
+    )
+    N_fg = 15
+    res_map, A_mat = pca_clean(noise_map, N_fg, weights=ps.W_HI, return_A=True)
+    ps.data = noise_map
+    res_var, noise_var = ps.check_is_map_noise_like_with_pca(A_mat, sigma_N=0.1)
+    assert np.allclose(
+        res_var,
+        noise_var,
+        rtol=1e-1,
+    )

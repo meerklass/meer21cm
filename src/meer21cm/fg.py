@@ -1,9 +1,8 @@
 import healpy as hp
 import numpy as np
 import meer21cm
-from meer21cm.util import healpix_to_wcs
+from meer21cm.util import healpix_to_wcs, read_healpix_fits, check_unit_equiv
 from astropy import units
-from meer21cm.util import check_unit_equiv
 from healpy.rotator import Rotator
 
 default_data_dir = meer21cm.__file__.rsplit("/", 1)[0] + "/data/"
@@ -61,13 +60,15 @@ class ForegroundSimulation:
         """
         sp_indx = self.sp_indx_for_haslam_backend
         freq = np.atleast_1d(freq)
-        haslam_map = hp.fitsfunc.read_map(
+        haslam_map, hp_nside, map_unit, map_freq = read_healpix_fits(
             default_data_dir + "haslam408_dsds_Remazeilles2014.fits"
         )
+        assert check_unit_equiv(map_unit, units.K), "map unit must be temperature"
+        haslam_map = (haslam_map * map_unit).to(units.K).value
         haslam_map = hp.ud_grade(haslam_map, self.hp_nside)
         r = Rotator(coord=["G", "E"])
         haslam_map = r.rotate_map_pixel(haslam_map)
-        cube = haslam_map[None, :] * ((freq / 408 / 1e6) ** sp_indx)[:, None]
+        cube = haslam_map[None, :] * ((freq / map_freq) ** sp_indx)[:, None]
         return cube
 
     def healpix_gen_gdsm(self, freq):
