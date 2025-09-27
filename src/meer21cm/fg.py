@@ -18,6 +18,7 @@ class ForegroundSimulation:
         backend="haslam",
         pysm_preset_strings=["d1", "s1", "f1", "a1", "c1"],
         sp_indx_for_haslam_backend=-2.0,
+        coord_system="C",
     ):
         """
         Foreground simulation class.
@@ -33,12 +34,18 @@ class ForegroundSimulation:
             Number of pixels in x direction.
         num_pix_y: int
             Number of pixels in y direction.
-        backend: str
+        backend: str, default 'haslam'
             Backend to use for foreground simulation.
-            Options: 'gdsm' (Global Sky Model), 'pysm' (PySM3).
-        pysm_preset_strings: list
+            Options: 'gdsm' (Global Sky Model), 'pysm' (PySM3), 'haslam' (Haslam 408 MHz map).
+        pysm_preset_strings: list, default ['d1', 's1', 'f1', 'a1', 'c1']
             List of PySM3 preset strings for included components.
-            Default: []'d1', 's1', 'f1', 'a1', 'c1'].
+            Default: ['d1', 's1', 'f1', 'a1', 'c1'].
+        sp_indx_for_haslam_backend: float, default -2.0
+            Index of the spectral index for the Haslam 408 MHz map.
+            Only used for 'haslam' backend.
+        coord_system: str, default 'C'
+            Coordinate system to use for the foreground simulation.
+            Options: 'G' (Galactic), 'C' (Celestial), 'E' (Ecliptic).
         """
         self.backend = backend
         assert backend in [
@@ -53,6 +60,7 @@ class ForegroundSimulation:
         assert hp.isnsideok(hp_nside), "hp_nside must be a valid HEALPix nside"
         self.pysm_preset_strings = pysm_preset_strings
         self.sp_indx_for_haslam_backend = sp_indx_for_haslam_backend
+        self.coord_system = coord_system
 
     def healpix_gen_haslam(self, freq):
         """
@@ -66,7 +74,7 @@ class ForegroundSimulation:
         assert check_unit_equiv(map_unit, units.K), "map unit must be temperature"
         haslam_map = (haslam_map * map_unit).to(units.K).value
         haslam_map = hp.ud_grade(haslam_map, self.hp_nside)
-        r = Rotator(coord=["G", "E"])
+        r = Rotator(coord=["G", self.coord_system])
         haslam_map = r.rotate_map_pixel(haslam_map)
         cube = haslam_map[None, :] * ((freq / map_freq) ** sp_indx)[:, None]
         return cube
@@ -89,7 +97,7 @@ class ForegroundSimulation:
         )
         cube = gsm.generate(freq / 1e6)
         cube = hp.ud_grade(cube, self.hp_nside)
-        r = Rotator(coord=["G", "E"])
+        r = Rotator(coord=["G", self.coord_system])
         if len(freq) == 1:
             cube = cube[None, :]
         for i in range(cube.shape[0]):
@@ -107,7 +115,7 @@ class ForegroundSimulation:
         for f in freq:
             cube_i = pysm.get_emission(f * units.Hz)[0].value / 1e6
             cube_i = hp.ud_grade(cube_i, self.hp_nside)
-            r = Rotator(coord=["G", "E"])
+            r = Rotator(coord=["G", self.coord_system])
             cube_i = r.rotate_map_pixel(cube_i)
             cube.append(cube_i)
         cube = np.array(cube)
