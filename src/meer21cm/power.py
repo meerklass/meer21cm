@@ -821,8 +821,14 @@ class ModelPowerSpectrum(CosmologyCalculator):
             * (r + (beta1 + beta2) * mumode**2 + beta1 * beta2 * mumode**4)
             * self.fog_term(self.deltav_to_deltar(sigma_v_1), mumode=mumode)
             * self.fog_term(self.deltav_to_deltar(sigma_v_2), mumode=mumode)
-            * self.fog_gaussian(self.deltaz_to_deltar(sigma_z_1), mumode=mumode)
-            * self.fog_gaussian(self.deltaz_to_deltar(sigma_z_2), mumode=mumode)
+            # fog is exp(-k^2 sigma^2 / 2), whereas redshift error
+            # is exp(-k^2 deltar^2)
+            * self.fog_gaussian(
+                self.deltaz_to_deltar(sigma_z_1) * np.sqrt(2), mumode=mumode
+            )
+            * self.fog_gaussian(
+                self.deltaz_to_deltar(sigma_z_2) * np.sqrt(2), mumode=mumode
+            )
         )
         return power_in_redshift_space
 
