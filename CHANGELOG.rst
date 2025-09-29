@@ -7,6 +7,7 @@ Features
 ++++++++
 * add get_shot_noise_galaxy function
 * add jackknife patch split and plot function
+* improve foreground simulation routine
 
 Fixes
 +++++
