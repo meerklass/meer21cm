@@ -26,6 +26,8 @@ dependencies = [
     'katbeam@git+https://github.com/ska-sa/katbeam',
     "emcee",
     "nautilus-sampler",
+    "pygdsm@git+https://github.com/telegraphic/pygdsm",
+    "pysm3",
 ]
 
 
