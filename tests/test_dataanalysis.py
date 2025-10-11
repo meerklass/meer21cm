@@ -321,7 +321,7 @@ def test_create_white_noise_map():
     assert np.allclose(std, 0.1, rtol=5e-3)
 
 
-def test_check_is_map_noise_like_with_pca():
+def test_check_is_map_noiselike_using_pca():
     ra_range_MK = (334, 357)
     dec_range_MK = (-35, -26.5)
     ps = Specification(
@@ -336,7 +336,7 @@ def test_check_is_map_noise_like_with_pca():
     N_fg = 15
     res_map, A_mat = pca_clean(noise_map, N_fg, weights=ps.W_HI, return_A=True)
     ps.data = noise_map
-    res_var, noise_var = ps.check_is_map_noise_like_with_pca(A_mat, sigma_N=0.1)
+    res_var, noise_var = ps.check_is_map_noiselike_using_pca(A_mat, sigma_N=0.1)
     assert np.allclose(
         res_var,
         noise_var,

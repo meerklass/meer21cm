@@ -1066,7 +1066,7 @@ class Specification:
             noise_map[np.isinf(noise_map)] = 0.0
         return noise_map
 
-    def check_is_map_noise_like_with_pca(self, A_mat, sigma_N=1.0):
+    def check_is_map_noiselike_using_pca(self, A_mat, data=None, sigma_N=1.0):
         """
         Use the source mixing matrix from eigendecomposition of the covariance matrix,
         project out the map data with more and more modes,
@@ -1078,32 +1078,39 @@ class Specification:
 
             N_fg = 15 # check 15 modes removed
             res_map, A_mat = pca_clean(ps.data, N_fg, weights=ps.W_HI, return_A=True)
-            res, noise = ps.check_is_map_noise_like_with_pca(A_mat)
+            res, noise = ps.check_is_map_noiselike_using_pca(A_mat)
             plt.plot(res / noise)
 
         If the residual map is noise-like, the plot should decrease and
         eventually reach a plateau.
 
-        If you know the expected std of the map, you can pass it to
+        If you know the expected std of the map (per hit), you can pass it to
         ``sigma_N`` to scale the noise variance, and the plateau should
         be close to 1.
+
+        Note that, the input data should be the mean-centered data.
+        You can use :func:`meer21cm.util.mean_center_signal` to mean-center the data if needed.
 
 
         Parameters
         ----------
         A_mat: array.
             The source mixing matrix.
+        data: array, default None.
+            The data to be projected out. If None, the class attribute ``self.data`` will be used.
         sigma_N: float.
         """
         res_var = []
         noise_var = []
+        if data is None:
+            data = self.data
         for i in range(A_mat.shape[1]):
             R_mat = np.eye(self.nu.size) - np.dot(
                 A_mat[:, : i + 1], A_mat[:, : i + 1].T
             )
             var_attenuation = np.trace(R_mat.T @ R_mat) / self.nu.size
-            data_res = np.einsum("ij, abj -> abi", R_mat, self.data)
-            res_var.append(data_res[self.W_HI > 0].var())
+            data_res = np.einsum("ij, abj -> abi", R_mat, data)
+            res_var.append((data_res * np.sqrt(self.counts))[self.W_HI > 0].var())
             noise_var.append(var_attenuation)
         res_var = np.array(res_var)
         noise_var = np.array(noise_var) * sigma_N**2
