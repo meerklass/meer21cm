@@ -24,6 +24,7 @@ from meer21cm.util import (
     redshift_to_freq,
     freq_to_redshift,
     get_nd_slicer,
+    omega_hi_to_average_temp,
 )
 from meer21cm.dataanalysis import Specification
 import healpy as hp
@@ -820,6 +821,8 @@ class ModelPowerSpectrum(CosmologyCalculator):
             * (r + (beta1 + beta2) * mumode**2 + beta1 * beta2 * mumode**4)
             * self.fog_term(self.deltav_to_deltar(sigma_v_1), mumode=mumode)
             * self.fog_term(self.deltav_to_deltar(sigma_v_2), mumode=mumode)
+            # fog is exp(-k^2 sigma^2 / 2), whereas redshift error
+            # is exp(-k^2 deltar^2)
             * self.fog_gaussian(self.deltaz_to_deltar(sigma_z_1), mumode=mumode)
             * self.fog_gaussian(self.deltaz_to_deltar(sigma_z_2), mumode=mumode)
         )
@@ -2915,6 +2918,30 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 "setting the model self.kmode and self.mumode to correspond to the field k-modes"
             )
             self.propagate_field_k_to_model()
+
+    @property
+    def average_model_hi_temp(self):
+        """
+        Calculate the average HI brightness temperature in the map cube, taking care of redshift evolution and map sampling.
+        """
+        t_bar = omega_hi_to_average_temp(self.omega_hi, z=self.z_ch, cosmo=self.cosmo)
+        t_bar = (t_bar * self.w_HI.sum((0, 1))).sum() / self.w_HI.sum()
+        return t_bar
+
+    @property
+    def model_hi_temp_in_box(self):
+        """
+        Based on the redshift dependence of Omega_HI, calculate
+        the average HI brightness temperature for each grid in the rectangular box.
+        This can be used in a way that the weighted average of the ``model_hi_temp_in_box``
+        is used as the average t_bar in the model power spectrum (by passing it to ``mean_amp_1``),
+        whereas the 3D ``model_hi_temp_in_box`` is used as the field weight to account for the effect of
+        the redshift evolution of Omega_HI in the power spectrum.
+        """
+        z_grid = self._box_voxel_redshift
+        omega_hi_grid = self.omega_hi_z_func(z_grid)
+        t_bar_grid = omega_hi_to_average_temp(omega_hi_grid, z=z_grid, cosmo=self.cosmo)
+        return t_bar_grid
 
     def get_counts_in_box(self):
         """

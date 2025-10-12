@@ -21,6 +21,7 @@ Data Analysis Recipes
 
     cookbook/2021_Lband_gama_cross
     cookbook/2019_Lband
+    cookbook/check_noiselike
 
 Mock Recipes
 ------------
@@ -28,3 +29,4 @@ Mock Recipes
     :maxdepth: 1
 
     cookbook/resolution
+    cookbook/gal_dndz

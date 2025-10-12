@@ -401,3 +401,9 @@ def test_find_id():
     file_test = file_arr[0] + "/" + file_arr[1]
     with pytest.raises(ValueError):
         vfind_id(file_test)
+
+
+def test_convert_hpmap_in_jy_to_temp():
+    # just test invoke
+    hpmap = np.zeros(hp.nside2npix(128))
+    convert_hpmap_in_jy_to_temp(hpmap, 1e8)

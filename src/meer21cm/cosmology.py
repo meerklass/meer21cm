@@ -7,7 +7,6 @@ The class :py:class:`CosmologyCalculator` is the base class for storing the cosm
 It is typically used as a base class for other classes that inherit from it, and not used directly.
 
 """
-
 import numpy as np
 import camb
 import astropy
@@ -18,6 +17,7 @@ from astropy.cosmology import Planck18, w0waCDM
 from copy import deepcopy
 import inspect
 import logging
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -334,9 +334,11 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     backend: str, default "camb"
         The backend to use for computing the matter power spectrum.
         Either "camb" or "bacco".
-    omega_hi: float, default 5e-4
-        The HI density at a given redshift ``self.z``,
+    omega_hi: float or np.ndarray, default 5e-4
+        The HI density as a function of redshift,
         over the critical density of the Universe at z=0.
+        If a float is provided, it will be used as the HI density at all redshifts.
+        If an array is provided, it will be used as the HI density at each frequency channel.
     **params: dict
         Additional parameters to be passed to the base class :class:`CosmologyParameters`
         and :class:`meer21cm.dataanalysis.Specification`.
@@ -344,9 +346,9 @@ class CosmologyCalculator(Specification, CosmologyParameters):
 
     def __init__(
         self,
-        backend="camb",
-        omega_hi=5e-4,
-        **params,
+        backend: str = "camb",
+        omega_hi: np.ndarray | float = 5e-4,
+        **params: dict,
     ):
         # super().__init__(**params)
         self._omega_de = None
@@ -598,28 +600,63 @@ class CosmologyCalculator(Specification, CosmologyParameters):
         self.cosmo = cosmo.clone(Ode0=value)
 
     @property
+    def omega_hi_z_func(self):
+        """
+        Interpolate the input ``self.omega_hi`` at each frequency channel ``self.z_ch`` to a function of redshift.
+        """
+        if np.all(self.omega_hi == self.omega_hi[0]):
+            return lambda z: self.omega_hi[0] * np.ones_like(z)
+        func = interp1d(
+            self.z_ch, self.omega_hi, bounds_error=False, fill_value="extrapolate"
+        )
+        return func
+
+    @property
+    @tagging("nu")
+    def omega_hi_z_mean(self):
+        """
+        The mean HI density at the central redshift ``self.z``, over the critical density of the Universe at z=0.
+        Interpolated from the input ``self.omega_hi`` at each frequency channel ``self.z_ch``.
+        """
+        if self._omega_hi_z_mean is None:
+            self._omega_hi_z_mean = self.omega_hi_z_func(self.z)
+        return self._omega_hi_z_mean
+
+    @property
     def average_hi_temp(self):
         """
-        The average HI brightness temperature in Kelvin.
+        The average HI brightness temperature in Kelvin at central redshift ``self.z``.
         """
         logger.debug(
             f"invoking {inspect.currentframe().f_code.co_name} to calculate the average HI brightness temperature"
         )
-        logger.debug(f"omega_hi: {self.omega_hi}, z: {self.z}, cosmo: {self.cosmo}")
-        tbar = omega_hi_to_average_temp(self.omega_hi, z=self.z, cosmo=self)
+        logger.debug(
+            f"omega_hi: {self.omega_hi_z_mean}, z: {self.z}, cosmo: {self.cosmo}"
+        )
+        tbar = omega_hi_to_average_temp(self.omega_hi_z_mean, z=self.z, cosmo=self)
         return tbar
 
     @property
     def omega_hi(self):
         """
-        The HI density at a given redshift ``self.z``,
-        over the critical density of the Universe at z=0.
+        The HI density as a function of redshift, over the critical density of the Universe at z=0,
+        defined at each frequency channel so that ``self.omega_hi`` corresponds to ``self.z_ch``.
+        Interpolation will be used to get the HI density at other redshifts.
+        If a float is provided, it will be used as the HI density at all redshifts.
         """
         return self._omega_hi
 
     @omega_hi.setter
     def omega_hi(self, value):
-        self._omega_hi = value
+        if isinstance(value, float):
+            result = value * np.ones_like(self.z_ch)
+        else:
+            assert len(value) == len(
+                self.z_ch
+            ), "omega_hi must be defined at each frequency channel if an array"
+            result = value
+        self._omega_hi_z_mean = None
+        self._omega_hi = result
 
     @Specification.cosmo.setter
     def cosmo(self, value):

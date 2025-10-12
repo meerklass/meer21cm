@@ -378,6 +378,9 @@ def galaxy_temperature(nu, tgal_408MHz=25, sp_indx=-2.75):
     """
     The temperature template of the Milky Way.
 
+    Note that, for an accurate T_sky, you can instead use
+    :class:`meer21cm.fg.ForegroundSimulation` to generate the foregrounds.
+
     Parameters
     ----------
         nu: float.

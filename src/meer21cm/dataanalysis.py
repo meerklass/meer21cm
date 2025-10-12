@@ -943,3 +943,175 @@ class Specification:
                 shape[-1] = 2 * shape[-1] - 2
                 weights = np.ones(shape)
         return weights
+
+    def get_jackknife_patches(
+        self,
+        ra_patch_num,
+        dec_patch_num,
+        nu_patch_num,
+        ra_range=None,
+        dec_range=None,
+        nu_range=None,
+    ):
+        """
+        Split the map into roughly equal patches. Each patch can then be
+        masked, which can be used for jackknife resampling for covariance estimation.
+        Note that the masks=True is where the pixels **should be masked**.
+        So for example, if you want to exclude a patch, the correct survey window
+        is then ``self.W_HI * (1-mask_arr[i])`` and the weights
+        ``self.w_HI * (1-mask_arr[i])``.
+
+        If you want to examine the patch splits, you can visualise the mask array
+        by using :func:`meer21cm.plot.visualise_patch_split`.
+
+        Parameters
+        ----------
+        ra_patch_num: int
+            The number of patche grids in the right ascension direction.
+        dec_patch_num: int
+            The number of patche grids in the declination direction.
+        nu_patch_num: int
+            The number of patche grids in the frequency direction.
+        ra_range: tuple, default None
+            The range of the right ascension of the map data in degrees.
+            Default uses ``self.ra_range``.
+        dec_range: tuple, default None
+            The range of the declination of the map data in degrees.
+            Default uses ``self.dec_range``.
+        nu_range: tuple, default None
+            The range of the frequency of the map data in Hz.
+            Default uses ``[self.nu.min() - self.freq_resol/2, self.nu.max() + self.freq_resol/2]``.
+        """
+        if ra_range is None:
+            ra_range = self.ra_range
+        if dec_range is None:
+            dec_range = self.dec_range
+        assert (
+            dec_range[0] < dec_range[1]
+        ), "dec_range[0] must be less than dec_range[1]"
+        assert dec_range[0] >= -90, "dec must be between -90 and 90"
+        assert dec_range[1] <= 90, "dec must be between -90 and 90"
+        if nu_range is None:
+            nu_range = [
+                self.nu.min() - self.freq_resol / 2,
+                self.nu.max() + self.freq_resol / 2,
+            ]
+        assert nu_range[0] < nu_range[1], "nu_range[0] must be less than nu_range[1]"
+        assert not (
+            ra_range[0] == 0 and ra_range[1] == 360
+        ), "ra_range is whole sky 0-360, check if you have passed a value to it"
+        ra_delta_map = (self.ra_map - ra_range[0]) % 360
+        ra_delta_bins = np.linspace(
+            0, (ra_range[1] - ra_range[0]) % 360, ra_patch_num + 1
+        )
+        dec_bins = np.linspace(dec_range[0], dec_range[1], dec_patch_num + 1)
+        nu_bins = np.linspace(nu_range[0], nu_range[1], nu_patch_num + 1)
+        ra_indx = np.digitize(ra_delta_map, ra_delta_bins)
+        ra_indx[ra_indx == 0] = len(ra_delta_bins)
+        dec_indx = np.digitize(self.dec_map, dec_bins)
+        dec_indx[dec_indx == 0] = len(dec_bins)
+        nu_indx = np.digitize(self.nu, nu_bins)
+        nu_indx[nu_indx == 0] = len(nu_bins)
+        ra_indx -= 1
+        dec_indx -= 1
+        nu_indx -= 1
+        mask_arr = np.zeros(
+            (ra_patch_num, dec_patch_num, nu_patch_num) + self.W_HI.shape
+        )
+        for i in range(len(ra_delta_bins) - 1):
+            for j in range(len(dec_bins) - 1):
+                for k in range(len(nu_bins) - 1):
+                    W_ijk = ((ra_indx == i) * (dec_indx == j))[:, :, None] * (
+                        nu_indx == k
+                    )[None, None, :]
+                    mask_arr[i, j, k] = W_ijk
+        return mask_arr
+
+    def create_white_noise_map(self, sigma_N, counts=None, seed=None, inf_to_zero=True):
+        """
+        Create a white noise map with the given standard deviation.
+        The sigma in each pixel is then scaled by the counts 1/sqrt(counts).
+
+        Note that, the default seed is **fixed** to the class attribute ``self.seed``.
+        If you want to generate multiple random catalogues, you need to set a different seed manually for each catalogue.
+
+        If you want to use different noise level per pixel, you can either pass a 3D
+        array of sigma_N, or a single number and a 3D array of counts.
+        You can usually pass ``self.counts`` as the counts array, but do check the counts
+        are set up correctly by ``plot_map(self.counts, self.wproj)``.
+
+        Finally, note that the noise map is not masked by the survey selection function.
+        You can mask the noise map manually by ``noise_map *= self.W_HI``.
+
+        Parameters
+        ----------
+        sigma_N: float or array.
+            The standard deviation of the white noise.
+        counts: array, default None.
+            The counts in each pixel. If None, the counts will be one across the cube.
+        seed: int, default None.
+            The seed for the random number generator. Default uses the class attribute ``self.seed``.
+        inf_to_zero: bool, default True.
+            If True, the inf values in the noise map will be set to zero.
+        Returns
+        -------
+        noise_map: array.
+            The white noise map.
+        """
+        if counts is None:
+            counts = np.ones(self.data.shape)
+        rng = np.random.default_rng(seed=seed)
+        noise_map = rng.normal(scale=sigma_N / np.sqrt(counts), size=self.data.shape)
+        if inf_to_zero:
+            noise_map[np.isinf(noise_map)] = 0.0
+        return noise_map
+
+    def check_is_map_noiselike_using_pca(self, A_mat, data=None, sigma_N=1.0):
+        """
+        Use the source mixing matrix from eigendecomposition of the covariance matrix,
+        project out the map data with more and more modes,
+        and check if the variance of the residual map
+        behaves like white noise.
+
+        You can use :func:`meer21cm.util.pca_clean` to retrieve the source mixing matrix:
+        .. code-block:: python
+
+            N_fg = 15 # check 15 modes removed
+            res_map, A_mat = pca_clean(ps.data, N_fg, weights=ps.W_HI, return_A=True)
+            res, noise = ps.check_is_map_noiselike_using_pca(A_mat)
+            plt.plot(res / noise)
+
+        If the residual map is noise-like, the plot should decrease and
+        eventually reach a plateau.
+
+        If you know the expected std of the map (per hit), you can pass it to
+        ``sigma_N`` to scale the noise variance, and the plateau should
+        be close to 1.
+
+        Note that, the input data should be the mean-centered data.
+        You can use :func:`meer21cm.util.mean_center_signal` to mean-center the data if needed.
+
+
+        Parameters
+        ----------
+        A_mat: array.
+            The source mixing matrix.
+        data: array, default None.
+            The data to be projected out. If None, the class attribute ``self.data`` will be used.
+        sigma_N: float.
+        """
+        res_var = []
+        noise_var = []
+        if data is None:
+            data = self.data
+        for i in range(A_mat.shape[1]):
+            R_mat = np.eye(self.nu.size) - np.dot(
+                A_mat[:, : i + 1], A_mat[:, : i + 1].T
+            )
+            var_attenuation = np.trace(R_mat.T @ R_mat) / self.nu.size
+            data_res = np.einsum("ij, abj -> abi", R_mat, data)
+            res_var.append((data_res * np.sqrt(self.counts))[self.W_HI > 0].var())
+            noise_var.append(var_attenuation)
+        res_var = np.array(res_var)
+        noise_var = np.array(noise_var) * sigma_N**2
+        return res_var, noise_var

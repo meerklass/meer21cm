@@ -581,6 +581,35 @@ def get_wcs_coor(wcs, xx, yy, ang_unit="deg"):
     return ra, dec
 
 
+def mean_center_signal(signal, weights=None, los_axis=-1):
+    """
+    Mean-center the signal. Assume the first axis is the LOS axis.
+    """
+    assert len(signal.shape) == 3, "map must be 3D."
+    if los_axis < 0:
+        # change -1 to 2
+        los_axis = 3 + los_axis
+    # make sure los is the fist axis
+    axes = [0, 1, 2]
+    axes.remove(los_axis)
+    axes = [
+        los_axis,
+    ] + axes
+    # transpose map data
+    signal = np.transpose(signal, axes=axes)
+    nz, nx, ny = signal.shape
+    signal = signal.reshape((nz, -1))
+    if weights is not None:
+        weights = np.transpose(weights, axes=axes)
+        weights = weights.reshape((nz, -1))
+    else:
+        weights = np.ones_like(signal)
+    signal = signal - np.sum(signal * weights, 1)[:, None] / np.sum(weights, 1)[:, None]
+    signal = signal.reshape((nz, nx, ny))
+    signal = np.transpose(signal, axes=np.argsort(axes))
+    return signal
+
+
 def pca_clean(
     signal,
     N_fg,
@@ -668,6 +697,11 @@ def pca_clean(
     ----------
     .. [1] MeerKLASS collab, "MeerKLASS L-band deep-field intensity maps: entering the HI dominated regime", https://arxiv.org/abs/2407.21626.
     """
+    if mean_center:
+        if mean_center_weights is None:
+            signal = mean_center_signal(signal, weights, los_axis)
+        else:
+            signal = mean_center_signal(signal, mean_center_weights, los_axis)
     assert len(signal.shape) == 3, "map must be 3D."
     if los_axis < 0:
         # change -1 to 2
@@ -691,18 +725,18 @@ def pca_clean(
     if mean_center_weights is not None:
         mean_center_weights = np.transpose(mean_center_weights, axes=axes)
         mean_center_weights = mean_center_weights.reshape((nz, -1))
-    if mean_center:
-        if mean_center_weights is None:
-            signal = (
-                signal
-                - np.sum(signal * weights, 1)[:, None] / np.sum(weights, 1)[:, None]
-            )
-        else:
-            signal = (
-                signal
-                - np.sum(signal * mean_center_weights, 1)[:, None]
-                / np.sum(mean_center_weights, 1)[:, None]
-            )
+    # if mean_center:
+    #    if mean_center_weights is None:
+    #        signal = (
+    #            signal
+    #            - np.sum(signal * weights, 1)[:, None] / np.sum(weights, 1)[:, None]
+    #        )
+    #    else:
+    #        signal = (
+    #            signal
+    #            - np.sum(signal * mean_center_weights, 1)[:, None]
+    #            / np.sum(mean_center_weights, 1)[:, None]
+    #        )
     ### Covariance calculation:
     covariance = (
         np.einsum("ia,ja->ij", signal * weights, signal * weights)

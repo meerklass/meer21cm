@@ -941,3 +941,24 @@ def test_map_sampling():
     ps.sampling_resol = ps.box_resol
     # if sampling resol is the same as box resol, then compensate and step sampling is the same
     assert np.allclose(ps.gridding_compensation(), ps.map_sampling())
+
+
+def test_average_model_hi_temp():
+    raminMK, ramaxMK = 334, 357
+    decminMK, decmaxMK = -35, -26.5
+    ra_range = (raminMK, ramaxMK)
+    dec_range = (decminMK, decmaxMK)
+    # all the other settings follow the default, which corresponds to the MeerKLASS L-band deep-field survey
+    ps = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+        mean_amp_1="average_hi_temp",
+        ra_range=ra_range,
+        dec_range=dec_range,
+    )
+    assert np.allclose(ps.average_model_hi_temp, ps.average_hi_temp, rtol=1e-3)
+    ps.get_enclosing_box()
+    temp_box_avg = (
+        ps.model_hi_temp_in_box * ps.counts_in_box
+    ).sum() / ps.counts_in_box.sum()
+    assert np.allclose(temp_box_avg, ps.average_model_hi_temp, rtol=1e-3)

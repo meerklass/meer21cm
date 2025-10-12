@@ -63,10 +63,17 @@ def test_cosmo():
     assert coscal.h == Planck18.h
     assert np.abs(np.log(1e10 * coscal.As) - 3.047) < 1e-3
     # only test invoking, the function itself is tested in util
-    t1, ohi1 = coscal.average_hi_temp, coscal.omega_hi
+    t1, ohi1 = coscal.average_hi_temp, coscal.omega_hi.mean()
     # test update omega_hi, scales correctly
     coscal.omega_hi = 5.5e-4
-    np.allclose(coscal.average_hi_temp / t1, (coscal.omega_hi / ohi1))
+    np.allclose(coscal.average_hi_temp / t1, (coscal.omega_hi.mean() / ohi1))
+    # test omega_hi_z_func, proper z func
+    coscal.nu = np.array([8e8, 9e8])
+    coscal.omega_hi = np.array([6e-4, 5e-4])
+    assert np.allclose(coscal.omega_hi_z_mean, 5.5e-4)
+    coscal.omega_hi = np.array([5e-4, 5e-4])
+    coscal.nu = np.array([8e8, 9e8])
+    assert np.allclose(coscal.omega_hi_z_mean, 5e-4)
 
 
 def test_update_pars():

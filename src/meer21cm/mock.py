@@ -77,6 +77,8 @@ class MockSimulation(PowerSpectrum):
         parallel_plane=True,
         rsd_from_field=False,
         discrete_source_dndz=np.ones_like,
+        mock_amp_1=None,
+        mock_amp_2=None,
         **params,
     ):
         super().__init__(**params)
@@ -107,6 +109,8 @@ class MockSimulation(PowerSpectrum):
             "_mock_velocity_u_matter",
             "_mock_velocity_u_tracer_1",
             "_mock_velocity_u_tracer_2",
+            "_mock_amp_1",
+            "_mock_amp_2",
         ]
         for attr in init_attr:
             setattr(self, attr, None)
@@ -118,6 +122,8 @@ class MockSimulation(PowerSpectrum):
         if not rsd_from_field and not parallel_plane:
             warnings.warn("rsd_from_field is False, parallel_plane will be ignored")
         self.discrete_source_dndz = discrete_source_dndz
+        self.mock_amp_1 = mock_amp_1
+        self.mock_amp_2 = mock_amp_2
 
     @property
     def tot_num_source_in_box(self):
@@ -533,14 +539,46 @@ class MockSimulation(PowerSpectrum):
         return delta_x
 
     @property
+    def mock_amp_1(self):
+        """
+        The overall amplitude of the mock tracer field 1 in each grid. This can be T_HI(z) at each grid for example,
+        which is multiplied to the simulated density field to get the final mock field 1 ``self.mock_tracer_field_1``.
+        If not given, default is to use ``self.mean_amp_1`` as the amplitude.
+        """
+        if self._mock_amp_1 is None:
+            self._mock_amp_1 = self.mean_amp_1
+        return self._mock_amp_1
+
+    @mock_amp_1.setter
+    def mock_amp_1(self, value):
+        self._mock_amp_1 = value
+        return self._mock_amp_1
+
+    @property
+    def mock_amp_2(self):
+        """
+        The overall amplitude of the mock tracer field 2 in each grid. This can be T_HI(z) at each grid for example,
+        which is multiplied to the simulated density field to get the final mock field 2 ``self.mock_tracer_field_2``.
+        If not given, default is to use ``self.mean_amp_2`` as the amplitude.
+        """
+        if self._mock_amp_2 is None:
+            self._mock_amp_2 = self.mean_amp_2
+        return self._mock_amp_2
+
+    @mock_amp_2.setter
+    def mock_amp_2(self, value):
+        self._mock_amp_2 = value
+        return self._mock_amp_2
+
+    @property
     @tagging("cosmo", "nu", "mock", "box", "tracer_1", "rsd")
     def mock_tracer_field_1(self):
         """
-        The simulated tracer field 1 in redshift space with unit if ``mean_amp_1`` is given.
+        The simulated tracer field 1 in redshift space with unit if ``mock_amp_1`` or ``mean_amp_1`` is given.
         """
         if self._mock_tracer_field_1 is None:
             self.get_mock_tracer_field(1)
-        mean_amp = self.mean_amp_1
+        mean_amp = self.mock_amp_1
         if isinstance(mean_amp, str):
             mean_amp = getattr(self, mean_amp)
         return self._mock_tracer_field_1 * mean_amp
@@ -549,11 +587,11 @@ class MockSimulation(PowerSpectrum):
     @tagging("cosmo", "nu", "mock", "box", "tracer_2", "rsd")
     def mock_tracer_field_2(self):
         """
-        The simulated tracer field 2 in redshift space with unit if ``mean_amp_2`` is given.
+        The simulated tracer field 2 in redshift space with unit if ``mock_amp_2`` or ``mean_amp_2`` is given.
         """
         if self._mock_tracer_field_2 is None:
             self.get_mock_tracer_field(2)
-        mean_amp = self.mean_amp_2
+        mean_amp = self.mock_amp_2
         if isinstance(mean_amp, str):
             mean_amp = getattr(self, mean_amp)
         return self._mock_tracer_field_2 * mean_amp
