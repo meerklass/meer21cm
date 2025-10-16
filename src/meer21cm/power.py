@@ -1728,8 +1728,8 @@ def get_modelpk_conv(psmod, weights1_in_real=None, weights2=None, renorm=True):
     # the behaviour of convolving with uniform weights is incorrect at k_xyz=0 due to rfft
     power_conv = (
         np.fft.rfftn(
-            np.fft.irfftn(psmod, s=weights2.shape)
-            * np.fft.irfftn(weights_fourier, s=weights2.shape)
+            np.fft.irfftn(psmod, axes=[0, 1, 2], s=weights2.shape)
+            * np.fft.irfftn(weights_fourier, axes=[0, 1, 2], s=weights2.shape)
         )
         / weights1_in_real.size
     ) * (
@@ -2965,7 +2965,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             )
         return counts_in_grids
 
-    def grid_data_to_field(self, flat_sky=None):
+    def grid_data_to_field(self, flat_sky=None, partial_sel=None):
         """
         Grid the stored data map to a rectangular grid field.
 
@@ -2978,6 +2978,14 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         input grid scheme and performing the proper curved sky projection.
 
         The gridded field is stored as field_1 and the weights are stored as weights_1.
+
+        Parameters
+        ----------
+        flat_sky: bool, default None
+            If True, use flat sky approximation.
+        partial_sel: array, default None
+            An additional selection function of the data on top of W_HI.
+            Allows hacking for batch processing.
         """
         if flat_sky is None:
             flat_sky = self.flat_sky
@@ -2993,8 +3001,9 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             return self.field_1, self.weights_1, (self.weights_1 > 0).astype(float)
         if self.box_origin is None:
             self.get_enclosing_box()
-        data_particle = self.data[self.W_HI.sum(-1) > 0].ravel()
-        weights_particle = self.w_HI[self.W_HI.sum(-1) > 0].ravel()
+        data_particle = self.data[self.W_HI.sum(-1) > 0]
+        weights_particle = self.w_HI[self.W_HI.sum(-1) > 0]
+        num_pix = (self.W_HI.sum(-1) > 0).sum()
         num_p = self.num_particle_per_pixel
         data_particle = [
             data_particle,
@@ -3002,10 +3011,16 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         weights_particle = [
             weights_particle,
         ] * num_p
-        data_particle = np.array(data_particle).ravel()
-        weights_particle = np.array(weights_particle).ravel()
+        if partial_sel is None:
+            partial_sel = slice(None)
+        data_particle = np.array(data_particle)[:, partial_sel].ravel()
+        weights_particle = np.array(weights_particle)[:, partial_sel].ravel()
+        pix_coor_in_box = self.pix_coor_in_box.reshape(
+            (num_p, num_pix, self.nu.size, 3)
+        )
+        pix_coor_in_box = pix_coor_in_box[:, partial_sel].reshape((-1, 3))
         hi_map_rg, hi_weights_rg, pixel_counts_hi_rg = project_particle_to_regular_grid(
-            self.pix_coor_in_box,
+            pix_coor_in_box,
             self.box_len,
             self.box_ndim,
             grid_scheme=self.grid_scheme,
