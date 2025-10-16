@@ -2943,10 +2943,21 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         t_bar_grid = omega_hi_to_average_temp(omega_hi_grid, z=z_grid, cosmo=self.cosmo)
         return t_bar_grid
 
-    def get_counts_in_box(self):
+    def get_counts_in_box(self, partial_sel=None):
         """
         Grid the counts of the map cube voxels into the rectangular box, and return the
         effective counts per rectangular grid.
+
+        Parameters
+        ----------
+        partial_sel: array, default None
+            An additional selection function of the data on top of W_HI.
+            Allows hacking for batch processing.
+
+        Returns
+        -------
+        counts_in_grids: array.
+            The counts of the map cube voxels in the rectangular box.
         """
         if self.flat_sky:
             counts_in_grids = self.w_HI
@@ -2954,12 +2965,15 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             pix_coor_orig = self.pix_coor_in_box.reshape(
                 (self.num_particle_per_pixel, -1)
             )[0].reshape((-1, 3))
+            num_pix = (self.W_HI.sum(-1) > 0).sum()
+            pix_coor_orig = pix_coor_orig.reshape((num_pix, self.nu.size, 3))
+            pix_coor_orig = pix_coor_orig[:, partial_sel].reshape((-1, 3))
             counts_in_grids, _, _ = project_particle_to_regular_grid(
                 pix_coor_orig,
                 self.box_len,
                 self.box_ndim,
                 grid_scheme=self.grid_scheme,
-                particle_mass=self.w_HI[self.W_HI.sum(-1) > 0].ravel(),
+                particle_mass=self.w_HI[self.W_HI.sum(-1) > 0][partial_sel].ravel(),
                 compensate=False,  # compensate should be at model level
                 average=False,
             )
@@ -3029,7 +3043,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             compensate=False,  # compensate should be at model level
         )
         hi_map_rg2, _, _ = project_particle_to_regular_grid(
-            self.pix_coor_in_box,
+            pix_coor_in_box,
             self.box_len,
             self.box_ndim,
             grid_scheme=self.grid_scheme,
