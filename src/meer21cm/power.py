@@ -2966,8 +2966,10 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 (self.num_particle_per_pixel, -1)
             )[0].reshape((-1, 3))
             num_pix = (self.W_HI.sum(-1) > 0).sum()
+            if partial_sel is None:
+                partial_sel = slice(None)
             pix_coor_orig = pix_coor_orig.reshape((num_pix, self.nu.size, 3))
-            pix_coor_orig = pix_coor_orig[:, partial_sel].reshape((-1, 3))
+            pix_coor_orig = pix_coor_orig[partial_sel].reshape((-1, 3))
             counts_in_grids, _, _ = project_particle_to_regular_grid(
                 pix_coor_orig,
                 self.box_len,
