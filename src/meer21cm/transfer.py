@@ -252,10 +252,10 @@ class TransferFunction:
             The mock field will be gridded to a high resolution sky map,
             with the resolution specified by this integer times the pixel resolution, and then
             down-sampled to the pixel resolution.
-        upres_transverse: int, default 4
+        upres_transverse: float, default 4
             The mock field is first generated in a rectangular box.
             This is the up-sampling factor of the box comparing to the pixel resolution in the transverse direction.
-        upres_radial: int, default 4
+        upres_radial: float, default 4
             The up-sampling factor in the radial direction comparing to the frequency resolution.
         mean_center_map: bool, default True
             Whether to mean center the map data for PCA cleaning.
@@ -286,8 +286,8 @@ class TransferFunction:
         R_mat: np.ndarray | None = None,
         uncleaned_data: np.ndarray | None = None,
         highres_sim: int = 3,
-        upres_transverse: int = 4,
-        upres_radial: int = 4,
+        upres_transverse: float = 4,
+        upres_radial: float = 4,
         mean_center_map: bool = True,
         pca_map_weights: np.ndarray | None = None,
         parallel_plane: bool = True,
