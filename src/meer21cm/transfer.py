@@ -99,7 +99,7 @@ def get_pca_matrix(map, N_fg, weights, mean_center_map):
         ignore_nan=True,
     )
     R_mat = np.eye(map.shape[-1]) - A_mat @ A_mat.T
-    return R_mat
+    return np.nan_to_num(R_mat)
 
 
 def analytic_transfer_function(clean_mat_1, clean_mat_2=None):
