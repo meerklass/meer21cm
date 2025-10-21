@@ -96,6 +96,7 @@ def get_pca_matrix(map, N_fg, weights, mean_center_map):
         weights=weights,
         mean_center=mean_center_map,
         return_A=True,
+        ignore_nan=True,
     )
     R_mat = np.eye(map.shape[-1]) - A_mat @ A_mat.T
     return R_mat
