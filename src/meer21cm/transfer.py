@@ -285,7 +285,7 @@ class TransferFunction:
         N_fg: int,
         R_mat: np.ndarray | None = None,
         uncleaned_data: np.ndarray | None = None,
-        highres_sim: int = 3,
+        highres_sim: None | int = 3,
         upres_transverse: float = 4,
         upres_radial: float = 4,
         mean_center_map: bool = True,
@@ -345,8 +345,9 @@ class TransferFunction:
         attr_dict["discrete_source_dndz"] = self.discrete_source_dndz
         attr_dict["downres_factor_radial"] = 1 / self.upres_radial
         attr_dict["downres_factor_transverse"] = 1 / self.upres_transverse
-        attr_dict["kmax"] = self.ps.kmax * self.highres_sim
-        attr_dict["num_kpoints"] = self.ps.num_kpoints * self.highres_sim
+        highres_sim = self.highres_sim if self.highres_sim is not None else 1
+        attr_dict["kmax"] = self.ps.kmax * highres_sim
+        attr_dict["num_kpoints"] = self.ps.num_kpoints * highres_sim
         return attr_dict
 
     def get_arg_list_for_parallel_null(
