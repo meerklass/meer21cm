@@ -1045,7 +1045,7 @@ def himf(m, phi_s, m_s, alpha_s):
     return out
 
 
-def cal_himf(x, mmin, cosmo, mmax=11):
+def cal_himf(x, mmin, cosmo, mmax=11, integrate_step=500):
     """
     Calculate the integrated quantity related to the HIMF.
 
@@ -1059,6 +1059,8 @@ def cal_himf(x, mmin, cosmo, mmax=11):
             The cosmology object to calculate critical density
         mmax: Optional float, default 11.
             The maximum mass to integrate to in log10.
+        integrate_step: Optional int, default 500.
+            The number of steps to integrate the HIMF.
 
     Returns
     -------
@@ -1069,7 +1071,7 @@ def cal_himf(x, mmin, cosmo, mmax=11):
         psn: float.
             The shot noise in the units of Mpc:sup:`3` (assuming the recommended units for x are used)
     """
-    marr = np.logspace(mmin, mmax, num=500)
+    marr = np.logspace(mmin, mmax, num=integrate_step)
     omegahi = (
         (
             np.trapz(himf(np.log10(marr), x[0], x[1], x[2]) * marr, x=np.log10(marr))
