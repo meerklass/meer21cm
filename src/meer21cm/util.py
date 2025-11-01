@@ -610,6 +610,34 @@ def mean_center_signal(signal, weights=None, los_axis=-1):
     return signal
 
 
+def weighted_covariance(signal, weights, renorm=True):
+    """
+    Calculate the weighted covariance matrix of the signal.
+
+    The signal is assumed to be mean-centered, with the shape of
+    (num_ch, num_pix).
+
+    Parameters
+    ----------
+        signal: array.
+            The input signal
+        weights: array.
+            The weights of each element in the signal.
+        renorm: bool, default True.
+            Whether to renormalize the covariance matrix
+            over the sum of weights.
+
+    Returns
+    -------
+        covariance: array.
+            The covariance matrix of the input signal.
+    """
+    covariance = np.einsum("ia,ja->ij", signal * weights, signal * weights)
+    if renorm:
+        covariance /= np.einsum("ia,ja->ij", weights, weights)
+    return covariance
+
+
 def pca_clean(
     signal,
     N_fg,
@@ -620,6 +648,7 @@ def pca_clean(
     return_A=False,
     mean_center_weights=None,
     ignore_nan=False,
+    covariance=None,
 ):
     r"""
     Performs PCA cleaning of the map data. If ``mean_center`` is set to ``True``,
@@ -677,6 +706,9 @@ def pca_clean(
         ignore_nan: bool, default False.
             Whether to ignore NaN values in the data.
             If True, channels with NaN values are skipped.
+        covariance: array, default None.
+            The covariance matrix of the input signal.
+            If not provided, it will be calculated from the input signal.
 
     Returns
     -------
@@ -738,9 +770,8 @@ def pca_clean(
     #            / np.sum(mean_center_weights, 1)[:, None]
     #        )
     ### Covariance calculation:
-    covariance = (
-        np.einsum("ia,ja->ij", signal * weights, signal * weights)
-    ) / np.einsum("ia,ja->ij", weights, weights)
+    if covariance is None:
+        covariance = weighted_covariance(signal, weights)
     nan_flag = ignore_nan and np.any(np.isnan(covariance))
     if nan_flag:
         sel = np.logical_not(np.isnan(np.diagonal(covariance)))
@@ -1014,7 +1045,7 @@ def himf(m, phi_s, m_s, alpha_s):
     return out
 
 
-def cal_himf(x, mmin, cosmo, mmax=11):
+def cal_himf(x, mmin, cosmo, mmax=11, integrate_step=500):
     """
     Calculate the integrated quantity related to the HIMF.
 
@@ -1028,6 +1059,8 @@ def cal_himf(x, mmin, cosmo, mmax=11):
             The cosmology object to calculate critical density
         mmax: Optional float, default 11.
             The maximum mass to integrate to in log10.
+        integrate_step: Optional int, default 500.
+            The number of steps to integrate the HIMF.
 
     Returns
     -------
@@ -1038,7 +1071,7 @@ def cal_himf(x, mmin, cosmo, mmax=11):
         psn: float.
             The shot noise in the units of Mpc:sup:`3` (assuming the recommended units for x are used)
     """
-    marr = np.logspace(mmin, mmax, num=500)
+    marr = np.logspace(mmin, mmax, num=integrate_step)
     omegahi = (
         (
             np.trapz(himf(np.log10(marr), x[0], x[1], x[2]) * marr, x=np.log10(marr))

@@ -96,9 +96,10 @@ def get_pca_matrix(map, N_fg, weights, mean_center_map):
         weights=weights,
         mean_center=mean_center_map,
         return_A=True,
+        ignore_nan=True,
     )
     R_mat = np.eye(map.shape[-1]) - A_mat @ A_mat.T
-    return R_mat
+    return np.nan_to_num(R_mat)
 
 
 def analytic_transfer_function(clean_mat_1, clean_mat_2=None):
@@ -252,10 +253,10 @@ class TransferFunction:
             The mock field will be gridded to a high resolution sky map,
             with the resolution specified by this integer times the pixel resolution, and then
             down-sampled to the pixel resolution.
-        upres_transverse: int, default 4
+        upres_transverse: float, default 4
             The mock field is first generated in a rectangular box.
             This is the up-sampling factor of the box comparing to the pixel resolution in the transverse direction.
-        upres_radial: int, default 4
+        upres_radial: float, default 4
             The up-sampling factor in the radial direction comparing to the frequency resolution.
         mean_center_map: bool, default True
             Whether to mean center the map data for PCA cleaning.
@@ -285,9 +286,9 @@ class TransferFunction:
         N_fg: int,
         R_mat: np.ndarray | None = None,
         uncleaned_data: np.ndarray | None = None,
-        highres_sim: int = 3,
-        upres_transverse: int = 4,
-        upres_radial: int = 4,
+        highres_sim: None | int = 3,
+        upres_transverse: float = 4,
+        upres_radial: float = 4,
         mean_center_map: bool = True,
         pca_map_weights: np.ndarray | None = None,
         parallel_plane: bool = True,
@@ -345,8 +346,9 @@ class TransferFunction:
         attr_dict["discrete_source_dndz"] = self.discrete_source_dndz
         attr_dict["downres_factor_radial"] = 1 / self.upres_radial
         attr_dict["downres_factor_transverse"] = 1 / self.upres_transverse
-        attr_dict["kmax"] = self.ps.kmax * self.highres_sim
-        attr_dict["num_kpoints"] = self.ps.num_kpoints * self.highres_sim
+        highres_sim = self.highres_sim if self.highres_sim is not None else 1
+        attr_dict["kmax"] = self.ps.kmax * highres_sim
+        attr_dict["num_kpoints"] = self.ps.num_kpoints * highres_sim
         return attr_dict
 
     def get_arg_list_for_parallel_null(
