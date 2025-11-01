@@ -420,6 +420,13 @@ class Specification:
         return self.z_ch.mean()
 
     @property
+    def expfactor(self):
+        """
+        The expansion factor
+        """
+        return 1 / (1 + self.z)
+
+    @property
     def cosmo(self):
         """
         The cosmology model.
