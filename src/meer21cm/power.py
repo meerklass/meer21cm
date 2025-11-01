@@ -25,6 +25,7 @@ from meer21cm.util import (
     freq_to_redshift,
     get_nd_slicer,
     omega_hi_to_average_temp,
+    legendre_polynomial_with_factor,
 )
 from meer21cm.dataanalysis import Specification
 import healpy as hp
@@ -2518,12 +2519,17 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         k_xyz_max=None,
         k_perppara_min=None,
         k_perppara_max=None,
+        multipole_ell=0,
+        mu_model=None,
     ):
         """
         Bin the 3D power spectrum into 1D power spectrum.
         If the input ``power3d`` is a string, it is assumed to be an attribute of the class,
         for example ``auto_power_3d_1``.
         Also see :meth:`meer21cm.power.bin_3d_to_1d` for more details.
+
+        By default the 1D power spectrum is calculated for the monopole.
+        Passing ``multipole_ell`` will calculate the 1D power spectrum for the given multipole.
 
         Parameters
         ----------
@@ -2541,6 +2547,12 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             The minimum k_perp and k_para for the 1D power spectrum.
         k_perppara_max: list of size 2, default None
             The maximum k_perp and k_para for the 1D power spectrum.
+        multipole_ell: int, default 0
+            The multipole order for the 1D power spectrum.
+            By default the 1D power spectrum is calculated for the monopole.
+        mu_model: np.ndarray, default None
+            The mu-modes for the legendre polynomial.
+            If None, use the class attribute ``mumode``.
 
         Returns
         -------
@@ -2590,8 +2602,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             k1dweights * k_3d_sel_min * k_3d_sel_max * k_cy_sel_min * k_cy_sel_max
         )
         k1dweights[0, 0, 0] = 0.0
+        if mu_model is None:
+            mu_model = self.mumode
+        multipole_factor = np.poly1d(legendre_polynomial_with_factor(multipole_ell))(
+            mu_model
+        )
         power1d, k1deff, nmodes = bin_3d_to_1d(
-            power3d,
+            power3d * multipole_factor,
             self.k_mode,
             k1dbins,
             weights=k1dweights,
@@ -2604,12 +2621,16 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         kperpbins=None,
         kparabins=None,
         kcyweights=None,
+        multipole_ell=0,
+        mu_model=None,
     ):
         """
         Bin the 3D power spectrum into cylindrical k_perp-k_para power spectrum.
         If the input ``power3d`` is a string, it is assumed to be an attribute of the class,
         for example ``auto_power_3d_1``.
         Also see :meth:`meer21cm.power.bin_3d_to_cy` for more details.
+
+        Passing ``multipole_ell`` will calculate the cylindrical power spectrum multiplied by the Legendre polynomial.
 
         Parameters
         ----------
@@ -2621,6 +2642,12 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             The k_para bins for the cylindrical ps. Default is the same as the class attribute.
         kcyweights: np.ndarray, default None
             The weights for the 3D power spectrum. Default is equal weights for every k-mode.
+        multipole_ell: int, default 0
+            The multipole order for the cylindrical power spectrum.
+            By default the cylindrical power spectrum is calculated for the monopole.
+        mu_model: np.ndarray, default None
+            The mu-modes for the legendre polynomial.
+            If None, use the class attribute ``mumode``.
 
         Returns
         -------
@@ -2638,8 +2665,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         if isinstance(power3d, str):
             power3d = getattr(self, power3d)
         kcyweights[0, 0, 0] = 0.0
+        if mu_model is None:
+            mu_model = self.mumode
+        multipole_factor = np.poly1d(legendre_polynomial_with_factor(multipole_ell))(
+            mu_model
+        )
         powercy = bin_3d_to_cy(
-            power3d,
+            power3d * multipole_factor,
             self.k_perp,
             kperpbins,
             weights=kcyweights,
