@@ -8,6 +8,13 @@ from halomod import TracerHaloModel
 from meer21cm import Specification
 
 
+def test_legendre_polynomial_with_factor():
+    coeff = legendre_polynomial_with_factor(2)
+    assert np.allclose(coeff, np.array([3 / 2, 0, -1 / 2]) * 5)
+    poly = legendre_polynomial_with_factor(2, return_coeff=False)
+    assert np.allclose(poly.c, np.array([3 / 2, 0, -1 / 2]) * 5)
+
+
 def test_get_nd_slicer():
     slicer = get_nd_slicer(3)
     assert len(slicer) == 3
