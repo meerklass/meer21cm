@@ -21,7 +21,6 @@ from meer21cm.util import (
     create_wcs,
 )
 from astropy import constants, units
-import astropy
 from meer21cm.io import (
     cal_freq,
     read_map,
@@ -31,31 +30,15 @@ from meer21cm.io import (
 from astropy.wcs.utils import proj_plane_pixel_area
 from itertools import chain
 import meer21cm
-from scipy.interpolate import interp1d
 from meer21cm.telescope import *
 import meer21cm.telescope as telescope
-from astropy.cosmology import w0waCDM, Planck18
-import inspect
 import logging
 import numbers
+import inspect
 
 logger = logging.getLogger(__name__)
 
 default_data_dir = meer21cm.__file__.rsplit("/", 1)[0] + "/data/"
-
-
-default_cosmo = w0waCDM(
-    H0=Planck18.h * 100,
-    Om0=Planck18.Om0,
-    Ode0=Planck18.Ode0,
-    w0=-1.0,
-    wa=0.0,
-    Tcmb0=Planck18.Tcmb0,
-    Neff=Planck18.Neff,
-    m_nu=Planck18.m_nu,
-    Ob0=Planck18.Ob0,
-    name="Planck18",
-)
 
 default_nu = {
     "meerkat_L": cal_freq(np.arange(4096) + 1, band="L"),
@@ -80,9 +63,6 @@ class Specification:
         The number of pixels in the first axis of the map data.
     num_pix_y: int, default None
         The number of pixels in the second axis of the map data.
-    cosmo: :py:class:`astropy.cosmology.Cosmology` or str, default :py:class:`astropy.cosmology.Planck18`.
-        The cosmology object.
-        It is either a :py:class:`astropy.cosmology.Cosmology` object or a string which returns predefined cosmology, for example `Planck18`.
     map_has_sampling: np.ndarray, default None
         A binary window for whether a pixel has been sampled.
     sigma_beam_ch: np.ndarray, default None
@@ -146,7 +126,6 @@ class Specification:
         wproj=None,
         num_pix_x=None,
         num_pix_y=None,
-        cosmo=default_cosmo,
         map_has_sampling=None,
         sigma_beam_ch=None,
         beam_unit=units.deg,
@@ -202,8 +181,6 @@ class Specification:
                         "_" + dep_attr,
                     ],
                 )
-        self._cosmo = cosmo
-        self.cosmo = cosmo
         self.map_file = map_file
         self.counts_file = counts_file
         self.pickle_file = pickle_file
@@ -369,19 +346,6 @@ class Specification:
             self.clean_cache(self.beam_dep_attr)
 
     @property
-    @tagging("cosmo", "beam")
-    def sigma_beam_ch_in_mpc(self):
-        """
-        The input beam size parameter in Mpc in each channel
-        """
-        if self._sigma_beam_ch_in_mpc is None and self.sigma_beam_ch is not None:
-            self._sigma_beam_ch_in_mpc = (
-                self.cosmo.comoving_distance(self.z_ch).to("Mpc").value
-                * (self.sigma_beam_ch * self.beam_unit).to("rad").value
-            )
-        return self._sigma_beam_ch_in_mpc
-
-    @property
     def sigma_beam_in_mpc(self):
         """
         The channel averaged beam size in Mpc
@@ -418,22 +382,6 @@ class Specification:
         The effective centre redshift of the frequency range
         """
         return self.z_ch.mean()
-
-    @property
-    def cosmo(self):
-        """
-        The cosmology model.
-        """
-        return self._cosmo
-
-    @cosmo.setter
-    def cosmo(self, value):
-        cosmo = value
-        if isinstance(value, str):
-            cosmo = getattr(astropy.cosmology, value)
-        self._cosmo = cosmo
-        # cosmology changed, clear cache
-        self.clean_cache(self.cosmo_dep_attr)
 
     @property
     def dvdf_ch(self):
@@ -483,27 +431,6 @@ class Specification:
         angular resolution of the map pixel in deg
         """
         return np.sqrt(self.pixel_area)
-
-    @property
-    def pix_resol_in_mpc(self):
-        """
-        angular resolution of the map pixel in Mpc
-        """
-        return (
-            np.sqrt(self.pixel_area)
-            * np.pi
-            / 180
-            * self.cosmo.comoving_distance(self.z).to("Mpc").value
-        )
-
-    @property
-    def los_resol_in_mpc(self):
-        """
-        effective frequency resolution in Mpc
-        """
-        comov_dist = self.cosmo.comoving_distance(self.z_ch).value
-        los_resol_in_mpc = (comov_dist.max() - comov_dist.min()) / len(self.nu)
-        return los_resol_in_mpc
 
     @property
     def data(self):
@@ -866,57 +793,6 @@ class Specification:
         )
         self.data = data
         self.w_HI = w_HI
-
-    @property
-    @tagging("cosmo")
-    def z_as_func_of_comov_dist(self):
-        """
-        Returns a function that returns the redshift
-        for input comoving distance.
-        """
-        if self._z_as_func_of_comov_dist is None:
-            self.get_z_as_func_of_comov_dist()
-        return self._z_as_func_of_comov_dist
-
-    def get_z_as_func_of_comov_dist(self):
-        """
-        Calculate an array of comoving distances with redshifts,
-        and construct a function that returns the redshift for input comoving distance.
-        The function is saved into the class attribute `z_as_func_of_comov_dist`.
-        """
-        zarr = np.linspace(0, self.z_interp_max, 20001)
-        xarr = self.cosmo.comoving_distance(zarr).value
-        func = interp1d(xarr, zarr)
-        self._z_as_func_of_comov_dist = func
-
-    @property
-    def survey_volume(self, i=None):
-        """
-        Total survey volume in Mpc^3.
-
-        Note that, the sampling along the sky map is assumed to be the same for all frequency channels,
-        and the code by default uses the maximum sampling channel to calculate the area.
-        This is desired, as the survey lightcone can contain holes inside, which is considered part of the volume.
-
-        Parameters
-        ----------
-        i: int, default None
-            The index of the frequency channel to calculate the survey volume.
-            Default is None, which uses the maximum sampling channel.
-        """
-        if i is None:
-            i = self.maximum_sampling_channel
-        nu_ext = center_to_edges(self.nu)
-        z_ext = freq_to_redshift(nu_ext)
-        volume = (
-            (self.W_HI[:, :, i].sum() * self.pixel_area * (np.pi / 180) ** 2)
-            / 3
-            * (
-                self.cosmo.comoving_distance(z_ext.max()) ** 3
-                - self.cosmo.comoving_distance(z_ext.min()) ** 3
-            ).value
-        )
-        return volume
 
     @property
     def maximum_sampling_channel(self):
