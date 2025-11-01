@@ -38,11 +38,11 @@ def test_volume():
 
 def test_cosmo():
     spec = Specification()
-    assert spec.h == Planck18.h
+    assert spec.cosmo.h == Planck18.h
     # an update should properly update the internal functions as well
     spec.cosmo = "Planck15"
     assert spec.cosmo is Planck15
-    assert spec.h == Planck15.h
+    assert spec.cosmo.h == Planck15.h
 
 
 def test_update_pars():
@@ -50,7 +50,7 @@ def test_update_pars():
     # test string input
     spec.cosmo = "Planck15"
     assert spec.cosmo is Planck15
-    assert spec.h == Planck15.h
+    assert spec.cosmo.h == Planck15.h
     # test direct input
     spec.cosmo = Planck15
     # test nu
@@ -260,7 +260,7 @@ def test_z_interp():
     )
     func = ps.z_as_func_of_comov_dist
     z_rand = np.random.uniform(ps.z_ch.min(), ps.z_ch.max(), size=100)
-    assert np.allclose(func(ps.comoving_distance(z_rand).value), z_rand)
+    assert np.allclose(func(ps.cosmo.comoving_distance(z_rand).value), z_rand)
 
 
 def test_trim_gal():

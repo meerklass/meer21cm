@@ -376,7 +376,7 @@ class Specification:
         """
         if self._sigma_beam_ch_in_mpc is None and self.sigma_beam_ch is not None:
             self._sigma_beam_ch_in_mpc = (
-                self.comoving_distance(self.z_ch).to("Mpc").value
+                self.cosmo.comoving_distance(self.z_ch).to("Mpc").value
                 * (self.sigma_beam_ch * self.beam_unit).to("rad").value
             )
         return self._sigma_beam_ch_in_mpc
@@ -420,13 +420,6 @@ class Specification:
         return self.z_ch.mean()
 
     @property
-    def expfactor(self):
-        """
-        The expansion factor
-        """
-        return 1 / (1 + self.z)
-
-    @property
     def cosmo(self):
         """
         The cosmology model.
@@ -439,9 +432,6 @@ class Specification:
         if isinstance(value, str):
             cosmo = getattr(astropy.cosmology, value)
         self._cosmo = cosmo
-        for key in cosmo.__dir__():
-            if key[0] != "_":
-                self.__dict__.update({key: getattr(cosmo, key)})
         # cosmology changed, clear cache
         self.clean_cache(self.cosmo_dep_attr)
 
@@ -503,7 +493,7 @@ class Specification:
             np.sqrt(self.pixel_area)
             * np.pi
             / 180
-            * self.comoving_distance(self.z).to("Mpc").value
+            * self.cosmo.comoving_distance(self.z).to("Mpc").value
         )
 
     @property
@@ -511,7 +501,7 @@ class Specification:
         """
         effective frequency resolution in Mpc
         """
-        comov_dist = self.comoving_distance(self.z_ch).value
+        comov_dist = self.cosmo.comoving_distance(self.z_ch).value
         los_resol_in_mpc = (comov_dist.max() - comov_dist.min()) / len(self.nu)
         return los_resol_in_mpc
 
@@ -895,7 +885,7 @@ class Specification:
         The function is saved into the class attribute `z_as_func_of_comov_dist`.
         """
         zarr = np.linspace(0, self.z_interp_max, 20001)
-        xarr = self.comoving_distance(zarr).value
+        xarr = self.cosmo.comoving_distance(zarr).value
         func = interp1d(xarr, zarr)
         self._z_as_func_of_comov_dist = func
 
@@ -922,8 +912,8 @@ class Specification:
             (self.W_HI[:, :, i].sum() * self.pixel_area * (np.pi / 180) ** 2)
             / 3
             * (
-                self.comoving_distance(z_ext.max()) ** 3
-                - self.comoving_distance(z_ext.min()) ** 3
+                self.cosmo.comoving_distance(z_ext.max()) ** 3
+                - self.cosmo.comoving_distance(z_ext.min()) ** 3
             ).value
         )
         return volume
