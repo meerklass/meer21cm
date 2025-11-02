@@ -158,8 +158,8 @@ class MockSimulation(PowerSpectrum):
                 (self.W_HI[:, :, 0].sum() * self.pixel_area * (np.pi / 180) ** 2)
                 / 3
                 * (
-                    self.comoving_distance(z_ext[:-1]) ** 3
-                    - self.comoving_distance(z_ext[1:]) ** 3
+                    self.astropy_cosmo_true.comoving_distance(z_ext[:-1]) ** 3
+                    - self.astropy_cosmo_true.comoving_distance(z_ext[1:]) ** 3
                 ).value
             )
             dn_channel = self.discrete_source_dndz(self.z_ch)
@@ -489,7 +489,7 @@ class MockSimulation(PowerSpectrum):
         y_k_dot_k = np.array(
             [(y_k[i] * self.k_vec[i][slicer[i]]) for i in range(3)]
         ).sum(axis=0)
-        delta_rsd_k = 1j * self.f_growth * y_k_dot_k
+        delta_rsd_k = 1j * self.f_growth_true * y_k_dot_k
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
             f"setting _mock_kaiser_field_k_{field} "
@@ -799,7 +799,7 @@ class MockSimulation(PowerSpectrum):
         if self.flat_sky:
             self._mock_tracer_comov_dist = (
                 self.mock_tracer_position_in_box[:, -1]
-                + self.comoving_distance(self.z_ch.min()).value
+                + self.astropy_cosmo_true.comoving_distance(self.z_ch.min()).value
             )
             z_mock_tracer = self.z_as_func_of_comov_dist(self._mock_tracer_comov_dist)
             pos_indx_1 = (
@@ -1011,7 +1011,7 @@ class HIGalaxySimulation(MockSimulation):
         self.tf_zero = tf_zero
         if halo_model is None:
             halo_model = THM(
-                cosmo_model=self.cosmo,
+                cosmo_model=self.astropy_cosmo_true,
                 z=self.z,
                 hod_model=Obuljen18,
             )
@@ -1213,7 +1213,7 @@ class HIGalaxySimulation(MockSimulation):
             self.nu,
             self.tf_slope,
             self.tf_zero,
-            cosmo=self.cosmo,
+            cosmo=self.astropy_cosmo_true,
             seed=self.seed,
             no_vel=self.no_vel,
             num_ch_ext_on_each_side=self.num_ch_ext_on_each_side,

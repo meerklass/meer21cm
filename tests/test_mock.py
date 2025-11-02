@@ -64,7 +64,7 @@ def test_matter_mock(test_W, density):
         survey="meerklass_2021",
         band="L",
         density=density,
-        cosmo="WMAP1",
+        true_cosmology="WMAP1",
         k1dbins=k1dedges,
         model_k_from_field=True,
         upgrade_sampling_from_gridding=True,
@@ -202,14 +202,14 @@ def test_hi_mass_to_flux():
         himass_g,
         mock.z_mock_tracer,
         mock.nu,
-        cosmo=mock.cosmo,
+        cosmo=mock.astropy_cosmo_true,
         seed=mock.seed,
     )
     # approximate from 1705.04210
     approx_mass = (
         hifluxd_ch.sum(0)
         * mock.freq_resol
-        * mock.luminosity_distance(mock.z_mock_tracer).value ** 2
+        * mock.astropy_cosmo_true.luminosity_distance(mock.z_mock_tracer).value ** 2
         * 49.7
     )
     ratio = approx_mass / 10**himass_g
@@ -222,7 +222,7 @@ def test_hi_mass_to_flux():
         himass_g,
         mock.z_mock_tracer,
         mock.nu,
-        cosmo=mock.cosmo,
+        cosmo=mock.astropy_cosmo_true,
         seed=mock.seed,
         tf_slope=3.66,
         tf_zero=1.6,
@@ -232,7 +232,7 @@ def test_hi_mass_to_flux():
     approx_mass = (
         hifluxd_ch.sum(0)
         * mock.freq_resol
-        * mock.luminosity_distance(mock.z_mock_tracer).value ** 2
+        * mock.astropy_cosmo_true.luminosity_distance(mock.z_mock_tracer).value ** 2
         * 49.7
     )
     ratio = approx_mass / 10**himass_g
@@ -272,7 +272,7 @@ def test_mock_hi_profile():
     approx_mass = (
         hifluxd_ch.sum(0)
         * hisim.freq_resol
-        * hisim.luminosity_distance(hisim.z_mock_tracer).value ** 2
+        * hisim.astropy_cosmo_true.luminosity_distance(hisim.z_mock_tracer).value ** 2
         * 49.7
     )
     ratio = approx_mass / 10**hisim.hi_mass_mock_tracer
@@ -296,7 +296,7 @@ def test_mock_hi_profile():
     approx_mass = (
         hifluxd_ch.sum(0)
         * hisim.freq_resol
-        * hisim.luminosity_distance(hisim.z_mock_tracer).value ** 2
+        * hisim.astropy_cosmo_true.luminosity_distance(hisim.z_mock_tracer).value ** 2
         * 49.7
     )
     # scaling should be exact

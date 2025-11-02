@@ -3151,8 +3151,8 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             gal_pos_in_box[:, 0] = pos_indx_1 / self.num_pix_x * self.box_len[0]
             gal_pos_in_box[:, 1] = pos_indx_2 / self.num_pix_y * self.box_len[1]
             gal_pos_in_box[:, 2] = (
-                self.comoving_distance(z_gal).value
-                - self.comoving_distance(self.z_ch.min()).value
+                self.astropy_cosmo_fiducial.comoving_distance(z_gal).value
+                - self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.min()).value
             )
         else:
             (_, _, _, _, _, _, _, gal_pos_arr) = minimum_enclosing_box_of_lightcone(
