@@ -97,6 +97,8 @@ def test_cache():
         survey="meerklass_2021",
         band="L",
     )
+    # trigger f_growth
+    assert np.allclose(coscal.f_growth_fiducial, coscal.f_growth_true)
     test1 = coscal.matter_power_spectrum_fnc(1)
     coscal.nu = [f_21, f_21]
     coscal.nu
@@ -110,6 +112,8 @@ def test_cache():
     coscal.true_cosmology = "WMAP1"
     test3 = coscal.matter_power_spectrum_fnc(1)
     assert test3 != test2
+    # fiducial should remain the same
+    assert not np.allclose(coscal.f_growth_fiducial, coscal.f_growth_true)
 
 
 @pytest.mark.parametrize("backend", [("camb"), ("bacco")])

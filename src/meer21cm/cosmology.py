@@ -565,6 +565,24 @@ class CosmologyCalculator(Specification):
         return self._cospar_true
 
     @property
+    def f_growth_true(self):
+        """
+        The growth factor at ``self.expfactor`` for the true (fitted) cosmology.
+        """
+        if "f_growth" not in self.cospar_true.__dict__:
+            getattr(self.cospar_true, f"get_matter_power_spectrum_{self.backend}")()
+        return self.cospar_true.f_growth
+
+    @property
+    def f_growth_fiducial(self):
+        """
+        The growth factor at ``self.expfactor`` for the fiducial cosmology.
+        """
+        if "f_growth" not in self.cospar_fiducial.__dict__:
+            getattr(self.cospar_fiducial, f"get_matter_power_spectrum_{self.backend}")()
+        return self.cospar_fiducial.f_growth
+
+    @property
     @tagging("nu")
     def expfactor(self):
         """
