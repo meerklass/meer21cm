@@ -52,6 +52,13 @@ def test_rsd_from_field(parallel_plane):
                 parallel_plane=parallel_plane,
                 rsd_from_field=False,
             )
+        with pytest.warns(UserWarning):
+            mock = MockSimulation(
+                survey="meerklass_2021",
+                band="L",
+                true_cosmology="WMAP1",
+                fiducial_cosmology="Planck18",
+            )
 
 
 @pytest.mark.parametrize("density", [("lognormal"), ("gaussian"), ("test")])

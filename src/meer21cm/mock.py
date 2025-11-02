@@ -124,6 +124,11 @@ class MockSimulation(PowerSpectrum):
         self.discrete_source_dndz = discrete_source_dndz
         self.mock_amp_1 = mock_amp_1
         self.mock_amp_2 = mock_amp_2
+        if self.true_cosmology != self.fiducial_cosmology:
+            warnings.warn(
+                "true_cosmology != fiducial_cosmology, "
+                "box dimensions and model power will be inconsistent"
+            )
 
     @property
     def tot_num_source_in_box(self):
