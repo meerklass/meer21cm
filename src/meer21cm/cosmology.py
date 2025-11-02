@@ -791,15 +791,19 @@ class CosmologyCalculator(Specification):
     def get_matter_power_spectrum(self):
         """
         Calculate the matter power spectrum, interpolate it, and save it into the class attribute `matter_power_spectrum_fnc`.
+
+        Note that, Alcock–Paczynski effect is included here in the power spectrum,
+        and therefore for all model power spectra that depends on the matter power spectrum.
         """
         cosmo = self.astropy_cosmo_true
         kh = self.cospar_true.karr_in_h
         pk = getattr(self.cospar_true, f"get_matter_power_spectrum_{self.backend}")()
         karr = kh * cosmo.h
         pkarr = pk / cosmo.h**3
+        AP_amp = 1 / (self.alpha_iso**3)
         matter_power_func = interp1d(
             karr,
-            pkarr,
+            pkarr * AP_amp,
             bounds_error=False,
             fill_value="extrapolate",
         )
