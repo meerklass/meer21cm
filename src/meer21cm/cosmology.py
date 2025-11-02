@@ -12,7 +12,13 @@ import camb
 import astropy
 from meer21cm import Specification
 from scipy.interpolate import interp1d
-from meer21cm.util import omega_hi_to_average_temp, tagging, HiddenPrints
+from meer21cm.util import (
+    omega_hi_to_average_temp,
+    tagging,
+    HiddenPrints,
+    center_to_edges,
+    freq_to_redshift,
+)
 from astropy.cosmology import Planck18, w0waCDM
 from copy import deepcopy
 import inspect
@@ -34,34 +40,27 @@ As_set = {
 get_ns_from_astropy = lambda x: getattr(astropy.cosmology, x).meta["n"]
 
 
-def extract_astropy_cosmo_set(value):
+def get_cosmo_dict(cosmo: str or astropy.cosmology.Cosmology):
     """
-    Extract predefined astropy :py:class:`astropy.cosmology.FlatLambdaCDM` cosmology and turn it into a :py:class:`astropy.cosmology.w0waCDM` object.
-
-    Parameters
-    ----------
-    value: str
-        The name of the cosmology, e.g. Planck18
-
-    Returns
-    -------
-    cosmo: :class:`astropy.cosmology.w0waCDM`
-        The output cosmology.
+    Get the cosmology dictionary from the input cosmology.
     """
-    self = getattr(astropy.cosmology, value)
-    cosmo = w0waCDM(
-        H0=self.H0,
-        Om0=self.Om0,
-        Ode0=self.Ode0,
-        w0=-1.0,
-        wa=0.0,
-        Tcmb0=self.Tcmb0,
-        Neff=self.Neff,
-        m_nu=self.m_nu,
-        Ob0=self.Ob0,
-        name=value,
+    if isinstance(cosmo, str):
+        cosmo = getattr(astropy.cosmology, cosmo)
+    return dict(
+        tau=0.0561,
+        Neff=3.046,
+        omega_cold=cosmo.Om0,
+        As=As_set[cosmo.name],
+        omega_baryon=cosmo.Ob0,
+        ns=cosmo.meta["n"],
+        h=cosmo.h,
+        neutrino_mass=cosmo.m_nu.sum().value,
+        w0=cosmo.w0 if "w0" in cosmo.__dir__() else -1.0,
+        wa=cosmo.wa if "wa" in cosmo.__dir__() else 0.0,
     )
-    return cosmo
+
+
+fiducial_dict = get_cosmo_dict("Planck18")
 
 
 class CosmologyParameters:
@@ -131,58 +130,59 @@ class CosmologyParameters:
         ps_type="linear",
         kmin=1e-3,
         kmax=3.0,
+        num_kpoints=200,
+        expfactor=1.0,
+        cold=True,
+        omega_de=None,
+        tau=0.0561,
+        Neff=3.046,
         omega_cold=Planck18.Om0,
         As=np.exp(3.047) / 1e10,
-        # sigma8_cold=Planck18.meta['sigma8'],
         omega_baryon=Planck18.Ob0,
         ns=Planck18.meta["n"],
         h=Planck18.h,
         neutrino_mass=Planck18.m_nu.sum().value,
         w0=-1.0,
         wa=0.0,
-        expfactor=1.0,
-        cold=True,
-        num_kpoints=200,
-        omega_de=None,
-        tau=0.0561,
-        Neff=3.046,
-        **params,
     ):
         self.ps_type = ps_type
         self.kmin = kmin
         self.kmax = kmax
-        self._omega_cold = omega_cold
-        # self.sigma8_cold = sigma8_cold
+        self.omega_cold = omega_cold
         self.As = As
-        self._omega_baryon = omega_baryon
+        self.omega_baryon = omega_baryon
         self.ns = ns
-        self._h = h
-        self._neutrino_mass = neutrino_mass
-        self._w0 = w0
-        self._wa = wa
-        self._expfactor = expfactor
+        self.h = h
+        self.neutrino_mass = neutrino_mass
+        self.w0 = w0
+        self.wa = wa
+        self.expfactor = expfactor
         self.cold = cold
         # hard coded no curvature for now
         self.Ok0 = 0
         # CMB related, not needed
         self.Neff = Neff
-        # self.Neff = 2.0
         self.Tcmb0 = Planck18.Tcmb0
         self.tau = tau
         self.camb_dark_energy_model = "ppf"
         self.num_kpoints = num_kpoints
         self.karr_in_h = np.geomspace(
-            self.kmin / self._h, self.kmax / self._h, self.num_kpoints
+            self.kmin / self.h, self.kmax / self.h, self.num_kpoints
         )
-        self._omega_de = omega_de
         self.omega_de = omega_de
 
     @property
-    def expfactor(self):
-        r"""
-        The expansion factor which is calculated as :math:`a = 1 / (1 + z)`.
+    def omega_de(self):
         """
-        return self._expfactor
+        The dark energy density fraction at z=0.
+        """
+        return self._omega_de
+
+    @omega_de.setter
+    def omega_de(self, value):
+        if value is None:
+            value = self.get_derived_Ode()
+        self._omega_de = value
 
     def set_astropy_cosmo(self, name="new"):
         """
@@ -191,13 +191,13 @@ class CosmologyParameters:
         calculated using ``camb`` if not put in.
         """
         # there is some strange overriding issue from astropy
-        w0 = deepcopy(self._w0)
-        wa = deepcopy(self._wa)
-        h = deepcopy(self._h)
-        omega_cold = deepcopy(self._omega_cold)
+        w0 = deepcopy(self.w0)
+        wa = deepcopy(self.wa)
+        h = deepcopy(self.h)
+        omega_cold = deepcopy(self.omega_cold)
         omega_de = deepcopy(self.omega_de)
-        m_nu = deepcopy(self._neutrino_mass)
-        omega_baryon = deepcopy(self._omega_baryon)
+        m_nu = deepcopy(self.neutrino_mass)
+        omega_baryon = deepcopy(self.omega_baryon)
         cosmo = w0waCDM(
             H0=h * 100,
             Om0=omega_cold,
@@ -218,11 +218,11 @@ class CosmologyParameters:
         """
         pars = camb.CAMBparams()
         pars.set_cosmology(
-            H0=self._h * 100,
-            ombh2=self._omega_baryon * self._h**2,
-            omch2=(self._omega_cold - self._omega_baryon) * self._h**2,
+            H0=self.h * 100,
+            ombh2=self.omega_baryon * self.h**2,
+            omch2=(self.omega_cold - self.omega_baryon) * self.h**2,
             omk=self.Ok0,
-            mnu=self._neutrino_mass,
+            mnu=self.neutrino_mass,
             # these should not affect matter ps?
             nnu=self.Neff,
             TCMB=self.Tcmb0.value,
@@ -236,13 +236,13 @@ class CosmologyParameters:
             instr = "both"
         pars.NonLinear = getattr(camb.model, "NonLinear_" + instr)
         pars.set_dark_energy(
-            w=self._w0, wa=self._wa, dark_energy_model=self.camb_dark_energy_model
+            w=self.w0, wa=self.wa, dark_energy_model=self.camb_dark_energy_model
         )
         # suppress the output of camb
         with HiddenPrints():
             pars.set_matter_power(
                 redshifts=np.unique([0.0, 1 / self.expfactor - 1]),
-                kmax=self.kmax / self._h,
+                kmax=self.kmax / self.h,
             )
         return pars
 
@@ -266,15 +266,15 @@ class CosmologyParameters:
         matter power.
         """
         params = {
-            "omega_cold": self._omega_cold,
+            "omega_cold": self.omega_cold,
             #'sigma8_cold'   :  self.sigma8_cold,
             "A_s": self.As,
-            "omega_baryon": self._omega_baryon,
+            "omega_baryon": self.omega_baryon,
             "ns": self.ns,
-            "hubble": self._h,
-            "neutrino_mass": self._neutrino_mass,
-            "w0": self._w0,
-            "wa": self._wa,
+            "hubble": self.h,
+            "neutrino_mass": self.neutrino_mass,
+            "w0": self.w0,
+            "wa": self.wa,
             "expfactor": self.expfactor,
         }
         return params
@@ -291,8 +291,8 @@ class CosmologyParameters:
         self.f_growth = results.get_fsigma8()[0] / results.get_sigma8()[0]
         self.sigma_8_z = results.get_sigma8()[0]
         kh, z, pk_camb = results.get_matter_power_spectrum(
-            minkh=self.kmin / self._h,
-            maxkh=self.kmax / self._h,
+            minkh=self.kmin / self.h,
+            maxkh=self.kmax / self.h,
             npoints=self.num_kpoints,
             var1=7 - 5 * int(self.cold),
             var2=7 - 5 * int(self.cold),
@@ -312,7 +312,7 @@ class CosmologyParameters:
         )
         self.sigma_8_0 = emulator.get_sigma8(cold=True, **self.get_bacco_pars())
         # an approximate fitting formulae for growth
-        wz1 = self._w0 + 0.5 * self._wa
+        wz1 = self.w0 + 0.5 * self.wa
         gamma = 0.55 + (1 + wz1) * (0.05 * float(wz1 >= -1) + 0.02 * float(wz1 < -1))
         self.get_derived_Ode()
         cosmo = self.set_astropy_cosmo()
@@ -320,11 +320,11 @@ class CosmologyParameters:
         return baccopk
 
 
-class CosmologyCalculator(Specification, CosmologyParameters):
+class CosmologyCalculator(Specification):
     """
     The class for storing the cosmological model used for calculation.
 
-    The underlying cosmological model is defined via :class:`astropy.cosmology.LambdaCDM` with all the background
+    The underlying cosmological model is defined via :class:`astropy.cosmology.w0waCDM` with all the background
     properties calculated via ``astropy``.
 
     The matter density fluctuation is calculated using ``camb`` or ``baccoemu`` based on the input `backend`.
@@ -339,32 +339,230 @@ class CosmologyCalculator(Specification, CosmologyParameters):
         over the critical density of the Universe at z=0.
         If a float is provided, it will be used as the HI density at all redshifts.
         If an array is provided, it will be used as the HI density at each frequency channel.
+    fiducial_cosmology: dict, default Planck18
+        The fiducial cosmology parameters.
+        Fiducial cosmology should be used to perform the power spectrum
+        estimation, such as transforming sky coordinates to comoving coordinates.
+    true_cosmology: dict, default Planck18
+        The true cosmology parameters.
+        True cosmology should be varied during parameter inference.
+    ps_type: str, default "linear"
+        The type of the matter power spectrum.
+    kmin: float, default 1e-3
+        The minimum k in Mpc^-1 for calculating matter power. k below kmin will be extrapolated.
+    kmax: float, default 3.0
+        The maximum k in Mpc^-1 for calculating matter power. k above kmax will be extrapolated.
+    num_kpoints: int, default 200
+        The number of k points to compute the interpolation of the matter power spectrum.
+    cold: bool, default True
+        Whether to use the cold matter power spectrum.
+        If True, the matter power spectrum refers to CDM+Baryon.
+        If False, the matter power spectrum refers to all matter including massive neutrinos.
     **params: dict
-        Additional parameters to be passed to the base class :class:`CosmologyParameters`
-        and :class:`meer21cm.dataanalysis.Specification`.
+        Additional parameters to be passed to the base class :class:`Specification`
     """
 
     def __init__(
         self,
         backend: str = "camb",
         omega_hi: np.ndarray | float = 5e-4,
-        **params: dict,
+        fiducial_cosmology: str | dict = fiducial_dict,
+        true_cosmology: str | dict = fiducial_dict,
+        ps_type: str = "linear",
+        kmin: float = 1e-3,
+        kmax: float = 3.0,
+        num_kpoints: int = 200,
+        cold: bool = True,
+        **params,
     ):
-        # super().__init__(**params)
-        self._omega_de = None
-        self._expfactor = None
         Specification.__init__(self, **params)
-
-        # override redshift and cosmology
-        CosmologyParameters.__init__(self, expfactor=self.expfactor, **params)
+        self._expfactor = None
         self.backend = backend
-        # reset background cosmology based on input
-        if "cosmo" not in params.keys():
-            self.cosmo = self.set_astropy_cosmo()
-        else:
-            self.cosmo = params["cosmo"]
+        self.ps_type = ps_type
+        self.kmin = kmin
+        self.kmax = kmax
+        self.num_kpoints = num_kpoints
+        self.cold = cold
+        self.fiducial_cosmology = fiducial_cosmology
+        self.true_cosmology = true_cosmology
         self._matter_power_spectrum_fnc = None
         self.omega_hi = omega_hi
+
+    @property
+    def omega_cold(self):
+        """
+        The cold matter density parameter for the true (fitted) cosmology.
+        """
+        return self.cospar_true.omega_cold
+
+    @omega_cold.setter
+    def omega_cold(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["omega_cold"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def As(self):
+        """
+        The amplitude of the primordial power spectrum for the true (fitted) cosmology.
+        Note it does not update fiducial cosmology for power spectrum estimation,
+        and only used for model fitting.
+        """
+        return self.cospar_true.As
+
+    @As.setter
+    def As(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["As"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def omega_baryon(self):
+        """
+        The baryon matter density parameter for the true (fitted) cosmology.
+        """
+        return self.cospar_true.omega_baryon
+
+    @omega_baryon.setter
+    def omega_baryon(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["omega_baryon"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def h(self):
+        """
+        The Hubble constant for the true (fitted) cosmology.
+        """
+        return self.cospar_true.h
+
+    @h.setter
+    def h(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["h"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def neutrino_mass(self):
+        """
+        The neutrino mass for the true (fitted) cosmology.
+        """
+        return self.cospar_true.neutrino_mass
+
+    @neutrino_mass.setter
+    def neutrino_mass(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["neutrino_mass"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def w0(self):
+        """
+        The dark energy equation of state parameter for the true (fitted) cosmology.
+        """
+        return self.cospar_true.w0
+
+    @w0.setter
+    def w0(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["w0"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def wa(self):
+        """
+        The dark energy equation of state parameter for the true (fitted) cosmology.
+        """
+        return self.cospar_true.wa
+
+    @wa.setter
+    def wa(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["wa"] = value
+        self.true_cosmology = true_cosmology
+
+    @property
+    def ns(self):
+        """
+        The primordial power spectrum spectral index for the true (fitted) cosmology.
+        """
+        return self.cospar_true.ns
+
+    @ns.setter
+    def ns(self, value: float):
+        true_cosmology = self.true_cosmology.copy()
+        true_cosmology["ns"] = value
+        self.true_cosmology = true_cosmology
+
+    def get_cospar(self, cosmology: dict):
+        """
+        Generate a :class:`CosmologyParameters` object from the input cosmology.
+
+        Parameters
+        ----------
+        cosmology: dict
+            The cosmology parameters.
+
+        Returns
+        -------
+        cospar: :class:`CosmologyParameters`
+            The cosmology parameters object.
+        """
+        return CosmologyParameters(
+            ps_type=self.ps_type,
+            kmin=self.kmin,
+            kmax=self.kmax,
+            num_kpoints=self.num_kpoints,
+            expfactor=self.expfactor,
+            cold=self.cold,
+            **cosmology,
+        )
+
+    @property
+    def fiducial_cosmology(self):
+        return self._fiducial_cosmology
+
+    @fiducial_cosmology.setter
+    def fiducial_cosmology(self, value: dict | str):
+        if isinstance(value, str):
+            value = get_cosmo_dict(value)
+        self._fiducial_cosmology = value
+        self._cospar_fiducial = self.get_cospar(value)
+        self.astropy_cosmo_fiducial = self.cospar_fiducial.set_astropy_cosmo()
+        logger.debug(
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting fiducial_cosmology"
+        )
+        self.clean_cache(self.cosmo_fid_dep_attr)
+
+    @property
+    def true_cosmology(self):
+        return self._true_cosmology
+
+    @true_cosmology.setter
+    def true_cosmology(self, value: dict | str):
+        if isinstance(value, str):
+            value = get_cosmo_dict(value)
+        self._true_cosmology = value
+        self._cospar_true = self.get_cospar(value)
+        self.astropy_cosmo_true = self.cospar_true.set_astropy_cosmo()
+        logger.debug(
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting true_cosmology"
+        )
+        self.clean_cache(self.cosmo_model_dep_attr)
+
+    @property
+    @tagging("nu")
+    def cospar_fiducial(self):
+        if self._cospar_fiducial is None:
+            self._cospar_fiducial = self.get_cospar(self.fiducial_cosmology)
+        return self._cospar_fiducial
+
+    @property
+    @tagging("nu")
+    def cospar_true(self):
+        if self._cospar_true is None:
+            self._cospar_true = self.get_cospar(self.true_cosmology)
+        return self._cospar_true
 
     @property
     @tagging("nu")
@@ -387,9 +585,13 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     def ps_type(self, value):
         self._ps_type = value
         logger.debug(
-            f"cleaning cache of {self.cosmo_dep_attr} due to resetting ps_type"
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting ps_type"
         )
-        self.clean_cache(self.cosmo_dep_attr)
+        self.clean_cache(self.cosmo_fid_dep_attr)
+        logger.debug(
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting ps_type"
+        )
+        self.clean_cache(self.cosmo_model_dep_attr)
 
     @property
     def kmin(self):
@@ -401,8 +603,14 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     @kmin.setter
     def kmin(self, value):
         self._kmin = value
-        logger.debug(f"cleaning cache of {self.cosmo_dep_attr} due to resetting kmin")
-        self.clean_cache(self.cosmo_dep_attr)
+        logger.debug(
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting kmin"
+        )
+        self.clean_cache(self.cosmo_fid_dep_attr)
+        logger.debug(
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting kmin"
+        )
+        self.clean_cache(self.cosmo_model_dep_attr)
 
     @property
     def kmax(self):
@@ -414,138 +622,33 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     @kmax.setter
     def kmax(self, value):
         self._kmax = value
-        logger.debug(f"cleaning cache of {self.cosmo_dep_attr} due to resetting kmax")
-        self.clean_cache(self.cosmo_dep_attr)
-
-    @property
-    def omega_cold(self):
-        """
-        The density fraction of CDM+Baryon at z=0.
-        """
-        return self._omega_cold
-
-    @omega_cold.setter
-    def omega_cold(self, value):
-        self._omega_cold = value
-        # update background cosmology, clear cache triggered automatically
         logger.debug(
-            f"recalculating Ode and update background cosmology due to resetting omega_cold"
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting kmax"
         )
-        self.get_derived_Ode()
-        cosmo = self.set_astropy_cosmo()
-        self.cosmo = cosmo.clone(Om0=value)
-
-    @property
-    def As(self):
-        """
-        The amplitude of the initial power spectrum
-        """
-        return self._As
-
-    @As.setter
-    def As(self, value):
-        self._As = value
-        logger.debug(f"cleaning cache of {self.cosmo_dep_attr} due to resetting As")
-        self.clean_cache(self.cosmo_dep_attr)
-
-    @property
-    def omega_baryon(self):
-        """
-        The energy fraction of the baryons at current z=0.
-        """
-        return self._omega_baryon
-
-    @omega_baryon.setter
-    def omega_baryon(self, value):
-        self._omega_baryon = value
+        self.clean_cache(self.cosmo_fid_dep_attr)
         logger.debug(
-            f"recalculating Ode and update background cosmology due to resetting omega_baryon"
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting kmax"
         )
-        self.get_derived_Ode()
-        cosmo = self.set_astropy_cosmo()
-        self.cosmo = cosmo.clone(Ob0=value)
+        self.clean_cache(self.cosmo_model_dep_attr)
 
     @property
-    def ns(self):
+    def num_kpoints(self):
         """
-        Running index of the initial power spectrum
+        The number of k points for calculating matter power.
         """
-        return self._ns
+        return self._num_kpoints
 
-    @ns.setter
-    def ns(self, value):
-        self._ns = value
-        logger.debug(f"cleaning cache of {self.cosmo_dep_attr} due to resetting ns")
-        self.clean_cache(self.cosmo_dep_attr)
-
-    @property
-    def h(self):
-        """
-        The Hubble parameter over 100km/s/Mpc.
-        """
-        return self._h
-
-    @h.setter
-    def h(self, value):
-        self._h = value
+    @num_kpoints.setter
+    def num_kpoints(self, value: int):
+        self._num_kpoints = value
         logger.debug(
-            f"recalculating Ode and update background cosmology due to resetting h"
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting num_kpoints"
         )
-        self.get_derived_Ode()
-        cosmo = self.set_astropy_cosmo()
-        self.cosmo = cosmo.clone(H0=value * 100)
-
-    @property
-    def neutrino_mass(self):
-        """
-        sum of the neutrino mass in eV.
-        """
-        return self._neutrino_mass
-
-    @neutrino_mass.setter
-    def neutrino_mass(self, value):
-        self._neutrino_mass = value
+        self.clean_cache(self.cosmo_fid_dep_attr)
         logger.debug(
-            f"recalculating Ode and update background cosmology due to resetting neutrino_mass"
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting num_kpoints"
         )
-        self.get_derived_Ode()
-        cosmo = self.set_astropy_cosmo()
-        self.cosmo = cosmo.clone(m_nu=[0, 0, value])
-
-    @property
-    def w0(self):
-        """
-        The dark energy equation of state at a=1 (z=0).
-        """
-        return self._w0
-
-    @w0.setter
-    def w0(self, value):
-        self._w0 = value
-        logger.debug(
-            f"recalculating Ode and update background cosmology due to resetting w0"
-        )
-        self.get_derived_Ode()
-        cosmo = self.set_astropy_cosmo()
-        self.cosmo = cosmo.clone(w0=value)
-
-    @property
-    def wa(self):
-        r"""
-        The redshift-dependent part of the dark energy equation of state.
-        :math:`w(a) = w_0 + w_a (1 - a)`.
-        """
-        return self._wa
-
-    @wa.setter
-    def wa(self, value):
-        self._wa = value
-        logger.debug(
-            f"recalculating Ode and update background cosmology due to resetting wa"
-        )
-        self.get_derived_Ode()
-        cosmo = self.set_astropy_cosmo()
-        self.cosmo = cosmo.clone(wa=value)
+        self.clean_cache(self.cosmo_model_dep_attr)
 
     @property
     def cold(self):
@@ -560,9 +663,13 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     def cold(self, value):
         self._cold = value
         logger.debug(
-            f"cleaning cache of {self.cosmo_dep_attr} due to resetting self.cold"
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting self.cold"
         )
-        self.clean_cache(self.cosmo_dep_attr)
+        self.clean_cache(self.cosmo_fid_dep_attr)
+        logger.debug(
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting self.cold"
+        )
+        self.clean_cache(self.cosmo_model_dep_attr)
 
     @property
     def backend(self):
@@ -576,28 +683,13 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     def backend(self, value):
         self._backend = value
         logger.debug(
-            f"cleaning cache of {self.cosmo_dep_attr} due to resetting self.backend"
+            f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting self.backend"
         )
-        self.clean_cache(self.cosmo_dep_attr)
-
-    @property
-    def omega_de(self):
-        """
-        The dark energy density fraction at z=0.
-        Default is to calculate using camb based on input cosmology,
-        but can be manually set (make sure you check consistency yourself).
-        """
-        if self._omega_de is None:
-            self._omega_de = self.get_derived_Ode()
-        return self._omega_de
-
-    @omega_de.setter
-    def omega_de(self, value):
-        if value is None:
-            return None
-        self._omega_de = value
-        cosmo = self.cosmo
-        self.cosmo = cosmo.clone(Ode0=value)
+        self.clean_cache(self.cosmo_fid_dep_attr)
+        logger.debug(
+            f"cleaning cache of {self.cosmo_model_dep_attr} due to resetting self.backend"
+        )
+        self.clean_cache(self.cosmo_model_dep_attr)
 
     @property
     def omega_hi_z_func(self):
@@ -626,14 +718,17 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     def average_hi_temp(self):
         """
         The average HI brightness temperature in Kelvin at central redshift ``self.z``.
+        Calculation is based on the true (fitted) cosmology.
         """
         logger.debug(
             f"invoking {inspect.currentframe().f_code.co_name} to calculate the average HI brightness temperature"
         )
         logger.debug(
-            f"omega_hi: {self.omega_hi_z_mean}, z: {self.z}, cosmo: {self.cosmo}"
+            f"omega_hi: {self.omega_hi_z_mean}, z: {self.z}, cosmo: {self.astropy_cosmo_true}"
         )
-        tbar = omega_hi_to_average_temp(self.omega_hi_z_mean, z=self.z, cosmo=self)
+        tbar = omega_hi_to_average_temp(
+            self.omega_hi_z_mean, z=self.z, cosmo=self.astropy_cosmo_true
+        )
         return tbar
 
     @property
@@ -658,38 +753,12 @@ class CosmologyCalculator(Specification, CosmologyParameters):
         self._omega_hi_z_mean = None
         self._omega_hi = result
 
-    @Specification.cosmo.setter
-    def cosmo(self, value):
-        cosmo = value
-        if isinstance(value, str):
-            cosmo = extract_astropy_cosmo_set(value)
-            As = As_set[value]
-            ns = get_ns_from_astropy(value)
-            self._As = As
-            self._ns = ns
-
-        # update background cosmological parameters
-        self._h = cosmo.h
-        self._omega_cold = cosmo.Om0
-        self._omega_de = cosmo.Ode0
-        self._w0 = cosmo.w0
-        self._wa = cosmo.wa
-        self._neutrino_mass = cosmo.m_nu.value.sum()
-        self._omega_baryon = cosmo.Ob0
-        self._cosmo = cosmo
-        # there is probably a more elegant way of doing this, but I dont know how
-        # maybe just inheriting astropy cosmology class?
-        for key in cosmo.__dir__():
-            if key[0] != "_":
-                self.__dict__.update({key: getattr(cosmo, key)})
-        # cosmology changed, clear cache
-        self.clean_cache(self.cosmo_dep_attr)
-
     @property
-    @tagging("cosmo", "nu")
+    @tagging("cosmo_model", "nu")
     def matter_power_spectrum_fnc(self):
         """
         Interpolation function for the real-space isotropic matter power spectrum.
+        The matter power spectrum is calculated for the true (fitted) cosmology.
         """
         if self._matter_power_spectrum_fnc is None:
             self.get_matter_power_spectrum()
@@ -699,10 +768,11 @@ class CosmologyCalculator(Specification, CosmologyParameters):
         """
         Calculate the matter power spectrum, interpolate it, and save it into the class attribute `matter_power_spectrum_fnc`.
         """
-        kh = self.karr_in_h
-        pk = getattr(self, f"get_matter_power_spectrum_{self.backend}")()
-        karr = kh * self.h
-        pkarr = pk / self.h**3
+        cosmo = self.astropy_cosmo_true
+        kh = self.cospar_true.karr_in_h
+        pk = getattr(self.cospar_true, f"get_matter_power_spectrum_{self.backend}")()
+        karr = kh * cosmo.h
+        pkarr = pk / cosmo.h**3
         matter_power_func = interp1d(
             karr,
             pkarr,
@@ -718,6 +788,7 @@ class CosmologyCalculator(Specification, CosmologyParameters):
     def deltaz_to_deltar(self, delta_z):
         """
         Convert a redshift interval delta_z to a comoving distance interval delta_r.
+        The conversion is based on the true (fitted) cosmology.
 
         Note that, the usual redshift error defined in galaxy survey is usually delta_z / (1+z).
 
@@ -731,13 +802,15 @@ class CosmologyCalculator(Specification, CosmologyParameters):
         delta_r: float.
             The comoving distance interval in Mpc.
         """
-        H_z = self.H(self.z)
+        cosmo = self.astropy_cosmo_true
+        H_z = cosmo.H(self.z)
         delta_r = (delta_z * astropy.constants.c / H_z).to("Mpc").value
         return delta_r
 
     def deltav_to_deltar(self, delta_v):
         """
         Convert a velocity interval delta_v to a comoving distance interval delta_r.
+        The conversion is based on the true (fitted) cosmology.
 
         Parameters
         ----------
@@ -749,6 +822,97 @@ class CosmologyCalculator(Specification, CosmologyParameters):
         delta_r: float.
             The comoving distance interval in Mpc.
         """
-        H_z = self.H(self.z)
+        cosmo = self.astropy_cosmo_true
+        H_z = cosmo.H(self.z)
         delta_r = (1 + self.z) * delta_v / H_z.to("km s^-1 Mpc^-1").value
         return delta_r
+
+    @property
+    @tagging("cosmo_model", "beam")
+    def sigma_beam_ch_in_mpc(self):
+        """
+        The input beam size parameter in Mpc in each channel.
+        The comoving distance is calculated for the true (fitted) cosmology.
+        """
+        if self._sigma_beam_ch_in_mpc is None and self.sigma_beam_ch is not None:
+            self._sigma_beam_ch_in_mpc = (
+                self.astropy_cosmo_true.comoving_distance(self.z_ch).to("Mpc").value
+                * (self.sigma_beam_ch * self.beam_unit).to("rad").value
+            )
+        return self._sigma_beam_ch_in_mpc
+
+    @property
+    def pix_resol_in_mpc(self):
+        """
+        angular resolution of the map pixel in Mpc for the fiducial cosmology.
+        """
+        return (
+            np.sqrt(self.pixel_area)
+            * np.pi
+            / 180
+            * self.astropy_cosmo_fiducial.comoving_distance(self.z).to("Mpc").value
+        )
+
+    @property
+    def los_resol_in_mpc(self):
+        """
+        effective frequency resolution in Mpc for the fiducial cosmology.
+        """
+        comov_dist = self.astropy_cosmo_fiducial.comoving_distance(self.z_ch).value
+        los_resol_in_mpc = (comov_dist.max() - comov_dist.min()) / len(self.nu)
+        return los_resol_in_mpc
+
+    @property
+    @tagging("cosmo_fid")
+    def z_as_func_of_comov_dist(self):
+        """
+        Returns a function that returns the redshift
+        for input comoving distance.
+        The comoving distance is calculated for the fiducial cosmology.
+        """
+        if self._z_as_func_of_comov_dist is None:
+            self.get_z_as_func_of_comov_dist()
+        return self._z_as_func_of_comov_dist
+
+    def get_z_as_func_of_comov_dist(self):
+        """
+        Calculate an array of comoving distances with redshifts,
+        and construct a function that returns the redshift for input comoving distance.
+        The function is saved into the class attribute `z_as_func_of_comov_dist`.
+        The comoving distance is calculated for the fiducial cosmology.
+        """
+        zarr = np.linspace(0, self.z_interp_max, 20001)
+        xarr = self.astropy_cosmo_fiducial.comoving_distance(zarr).value
+        func = interp1d(xarr, zarr)
+        self._z_as_func_of_comov_dist = func
+
+    @property
+    def survey_volume(self, i=None):
+        """
+        Total survey volume in Mpc^3.
+        The volume is calculated for the fiducial cosmology.
+
+        Note that, the sampling along the sky map is assumed to be the same for all frequency channels,
+        and the code by default uses the maximum sampling channel to calculate the area.
+        This is desired, as the survey lightcone can contain holes inside, which is considered part of the volume.
+
+        Parameters
+        ----------
+        i: int, default None
+            The index of the frequency channel to calculate the survey volume.
+            Default is None, which uses the maximum sampling channel.
+        """
+        cosmo = self.astropy_cosmo_fiducial
+        if i is None:
+            i = self.maximum_sampling_channel
+        nu_ext = center_to_edges(self.nu)
+        z_ext = freq_to_redshift(nu_ext)
+        volume = (
+            (self.W_HI[:, :, i].sum() * self.pixel_area * (np.pi / 180) ** 2)
+            / 3
+            * (
+                cosmo.comoving_distance(z_ext.max()) ** 3
+                - cosmo.comoving_distance(z_ext.min()) ** 3
+            ).value
+        )
+        return volume
