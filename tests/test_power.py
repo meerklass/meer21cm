@@ -972,3 +972,50 @@ def test_average_model_hi_temp():
         ps.model_hi_temp_in_box * ps.counts_in_box
     ).sum() / ps.counts_in_box.sum()
     assert np.allclose(temp_box_avg, ps.average_model_hi_temp, rtol=1e-3)
+
+
+def test_update_cosmo():
+    ps = ModelPowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_2=1.0,
+    )
+    ps_m = ps.auto_power_matter_model
+    ps_t1 = ps.auto_power_tracer_1_model
+    ps_t2 = ps.auto_power_tracer_2_model
+    ps_c = ps.cross_power_tracer_model
+    ps_c_noobs = ps.cross_power_tracer_model_noobs
+    ps_t1_noobs = ps.auto_power_tracer_1_model_noobs
+    ps_t2_noobs = ps.auto_power_tracer_2_model_noobs
+    # update fiducial does not change model power
+    ps.fiducial_cosmology = "WMAP1"
+    ps_m_new = ps.auto_power_matter_model
+    ps_t1_new = ps.auto_power_tracer_1_model
+    ps_t2_new = ps.auto_power_tracer_2_model
+    ps_c_new = ps.cross_power_tracer_model
+    ps_c_noobs_new = ps.cross_power_tracer_model_noobs
+    ps_t1_noobs_new = ps.auto_power_tracer_1_model_noobs
+    ps_t2_noobs_new = ps.auto_power_tracer_2_model_noobs
+    assert np.allclose(ps_m, ps_m_new)
+    assert np.allclose(ps_t1, ps_t1_new)
+    assert np.allclose(ps_t2, ps_t2_new)
+    assert np.allclose(ps_c, ps_c_new)
+    assert np.allclose(ps_c_noobs, ps_c_noobs_new)
+    assert np.allclose(ps_t1_noobs, ps_t1_noobs_new)
+    assert np.allclose(ps_t2_noobs, ps_t2_noobs_new)
+    # update true changes model power
+    ps.true_cosmology = "WMAP1"
+    ps_m_new = ps.auto_power_matter_model
+    ps_t1_new = ps.auto_power_tracer_1_model
+    ps_t2_new = ps.auto_power_tracer_2_model
+    ps_c_new = ps.cross_power_tracer_model
+    ps_c_noobs_new = ps.cross_power_tracer_model_noobs
+    ps_t1_noobs_new = ps.auto_power_tracer_1_model_noobs
+    ps_t2_noobs_new = ps.auto_power_tracer_2_model_noobs
+    assert not np.allclose(ps_m, ps_m_new)
+    assert not np.allclose(ps_t1, ps_t1_new)
+    assert not np.allclose(ps_t2, ps_t2_new)
+    assert not np.allclose(ps_c, ps_c_new)
+    assert not np.allclose(ps_c_noobs, ps_c_noobs_new)
+    assert not np.allclose(ps_t1_noobs, ps_t1_noobs_new)
+    assert not np.allclose(ps_t2_noobs, ps_t2_noobs_new)

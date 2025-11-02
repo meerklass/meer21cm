@@ -594,7 +594,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
                 self.clean_cache(self.tracer_2_dep_attr)
 
     @property
-    @tagging("cosmo", "nu", "kmode")
+    @tagging("cosmo_model", "nu", "kmode")
     def auto_power_matter_model_r(self):
         """
         The model matter power spectrum in real space (without RSD).
@@ -611,7 +611,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         self._auto_power_matter_model_r = self.matter_power_spectrum_fnc(self.kmode)
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "rsd")
     def auto_power_matter_model(self):
         """
         The model matter power spectrum with RSD effects.
@@ -622,7 +622,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._auto_power_matter_model
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_1", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_1", "rsd")
     def auto_power_tracer_1_model_noobs(self):
         """
         The model power spectrum for the first tracer without observational effects.
@@ -633,7 +633,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._auto_power_tracer_1_model_noobs
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_2", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_2", "rsd")
     def auto_power_tracer_2_model_noobs(self):
         """
         The model power spectrum for the second tracer without observational effects.
@@ -645,7 +645,14 @@ class ModelPowerSpectrum(CosmologyCalculator):
 
     @property
     @tagging(
-        "cosmo", "nu", "kmode", "mumode", "tracer_1", "tracer_2", "rsd", "cross_coeff"
+        "cosmo_model",
+        "nu",
+        "kmode",
+        "mumode",
+        "tracer_1",
+        "tracer_2",
+        "rsd",
+        "cross_coeff",
     )
     def cross_power_tracer_model_noobs(self):
         """
@@ -657,7 +664,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._cross_power_tracer_model_noobs
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_1", "beam", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_1", "beam", "rsd")
     def auto_power_tracer_1_model(self):
         """
         The 3D model power spectrum for the first tracer.
@@ -677,7 +684,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._auto_power_tracer_1_model * mean_amp**2
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_2", "beam", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_2", "beam", "rsd")
     def auto_power_tracer_2_model(self):
         """
         The 3D model power spectrum for the second tracer.
@@ -701,7 +708,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
 
     @property
     @tagging(
-        "cosmo",
+        "cosmo_model",
         "nu",
         "kmode",
         "mumode",
