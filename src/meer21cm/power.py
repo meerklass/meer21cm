@@ -43,9 +43,9 @@ class ModelPowerSpectrum(CosmologyCalculator):
     Parameters
     ----------
     kmode: np.ndarray, default None
-        The mode of k in Mpc-1.
+        The **true** mode of k in Mpc-1.
     mumode: np.ndarray, default None
-        The mu values of each k-mode so that :math:`k_\parallel = k \times \mu`.
+        The **true** mu values of each k-mode so that :math:`k_\parallel = k \times \mu`.
     tracer_bias_1: float, default 1.0
         The linear bias of the first tracer.
     sigma_v_1: float, default 0.0
@@ -1199,23 +1199,31 @@ class FieldPowerSpectrum(Specification):
     @property
     def k_perp(self):
         """
-        The perpendicular k-vector of the 3D box.
+        The **fiducial** perpendicular k-vector of the 3D box.
         """
         return get_vec_mode(self.k_vec[:-1])
 
     @property
     def k_para(self):
         """
-        The parallel k-mode of the 3D box.
+        The **fiducial** parallel k-mode of the 3D box.
         """
         return self.k_vec[-1]
 
     @property
     def k_mode(self):
         """
-        The mode of the 3D k-vector.
+        The **fiducial** (observed) mode of the 3D k-vector.
         """
         return get_vec_mode(self.k_vec)
+
+    @property
+    def mu_mode(self):
+        """
+        The **fiducial** (observed) mu values of each k-mode so that :math:`k_\parallel = k \times \mu`.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.nan_to_num(self.k_para[None, None, :] / self.k_mode)
 
     @property
     def field_1(self):
@@ -2293,9 +2301,6 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         )
         self.kmode = kmode
         self.mumode = mumode
-        if model_k_from_field:
-            self.propagate_field_k_to_model()
-        self.model_k_from_field = model_k_from_field
         ModelPowerSpectrum.__init__(
             self,
             kmode=self.kmode,
@@ -2319,6 +2324,9 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             compensate=compensate,
             **params,
         )
+        if model_k_from_field:
+            self.propagate_field_k_to_model()
+        self.model_k_from_field = model_k_from_field
         self.k1dbins = k1dbins
         self.kperpbins = kperpbins
         self.kparabins = kparabins
@@ -2504,18 +2512,20 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             setattr(self, attr, None)
 
     def propagate_field_k_to_model(self):
-        """
-        Use field k-modes for the model
+        r"""
+        Use field k-modes for the model, taking into account the Alcock–Paczynski effect.
+
+        .. math::
+            k_\perp^\text{fiducial} = k_\perp^\text{true} \times \alpha_\perp
+            k_\parallel^\text{fiducial} = k_\parallel^\text{true} \times \alpha_\parallel
+
         """
         # use field kmode to propagate into model
-        kmode = self.k_mode
-        mumode = self.k_para
-        slice_indx = (None,) * (len(self.box_len.shape) - 1)
-        slice_indx += (slice(None, None, None),)
+        kperp = self.k_perp / self.alpha_perp
+        kpara = self.k_para / self.alpha_parallel
+        self.kmode = np.sqrt(kperp[:, :, None] ** 2 + kpara[None, None, :] ** 2)
         with np.errstate(divide="ignore", invalid="ignore"):
-            mumode = np.nan_to_num(self.k_para[slice_indx] / kmode)
-        self.kmode = kmode
-        self.mumode = mumode
+            self.mumode = np.nan_to_num(kpara[None, None, :] / self.kmode)
 
     def get_1d_power(
         self,

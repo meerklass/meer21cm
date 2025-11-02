@@ -249,6 +249,29 @@ def test_bin_functions():
     )
 
 
+def test_propagate_field_k_to_model():
+    ps = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+        true_cosmology="Planck15",
+        fiducial_cosmology="WMAP1",
+    )
+    ps.get_enclosing_box()
+    kmode_test = (
+        ps.k_mode
+        * ps.alpha_AP ** (1 / 3)
+        / ps.alpha_iso
+        * (1 + ps.mu_mode**2 * (1 / ps.alpha_AP**2 - 1)) ** (1 / 2)
+    )
+    assert np.allclose(ps.kmode, kmode_test)
+    mumode_test = (
+        ps.mu_mode
+        / ps.alpha_AP
+        * (1 + ps.mu_mode**2 * (1 / ps.alpha_AP**2 - 1)) ** (-1 / 2)
+    )
+    assert np.allclose(ps.mumode, mumode_test)
+
+
 def test_cy_power_in_ps():
     ps = PowerSpectrum(
         kaiser_rsd=False,
