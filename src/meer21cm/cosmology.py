@@ -387,6 +387,10 @@ class CosmologyCalculator(Specification):
         self.true_cosmology = true_cosmology
         self._matter_power_spectrum_fnc = None
         self.omega_hi = omega_hi
+        self._sound_horizon_drag_true = None
+        self._sound_horizon_drag_fiducial = None
+        self._alpha_parallel = None
+        self._alpha_perp = None
 
     @property
     def omega_cold(self):
@@ -934,3 +938,114 @@ class CosmologyCalculator(Specification):
             ).value
         )
         return volume
+
+    def get_sound_horizon_drag(
+        self,
+        Omh2: float,
+        Obh2: float,
+        Onuh2: float,
+    ):
+        """
+        Calculate the sound horizon at drag epoch for a set of cosmological parameters.
+
+        Uses the fitting formula from [1411.1074](https://arxiv.org/abs/1411.1074)
+        """
+        rs_d = (
+            55.154
+            * np.exp(-72.3 * (Onuh2 + 0.0006) ** 2)
+            / (Obh2**0.12807 * (Omh2 - Onuh2) ** 0.25351)
+        )
+        return rs_d
+
+    @property
+    @tagging("cosmo_model")
+    def sound_horizon_drag_true(self):
+        """
+        The sound horizon at drag epoch for the true (fitted) cosmology.
+        """
+        if self._sound_horizon_drag_true is None:
+            self._sound_horizon_drag_true = self.get_sound_horizon_drag(
+                Omh2=self.astropy_cosmo_true.Om0 * self.astropy_cosmo_true.h**2,
+                Obh2=self.astropy_cosmo_true.Ob0 * self.astropy_cosmo_true.h**2,
+                Onuh2=self.astropy_cosmo_true.Onu0 * self.astropy_cosmo_true.h**2,
+            )
+        return self._sound_horizon_drag_true
+
+    @property
+    @tagging("cosmo_fid")
+    def sound_horizon_drag_fiducial(self):
+        """
+        The sound horizon at drag epoch for the fiducial cosmology.
+        """
+        if self._sound_horizon_drag_fiducial is None:
+            self._sound_horizon_drag_fiducial = self.get_sound_horizon_drag(
+                Omh2=self.astropy_cosmo_fiducial.Om0
+                * self.astropy_cosmo_fiducial.h**2,
+                Obh2=self.astropy_cosmo_fiducial.Ob0
+                * self.astropy_cosmo_fiducial.h**2,
+                Onuh2=self.astropy_cosmo_fiducial.Onu0
+                * self.astropy_cosmo_fiducial.h**2,
+            )
+        return self._sound_horizon_drag_fiducial
+
+    @property
+    @tagging("cosmo_model", "cosmo_fid", "nu")
+    def alpha_parallel(self):
+        """
+        The line of sight Alcock–Paczynski effect parameter.
+        """
+        if self._alpha_parallel is None:
+            self._alpha_parallel = self.get_alpha_parallel()
+        return self._alpha_parallel
+
+    def get_alpha_parallel(self):
+        """
+        Calculate the line of sight Alcock–Paczynski effect parameter.
+        """
+        # actual DH has a factor of c which is cancelled out here
+        DH_over_rd_fid = (
+            1
+            / self.astropy_cosmo_fiducial.H(self.z).value
+            / self.sound_horizon_drag_fiducial
+        )
+        DH_over_rd_true = (
+            1 / self.astropy_cosmo_true.H(self.z).value / self.sound_horizon_drag_true
+        )
+        return DH_over_rd_true / DH_over_rd_fid
+
+    @property
+    @tagging("cosmo_model", "cosmo_fid", "nu")
+    def alpha_perp(self):
+        if self._alpha_perp is None:
+            self._alpha_perp = self.get_alpha_perp()
+        return self._alpha_perp
+
+    def get_alpha_perp(self):
+        """
+        Calculate the transverse Alcock–Paczynski effect parameter.
+        """
+        Dm_over_rd_fid = (
+            self.astropy_cosmo_fiducial.comoving_transverse_distance(self.z).value
+            / self.sound_horizon_drag_fiducial
+        )
+        Dm_over_rd_true = (
+            self.astropy_cosmo_true.comoving_transverse_distance(self.z).value
+            / self.sound_horizon_drag_true
+        )
+        return Dm_over_rd_true / Dm_over_rd_fid
+
+    @property
+    def alpha_iso(self):
+        r"""
+        The isotropic Alcock–Paczynski effect parameter,
+        which is :math:`\alpha_{\parallel}^{1/3} \alpha_{\perp}^{2/3}`.
+        """
+        return self.alpha_parallel ** (1 / 3) * self.alpha_perp ** (2 / 3)
+
+    @property
+    def alpha_AP(self):
+        r"""
+        The anisotropic Alcock–Paczynski effect parameter,
+        which is :math:`\alpha_{\parallel} / \alpha_{\perp}`.
+        """
+        return self.alpha_parallel / self.alpha_perp

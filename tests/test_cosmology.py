@@ -263,3 +263,24 @@ def test_volume():
         - 1
     )
     assert diff < 1e-2
+
+
+def test_ap_effect():
+    coscal = CosmologyCalculator(
+        survey="meerklass_2021",
+        band="L",
+    )
+    assert np.allclose(coscal.alpha_parallel, 1)
+    assert np.allclose(coscal.alpha_perp, 1)
+    assert np.allclose(coscal.alpha_iso, 1)
+    assert np.allclose(coscal.alpha_AP, 1)
+    coscal.true_cosmology = "Planck15"
+    coscal.fiducial_cosmology = "WMAP1"
+    assert not np.allclose(coscal.alpha_parallel, 1)
+    assert not np.allclose(coscal.alpha_perp, 1)
+    assert not np.allclose(coscal.alpha_iso, 1)
+    assert not np.allclose(coscal.alpha_AP, 1)
+    # z~0, anisotropic should be 1 again
+    coscal.nu = np.array([f_21 * 0.999, f_21 * 0.999])
+    assert np.abs(coscal.alpha_AP - 1) < 1e-3
+    assert not np.allclose(coscal.alpha_iso, 1)
