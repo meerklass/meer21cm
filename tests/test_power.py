@@ -471,7 +471,9 @@ def test_ModelPowerSpectrum(fog_profile):
     # add rsd, test kaiser term
     model.mumode = np.ones_like(model.kmode)
     matter_ps_rsd = model.auto_power_matter_model
-    assert np.allclose(matter_ps_rsd / matter_ps_real, (1 + model.f_growth) ** 2)
+    assert np.allclose(
+        matter_ps_rsd / matter_ps_real, (1 + model.cospar_true.f_growth) ** 2
+    )
 
     # has mumode, but turn off rsd
     model.kaiser_rsd = False
@@ -488,7 +490,7 @@ def test_ModelPowerSpectrum(fog_profile):
     model.mumode = np.ones_like(model.kmode)
     tracer_ps_rsd = model.auto_power_tracer_1_model
     assert np.allclose(
-        tracer_ps_rsd / matter_ps_real, (1 + model.f_growth / 2.0) ** 2 * 4
+        tracer_ps_rsd / matter_ps_real, (1 + model.cospar_true.f_growth / 2.0) ** 2 * 4
     )
 
     # test 2 tracers with no rsd but with bias
@@ -513,18 +515,26 @@ def test_ModelPowerSpectrum(fog_profile):
     tracer_ps_rsd = model.auto_power_tracer_2_model
     cross_ps_rsd = model.cross_power_tracer_model
     assert np.allclose(
-        tracer_ps_rsd / matter_ps_real, (1 + model.f_growth / 3.0) ** 2 * 9
+        tracer_ps_rsd / matter_ps_real, (1 + model.cospar_true.f_growth / 3.0) ** 2 * 9
     )
     assert np.allclose(
         cross_ps_rsd / matter_ps_real,
-        (1 + model.f_growth / 2.0) * (1 + model.f_growth / 3.0) * 6 - 6 + 6 * 0.5,
+        (1 + model.cospar_true.f_growth / 2.0)
+        * (1 + model.cospar_true.f_growth / 3.0)
+        * 6
+        - 6
+        + 6 * 0.5,
     )
     # test change r
     model.cross_coeff = 0.9
     cross_ps_rsd = model.cross_power_tracer_model
     assert np.allclose(
         cross_ps_rsd / matter_ps_real,
-        (1 + model.f_growth / 2.0) * (1 + model.f_growth / 3.0) * 6 - 6 + 6 * 0.9,
+        (1 + model.cospar_true.f_growth / 2.0)
+        * (1 + model.cospar_true.f_growth / 3.0)
+        * 6
+        - 6
+        + 6 * 0.9,
     )
     # test change v
     model.sigma_v_1 = 1e20
@@ -897,8 +907,8 @@ def test_poisson_gal_gen():
         (ps.W_HI[:, :, 0].sum() * ps.pixel_area * (np.pi / 180) ** 2)
         / 3
         * (
-            ps.comoving_distance(ps.z_ch.max()) ** 3
-            - ps.comoving_distance(ps.z_ch.min()) ** 3
+            ps.astropy_cosmo_true.comoving_distance(ps.z_ch.max()) ** 3
+            - ps.astropy_cosmo_true.comoving_distance(ps.z_ch.min()) ** 3
         ).value
     )
     k1dedges = np.geomspace(0.05, 1, 21)

@@ -836,7 +836,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         """
         pk3d_mm_r = self.auto_power_matter_model_r
         if self.kaiser_rsd:
-            beta_m = self.f_growth
+            beta_m = self.cospar_true.f_growth
             self._auto_power_matter_model = self.cal_rsd_power(
                 pk3d_mm_r,
                 beta_m,
@@ -863,7 +863,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         pk3d_tt_r = tracer_bias_i**2 * pk3d_mm_r
         # apply the RSD
         if self.kaiser_rsd:
-            beta_i = self.f_growth / tracer_bias_i
+            beta_i = self.cospar_true.f_growth / tracer_bias_i
             power_noobs_i = self.cal_rsd_power(
                 pk3d_tt_r,
                 beta_i,
@@ -944,8 +944,8 @@ class ModelPowerSpectrum(CosmologyCalculator):
         pk3d_mm_r = self.auto_power_matter_model_r
         pk3d_tt_r = self.tracer_bias_1 * self.tracer_bias_2 * pk3d_mm_r
         if self.kaiser_rsd:
-            beta_1 = self.f_growth / self.tracer_bias_1
-            beta_2 = self.f_growth / self.tracer_bias_2
+            beta_1 = self.cospar_true.f_growth / self.tracer_bias_1
+            beta_2 = self.cospar_true.f_growth / self.tracer_bias_2
             result = self.cal_rsd_power(
                 pk3d_tt_r,
                 beta1=beta_1,
@@ -2854,7 +2854,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             ra,
             dec,
             self.nu,
-            cosmo=self.cosmo,
+            cosmo=self.astropy_cosmo_fiducial,
             return_coord=True,
             buffkick=self.box_buffkick,
             rot_mat=rot_mat,
@@ -2907,7 +2907,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 ra_sample[i],
                 dec_sample[i],
                 nu_sample[i],
-                cosmo=self.cosmo,
+                cosmo=self.astropy_cosmo_fiducial,
                 return_coord=True,
                 buffkick=self.box_buffkick,
                 rot_mat=self.rot_mat_sky_to_box,
@@ -2955,8 +2955,11 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
     def average_model_hi_temp(self):
         """
         Calculate the average HI brightness temperature in the map cube, taking care of redshift evolution and map sampling.
+        Calculation is based on the true (fitted) cosmology.
         """
-        t_bar = omega_hi_to_average_temp(self.omega_hi, z=self.z_ch, cosmo=self.cosmo)
+        t_bar = omega_hi_to_average_temp(
+            self.omega_hi, z=self.z_ch, cosmo=self.astropy_cosmo_true
+        )
         t_bar = (t_bar * self.w_HI.sum((0, 1))).sum() / self.w_HI.sum()
         return t_bar
 
@@ -2969,10 +2972,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         is used as the average t_bar in the model power spectrum (by passing it to ``mean_amp_1``),
         whereas the 3D ``model_hi_temp_in_box`` is used as the field weight to account for the effect of
         the redshift evolution of Omega_HI in the power spectrum.
+        Calculation is based on the true (fitted) cosmology.
         """
         z_grid = self._box_voxel_redshift
         omega_hi_grid = self.omega_hi_z_func(z_grid)
-        t_bar_grid = omega_hi_to_average_temp(omega_hi_grid, z=z_grid, cosmo=self.cosmo)
+        t_bar_grid = omega_hi_to_average_temp(
+            omega_hi_grid, z=z_grid, cosmo=self.astropy_cosmo_true
+        )
         return t_bar_grid
 
     def get_counts_in_box(self, partial_sel=None):
@@ -3146,7 +3152,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 ra_gal,
                 dec_gal,
                 freq_gal,
-                cosmo=self.cosmo,
+                cosmo=self.astropy_cosmo_fiducial,
                 return_coord=True,
                 tile=False,
                 rot_mat=self.rot_mat_sky_to_box,
@@ -3344,8 +3350,12 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         dec_rand += rand_disp[num_g_rand:]
         # in future this should be a dNdz
         cov_dist_limit = [
-            self.comoving_distance(self.z_ch.min()).to("Mpc").value,
-            self.comoving_distance(self.z_ch.max()).to("Mpc").value,
+            self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.min())
+            .to("Mpc")
+            .value,
+            self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.max())
+            .to("Mpc")
+            .value,
         ]
         cov_dist_rand = rng.uniform(
             cov_dist_limit[0], cov_dist_limit[1], size=num_g_rand
