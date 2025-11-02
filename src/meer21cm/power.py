@@ -843,7 +843,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         """
         pk3d_mm_r = self.auto_power_matter_model_r
         if self.kaiser_rsd:
-            beta_m = self.cospar_true.f_growth
+            beta_m = self.f_growth_true
             self._auto_power_matter_model = self.cal_rsd_power(
                 pk3d_mm_r,
                 beta_m,
@@ -870,7 +870,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         pk3d_tt_r = tracer_bias_i**2 * pk3d_mm_r
         # apply the RSD
         if self.kaiser_rsd:
-            beta_i = self.cospar_true.f_growth / tracer_bias_i
+            beta_i = self.f_growth_true / tracer_bias_i
             power_noobs_i = self.cal_rsd_power(
                 pk3d_tt_r,
                 beta_i,
@@ -951,8 +951,8 @@ class ModelPowerSpectrum(CosmologyCalculator):
         pk3d_mm_r = self.auto_power_matter_model_r
         pk3d_tt_r = self.tracer_bias_1 * self.tracer_bias_2 * pk3d_mm_r
         if self.kaiser_rsd:
-            beta_1 = self.cospar_true.f_growth / self.tracer_bias_1
-            beta_2 = self.cospar_true.f_growth / self.tracer_bias_2
+            beta_1 = self.f_growth_true / self.tracer_bias_1
+            beta_2 = self.f_growth_true / self.tracer_bias_2
             result = self.cal_rsd_power(
                 pk3d_tt_r,
                 beta1=beta_1,
