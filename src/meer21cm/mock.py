@@ -275,7 +275,7 @@ class MockSimulation(PowerSpectrum):
         self.clean_cache(self.discrete_dep_attr)
 
     @property
-    @tagging("cosmo", "nu", "mock", "box")
+    @tagging("cosmo_model", "nu", "mock", "box")
     def mock_matter_field_r(self):
         """
         The simulated dark matter density field in real space.
@@ -285,7 +285,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_matter_field_r
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd")
     def mock_matter_field(self):
         """
         The simulated dark matter density field in redshift space.
@@ -340,7 +340,7 @@ class MockSimulation(PowerSpectrum):
         return delta_x
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd")
     def mock_velocity_u_matter(self):
         r"""
         The normalised peculiar velocity field in real space, defined as
@@ -358,7 +358,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_velocity_u_matter
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_1")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_1")
     def mock_velocity_u_tracer_1(self):
         """
         The normalised peculiar velocity field used for the first tracer.
@@ -377,7 +377,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_velocity_u_tracer_1
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_2")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_2")
     def mock_velocity_u_tracer_2(self):
         """
         The normalised peculiar velocity field used for the second tracer.
@@ -422,7 +422,7 @@ class MockSimulation(PowerSpectrum):
         return u_r
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd")
     def mock_kaiser_field_k_matter(self):
         """
         The Kaiser rsd effect correction for the mock matter field in k-space.
@@ -432,7 +432,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_kaiser_field_k_matter
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_1")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_1")
     def mock_kaiser_field_k_tracer_1(self):
         """
         The Kaiser rsd effect correction for the mock tracer field 1 in k-space.
@@ -444,7 +444,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_kaiser_field_k_tracer_1
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_2")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_2")
     def mock_kaiser_field_k_tracer_2(self):
         """
         The Kaiser rsd effect correction for the mock tracer field 2 in k-space.
@@ -571,7 +571,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_amp_2
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_1", "rsd")
     def mock_tracer_field_1(self):
         """
         The simulated tracer field 1 in redshift space with unit if ``mock_amp_1`` or ``mean_amp_1`` is given.
@@ -584,7 +584,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_tracer_field_1 * mean_amp
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_2", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_2", "rsd")
     def mock_tracer_field_2(self):
         """
         The simulated tracer field 2 in redshift space with unit if ``mock_amp_2`` or ``mean_amp_2`` is given.
@@ -597,7 +597,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_tracer_field_2 * mean_amp
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_1")
     def mock_tracer_field_1_r(self):
         """
         The simulated tracer field 1 **unitsless density contrast** in real space.
@@ -607,7 +607,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_tracer_field_1_r
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_2")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_2")
     def mock_tracer_field_2_r(self):
         """
         The simulated tracer field 2 **unitsless density contrast** in real space.
@@ -672,7 +672,9 @@ class MockSimulation(PowerSpectrum):
         return delta_x
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd")
+    @tagging(
+        "cosmo_model", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd"
+    )
     def mock_tracer_position_in_box(self):
         """
         The simulated tracer positions in the box in real space.
@@ -750,7 +752,9 @@ class MockSimulation(PowerSpectrum):
         self._mock_tracer_position_in_box = tracer_positions
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd")
+    @tagging(
+        "cosmo_model", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd"
+    )
     def mock_tracer_position_in_radecz(self):
         """
         The simulated tracer positions projected onto the grid. The tracers outside
@@ -1098,7 +1102,15 @@ class HIGalaxySimulation(MockSimulation):
 
     @property
     @tagging(
-        "hm", "cosmo", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd"
+        "hm",
+        "cosmo_model",
+        "nu",
+        "mock",
+        "box",
+        "tracer_1",
+        "tracer_2",
+        "discrete",
+        "rsd",
     )
     def halo_mass_mock_tracer(self):
         """
@@ -1147,7 +1159,7 @@ class HIGalaxySimulation(MockSimulation):
     @property
     @tagging(
         "hm",
-        "cosmo",
+        "cosmo_model",
         "nu",
         "mock",
         "box",
@@ -1181,7 +1193,7 @@ class HIGalaxySimulation(MockSimulation):
     @property
     @tagging(
         "hm",
-        "cosmo",
+        "cosmo_model",
         "nu",
         "mock",
         "box",
