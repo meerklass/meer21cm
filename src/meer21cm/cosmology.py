@@ -367,7 +367,7 @@ class CosmologyCalculator(Specification):
         backend: str = "camb",
         omega_hi: np.ndarray | float = 5e-4,
         fiducial_cosmology: str | dict = fiducial_dict,
-        true_cosmology: str | dict = fiducial_dict,
+        true_cosmology: str | dict | None = None,
         ps_type: str = "linear",
         kmin: float = 1e-3,
         kmax: float = 3.0,
@@ -384,6 +384,8 @@ class CosmologyCalculator(Specification):
         self.num_kpoints = num_kpoints
         self.cold = cold
         self.fiducial_cosmology = fiducial_cosmology
+        if true_cosmology is None:
+            true_cosmology = fiducial_cosmology
         self.true_cosmology = true_cosmology
         self._matter_power_spectrum_fnc = None
         self.omega_hi = omega_hi
