@@ -6,6 +6,13 @@ The class :py:class:`CosmologyParameters` is the class for storing the cosmologi
 The class :py:class:`CosmologyCalculator` is the base class for storing the cosmological model used for calculation.
 It is typically used as a base class for other classes that inherit from it, and not used directly.
 
+Note that, there are always two sets of cosmological parameters defined in the class:
+- the **fiducial** cosmology, which is the cosmology that is used to transform sky coordinates to comoving coordinates.
+- the **true** cosmology, which is the cosmology that is used to compute the model power spectra.
+
+The Alcock–Paczynski effect is then always included in the model power spectrum calculation as well as converting
+the field k-modes to model k-modes (see :py:class:`PowerSpectrum`).
+
 """
 import numpy as np
 import camb
@@ -24,6 +31,7 @@ from copy import deepcopy
 import inspect
 import logging
 from typing import Callable
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -1055,3 +1063,30 @@ class CosmologyCalculator(Specification):
         which is :math:`\alpha_{\parallel} / \alpha_{\perp}`.
         """
         return self.alpha_parallel / self.alpha_perp
+
+    @property
+    def cosmo(self):
+        """
+        A shortcut to the :py:class:`astropy.cosmology.Cosmology` object for the true cosmology.
+
+        Should only be used when true and fiducial cosmology are the same, and returns a warning if not.
+
+        If you set `cosmo` to a new value, it will set `true_cosmology` and `fiducial_cosmology` to the same value.
+        If `true_cosmology` and `fiducial_cosmology` are different, an error will be raised.
+        """
+        if self.true_cosmology != self.fiducial_cosmology:
+            warnings.warn(
+                "true and fiducial cosmology are different, this shortcut is for the true cosmology:"
+                f"{self.true_cosmology}"
+            )
+        return self.astropy_cosmo_true
+
+    @cosmo.setter
+    def cosmo(self, value):
+        if self.true_cosmology != self.fiducial_cosmology:
+            raise ValueError(
+                "true and fiducial cosmology are different, cannot set cosmo to a new value"
+                "Please set `true_cosmology` and `fiducial_cosmology` respectively"
+            )
+        self.true_cosmology = value
+        self.fiducial_cosmology = value

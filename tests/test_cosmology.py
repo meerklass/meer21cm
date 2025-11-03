@@ -120,6 +120,7 @@ def test_cache():
 def test_mps_fnc(backend):
     coscal = CosmologyCalculator(
         true_cosmology="WMAP1",
+        fiducial_cosmology="WMAP1",
         backend=backend,
     )
     matterps = (
@@ -276,6 +277,9 @@ def test_ap_effect():
     assert np.allclose(coscal.alpha_AP, 1)
     coscal.true_cosmology = "Planck15"
     coscal.fiducial_cosmology = "WMAP1"
+    # test warning
+    with pytest.warns(UserWarning):
+        coscal.cosmo
     assert not np.allclose(coscal.alpha_parallel, 1)
     assert not np.allclose(coscal.alpha_perp, 1)
     assert not np.allclose(coscal.alpha_iso, 1)
@@ -284,3 +288,16 @@ def test_ap_effect():
     coscal.nu = np.array([f_21 * 0.999, f_21 * 0.999])
     assert np.abs(coscal.alpha_AP - 1) < 1e-3
     assert not np.allclose(coscal.alpha_iso, 1)
+
+
+def test_cosmo_shortcut():
+    coscal = CosmologyCalculator(
+        survey="meerklass_2021",
+        band="L",
+    )
+    coscal.cosmo = "Planck15"
+    assert np.allclose(coscal.cosmo.h, Planck15.h)
+    coscal.fiducial_cosmology = "WMAP1"
+    coscal.true_cosmology = "Planck15"
+    with pytest.raises(ValueError):
+        coscal.cosmo = "Planck18"
