@@ -2040,45 +2040,6 @@ def bin_3d_to_cy(
     return pscy
 
 
-# def get_independent_fourier_modes(box_dim):
-#    r"""
-#    Return a boolean array on whether the k-mode is independent.
-#    For real-valued signal, a specific k-mode :math:`\vec{k}` and it's opposite
-#    :math:`-\vec{k}` are conjugate to each other. This functions finds all the
-#    pairs and only assign one of them with ``True``.
-#
-#    The indexing of the output array is consistent with the ``np.fft.fftfreq``
-#    convention.
-#
-#    Parameters
-#    ----------
-#    box_dim: array.
-#        The shape of the signal.
-#
-#    Returns
-#    -------
-#    unique: boolean array.
-#        Whether the k-mode is indendent.
-#
-#    """
-#    kvec = get_k_vector(box_dim, np.ones(len(box_dim)))
-#    kvecmin = [(np.abs(kvec[i])[kvec[i] != 0]).min() for i in range(len(box_dim))]
-#    kvec = [kvec[i] / kvecmin[i] for i in range(len(box_dim))]
-#    kvecmax = [(np.abs(kvec[i])).max() for i in range(len(box_dim))]
-#    kvecmax = np.max(kvecmax)
-#    base = 2 * kvecmax + 1
-#    kvec = [kvec[i] * (base**i) for i in range(len(box_dim))]
-#    k_indx = np.sum(
-#        (np.meshgrid(*([(vec) for vec in kvec]), indexing="ij")),
-#        0,
-#    )
-#    _, indx = np.unique(np.abs(k_indx), return_index=True)
-#    unique = np.zeros(np.prod(box_dim))
-#    unique[indx] += 1
-#    unique = unique.reshape(box_dim) > 0
-#    return unique
-
-
 def gaussian_beam_attenuation(k_perp, beam_sigma_in_mpc):
     """
     The beam attenuation term to be multiplied to model power
@@ -2338,6 +2299,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             "_counts_in_box",
             "_flat_sky",
             "_box_origin",
+            "_box_voxel_redshift",
         ]
         for attr in init_attr:
             setattr(self, attr, None)
@@ -2517,6 +2479,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
 
         .. math::
             k_\perp^\text{fiducial} = k_\perp^\text{true} \times \alpha_\perp
+
             k_\parallel^\text{fiducial} = k_\parallel^\text{true} \times \alpha_\parallel
 
         """
@@ -3411,3 +3374,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             slice_list_i = tuple(slice_list_i)
             taper = taper * taper_i[i][slice_list_i]
         setattr(self, f"weights_{field}", getattr(self, f"weights_{field}") * taper)
+
+    @property
+    @tagging("cosmo_fiducial", "nu", "mock", "box")
+    def box_voxel_redshift(self):
+        """
+        The redshift of each voxel in the rectangular box.
+        """
+        if self._box_voxel_redshift is None:
+            return np.ones(self.box_ndim) * self.z
+        return self._box_voxel_redshift

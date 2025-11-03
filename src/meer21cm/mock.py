@@ -141,9 +141,9 @@ class MockSimulation(PowerSpectrum):
         this property will be automatically updated but the mock catalog is not.
         """
         if self.flat_sky:
-            dndz_arr = self.discrete_source_dndz(self._box_voxel_redshift)
-            z_sel = (self._box_voxel_redshift >= self.z_ch.min()) & (
-                self._box_voxel_redshift <= self.z_ch.max()
+            dndz_arr = self.discrete_source_dndz(self.box_voxel_redshift)
+            z_sel = (self.box_voxel_redshift >= self.z_ch.min()) & (
+                self.box_voxel_redshift <= self.z_ch.max()
             )
             dndz_arr = dndz_arr[z_sel]
             dndz_arr /= dndz_arr.max()
@@ -719,7 +719,7 @@ class MockSimulation(PowerSpectrum):
             density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i)) + 1
         num_g = self.tot_num_source_in_box
         # apply a redshift kernel to the source distribution
-        dndz_prob = self._dndz_renorm(self._box_voxel_redshift)
+        dndz_prob = self._dndz_renorm(self.box_voxel_redshift)
         density_field[density_field < 0] = 0
         density_field /= density_field.sum() / num_g
         density_field *= dndz_prob

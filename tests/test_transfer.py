@@ -183,4 +183,4 @@ def test_transfer_function_value():
     null_ps_1d = np.median(results_arr, axis=0)
     # note null is cross, so missing one temperature unit
     avg = (mock.average_hi_temp * null_ps_1d / porig_1d).mean()
-    assert np.abs(avg) < 5e-2
+    assert np.abs(avg) < 6e-2

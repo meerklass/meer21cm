@@ -1042,3 +1042,10 @@ def test_update_cosmo():
     assert not np.allclose(ps_c_noobs, ps_c_noobs_new)
     assert not np.allclose(ps_t1_noobs, ps_t1_noobs_new)
     assert not np.allclose(ps_t2_noobs, ps_t2_noobs_new)
+
+
+def test_manual_box():
+    ps = PowerSpectrum()
+    ps._box_len = np.array([100, 100, 100])
+    ps._box_ndim = np.array([10, 10, 10])
+    assert np.allclose(ps.box_voxel_redshift, ps.z)
