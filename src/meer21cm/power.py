@@ -3171,6 +3171,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         # only pixels sampled by the lightcone is used
         weights_g = (self.counts_in_box > 0).astype(float)
         self.weights_field_2 = weights_g
+        self.weights_grid_2 = np.ones_like(self.field_2)
         self.mean_center_2 = True
         self.unitless_2 = True
         include_beam = np.array(self.include_beam)

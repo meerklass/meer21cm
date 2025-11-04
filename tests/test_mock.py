@@ -142,6 +142,11 @@ def test_tracer_mock(tracer_i, kaiser_rsd, parallel_plane):
     ratio = mock.auto_power_3d_2 / mock.auto_power_tracer_2_model
     # mumode will be slightly smaller if not using parallel plane
     assert np.abs(ratio.mean() - 1) < 2e-1
+    setattr(mock, f"mock_amp_{tracer_i}", "ones_func")
+    mock.field_2 = getattr(mock, f"mock_tracer_field_{tracer_i}")
+    ratio = mock.auto_power_3d_2 / mock.auto_power_tracer_2_model
+    # mumode will be slightly smaller if not using parallel plane
+    assert np.abs(ratio.mean() - 1) < 2e-1
 
 
 def test_tracer_position():
