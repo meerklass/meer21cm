@@ -11,7 +11,7 @@ Note that, there are always two sets of cosmological parameters defined in the c
 - the **true** cosmology, which is the cosmology that is used to compute the model power spectra.
 
 The Alcock–Paczynski effect is then always included in the model power spectrum calculation as well as converting
-the field k-modes to model k-modes (see :py:class:`PowerSpectrum`).
+the field k-modes to model k-modes (see :py:class:`meer21cm.power.PowerSpectrum`).
 
 """
 import numpy as np
@@ -367,7 +367,7 @@ class CosmologyCalculator(Specification):
         If True, the matter power spectrum refers to CDM+Baryon.
         If False, the matter power spectrum refers to all matter including massive neutrinos.
     **params: dict
-        Additional parameters to be passed to the base class :class:`Specification`
+        Additional parameters to be passed to the base class :class:`meer21cm.dataanalysis.Specification`
     """
 
     def __init__(

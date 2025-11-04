@@ -427,14 +427,16 @@ def test_flat_sky():
     )
     mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
     mock.grid_data_to_field()
-    mock.weights_1 = np.ones_like(mock.data)
+    mock.weights_field_1 = None
+    mock.weights_grid_1 = None
     mock.include_sky_sampling = [False, False]
     mock.compensate = False
     ratio = mock.auto_power_3d_1 / mock.auto_power_tracer_1_model
     assert np.abs(ratio.mean() - 1) < 2e-1
     mock.propagate_mock_tracer_to_gal_cat()
     mock.grid_gal_to_field()
-    mock.weights_2 = np.ones_like(mock.field_2)
+    mock.weights_field_2 = None
+    mock.weights_grid_2 = None
     mock.compensate = False
     shot_noise = np.prod(mock.box_len) / mock.field_2.sum()
     ratio = (mock.auto_power_3d_2 - shot_noise) / mock.auto_power_tracer_2_model

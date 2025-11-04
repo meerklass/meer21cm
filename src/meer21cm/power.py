@@ -3170,7 +3170,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         self.field_2 = gal_map_rg
         # only pixels sampled by the lightcone is used
         weights_g = (self.counts_in_box > 0).astype(float)
-        self.weights_2 = weights_g
+        self.weights_field_2 = weights_g
         self.mean_center_2 = True
         self.unitless_2 = True
         include_beam = np.array(self.include_beam)

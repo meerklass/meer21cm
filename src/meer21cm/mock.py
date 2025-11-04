@@ -551,7 +551,7 @@ class MockSimulation(PowerSpectrum):
         If not given, default is to use ``self.mean_amp_1`` as the amplitude.
         """
         if self._mock_amp_1 is None:
-            self._mock_amp_1 = self.mean_amp_1
+            return self.mean_amp_1
         return self._mock_amp_1
 
     @mock_amp_1.setter
@@ -567,7 +567,7 @@ class MockSimulation(PowerSpectrum):
         If not given, default is to use ``self.mean_amp_2`` as the amplitude.
         """
         if self._mock_amp_2 is None:
-            self._mock_amp_2 = self.mean_amp_2
+            return self.mean_amp_2
         return self._mock_amp_2
 
     @mock_amp_2.setter
