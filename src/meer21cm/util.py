@@ -14,6 +14,7 @@ from numpy.random import default_rng
 from halomod.hod import HODBulk
 from astropy.wcs import WCS
 import re
+from scipy.special import legendre
 
 f_21 = 1420405751.7667  # in Hz
 A_10 = 2.85 * 1e-15 / units.s
@@ -1302,3 +1303,27 @@ def find_block_id(filename):
 
 
 vfind_id = np.vectorize(find_block_id)
+
+
+def legendre_polynomial_with_factor(ell: int, return_coeff: bool = True):
+    """
+    Return the Legendre polynomial with the given ell, with the (2*ell+1) factor.
+
+    Parameters
+    ----------
+        ell: int
+            The Legendre polynomial order.
+        return_coeff: bool, default True
+            Whether to return the coefficients or the polynomial or the callable function.
+
+    Returns
+    -------
+        coeff: np.ndarray
+            The coefficients of the Legendre polynomial.
+        poly: np.poly1d
+            The Legendre polynomial function.
+    """
+    coeff = legendre(ell).c * (2 * ell + 1)
+    if return_coeff:
+        return coeff
+    return np.poly1d(coeff)

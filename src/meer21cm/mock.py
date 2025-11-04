@@ -124,6 +124,11 @@ class MockSimulation(PowerSpectrum):
         self.discrete_source_dndz = discrete_source_dndz
         self.mock_amp_1 = mock_amp_1
         self.mock_amp_2 = mock_amp_2
+        if self.true_cosmology != self.fiducial_cosmology:
+            warnings.warn(
+                "true_cosmology != fiducial_cosmology, "
+                "box dimensions and model power will be inconsistent"
+            )
 
     @property
     def tot_num_source_in_box(self):
@@ -136,9 +141,9 @@ class MockSimulation(PowerSpectrum):
         this property will be automatically updated but the mock catalog is not.
         """
         if self.flat_sky:
-            dndz_arr = self.discrete_source_dndz(self._box_voxel_redshift)
-            z_sel = (self._box_voxel_redshift >= self.z_ch.min()) & (
-                self._box_voxel_redshift <= self.z_ch.max()
+            dndz_arr = self.discrete_source_dndz(self.box_voxel_redshift)
+            z_sel = (self.box_voxel_redshift >= self.z_ch.min()) & (
+                self.box_voxel_redshift <= self.z_ch.max()
             )
             dndz_arr = dndz_arr[z_sel]
             dndz_arr /= dndz_arr.max()
@@ -158,8 +163,8 @@ class MockSimulation(PowerSpectrum):
                 (self.W_HI[:, :, 0].sum() * self.pixel_area * (np.pi / 180) ** 2)
                 / 3
                 * (
-                    self.comoving_distance(z_ext[:-1]) ** 3
-                    - self.comoving_distance(z_ext[1:]) ** 3
+                    self.astropy_cosmo_true.comoving_distance(z_ext[:-1]) ** 3
+                    - self.astropy_cosmo_true.comoving_distance(z_ext[1:]) ** 3
                 ).value
             )
             dn_channel = self.discrete_source_dndz(self.z_ch)
@@ -275,7 +280,7 @@ class MockSimulation(PowerSpectrum):
         self.clean_cache(self.discrete_dep_attr)
 
     @property
-    @tagging("cosmo", "nu", "mock", "box")
+    @tagging("cosmo_model", "nu", "mock", "box")
     def mock_matter_field_r(self):
         """
         The simulated dark matter density field in real space.
@@ -285,7 +290,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_matter_field_r
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd")
     def mock_matter_field(self):
         """
         The simulated dark matter density field in redshift space.
@@ -340,7 +345,7 @@ class MockSimulation(PowerSpectrum):
         return delta_x
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd")
     def mock_velocity_u_matter(self):
         r"""
         The normalised peculiar velocity field in real space, defined as
@@ -358,7 +363,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_velocity_u_matter
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_1")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_1")
     def mock_velocity_u_tracer_1(self):
         """
         The normalised peculiar velocity field used for the first tracer.
@@ -377,7 +382,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_velocity_u_tracer_1
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_2")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_2")
     def mock_velocity_u_tracer_2(self):
         """
         The normalised peculiar velocity field used for the second tracer.
@@ -422,7 +427,7 @@ class MockSimulation(PowerSpectrum):
         return u_r
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd")
     def mock_kaiser_field_k_matter(self):
         """
         The Kaiser rsd effect correction for the mock matter field in k-space.
@@ -432,7 +437,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_kaiser_field_k_matter
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_1")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_1")
     def mock_kaiser_field_k_tracer_1(self):
         """
         The Kaiser rsd effect correction for the mock tracer field 1 in k-space.
@@ -444,7 +449,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_kaiser_field_k_tracer_1
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "rsd", "tracer_2")
+    @tagging("cosmo_model", "nu", "mock", "box", "rsd", "tracer_2")
     def mock_kaiser_field_k_tracer_2(self):
         """
         The Kaiser rsd effect correction for the mock tracer field 2 in k-space.
@@ -489,7 +494,7 @@ class MockSimulation(PowerSpectrum):
         y_k_dot_k = np.array(
             [(y_k[i] * self.k_vec[i][slicer[i]]) for i in range(3)]
         ).sum(axis=0)
-        delta_rsd_k = 1j * self.f_growth * y_k_dot_k
+        delta_rsd_k = 1j * self.f_growth_true * y_k_dot_k
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
             f"setting _mock_kaiser_field_k_{field} "
@@ -546,7 +551,7 @@ class MockSimulation(PowerSpectrum):
         If not given, default is to use ``self.mean_amp_1`` as the amplitude.
         """
         if self._mock_amp_1 is None:
-            self._mock_amp_1 = self.mean_amp_1
+            return self.mean_amp_1
         return self._mock_amp_1
 
     @mock_amp_1.setter
@@ -562,7 +567,7 @@ class MockSimulation(PowerSpectrum):
         If not given, default is to use ``self.mean_amp_2`` as the amplitude.
         """
         if self._mock_amp_2 is None:
-            self._mock_amp_2 = self.mean_amp_2
+            return self.mean_amp_2
         return self._mock_amp_2
 
     @mock_amp_2.setter
@@ -571,7 +576,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_amp_2
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_1", "rsd")
     def mock_tracer_field_1(self):
         """
         The simulated tracer field 1 in redshift space with unit if ``mock_amp_1`` or ``mean_amp_1`` is given.
@@ -584,7 +589,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_tracer_field_1 * mean_amp
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_2", "rsd")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_2", "rsd")
     def mock_tracer_field_2(self):
         """
         The simulated tracer field 2 in redshift space with unit if ``mock_amp_2`` or ``mean_amp_2`` is given.
@@ -597,7 +602,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_tracer_field_2 * mean_amp
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_1")
     def mock_tracer_field_1_r(self):
         """
         The simulated tracer field 1 **unitsless density contrast** in real space.
@@ -607,7 +612,7 @@ class MockSimulation(PowerSpectrum):
         return self._mock_tracer_field_1_r
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_2")
+    @tagging("cosmo_model", "nu", "mock", "box", "tracer_2")
     def mock_tracer_field_2_r(self):
         """
         The simulated tracer field 2 **unitsless density contrast** in real space.
@@ -672,7 +677,9 @@ class MockSimulation(PowerSpectrum):
         return delta_x
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd")
+    @tagging(
+        "cosmo_model", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd"
+    )
     def mock_tracer_position_in_box(self):
         """
         The simulated tracer positions in the box in real space.
@@ -712,7 +719,7 @@ class MockSimulation(PowerSpectrum):
             density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i)) + 1
         num_g = self.tot_num_source_in_box
         # apply a redshift kernel to the source distribution
-        dndz_prob = self._dndz_renorm(self._box_voxel_redshift)
+        dndz_prob = self._dndz_renorm(self.box_voxel_redshift)
         density_field[density_field < 0] = 0
         density_field /= density_field.sum() / num_g
         density_field *= dndz_prob
@@ -750,7 +757,9 @@ class MockSimulation(PowerSpectrum):
         self._mock_tracer_position_in_box = tracer_positions
 
     @property
-    @tagging("cosmo", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd")
+    @tagging(
+        "cosmo_model", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd"
+    )
     def mock_tracer_position_in_radecz(self):
         """
         The simulated tracer positions projected onto the grid. The tracers outside
@@ -799,7 +808,7 @@ class MockSimulation(PowerSpectrum):
         if self.flat_sky:
             self._mock_tracer_comov_dist = (
                 self.mock_tracer_position_in_box[:, -1]
-                + self.comoving_distance(self.z_ch.min()).value
+                + self.astropy_cosmo_true.comoving_distance(self.z_ch.min()).value
             )
             z_mock_tracer = self.z_as_func_of_comov_dist(self._mock_tracer_comov_dist)
             pos_indx_1 = (
@@ -1011,7 +1020,7 @@ class HIGalaxySimulation(MockSimulation):
         self.tf_zero = tf_zero
         if halo_model is None:
             halo_model = THM(
-                cosmo_model=self.cosmo,
+                cosmo_model=self.astropy_cosmo_true,
                 z=self.z,
                 hod_model=Obuljen18,
             )
@@ -1098,7 +1107,15 @@ class HIGalaxySimulation(MockSimulation):
 
     @property
     @tagging(
-        "hm", "cosmo", "nu", "mock", "box", "tracer_1", "tracer_2", "discrete", "rsd"
+        "hm",
+        "cosmo_model",
+        "nu",
+        "mock",
+        "box",
+        "tracer_1",
+        "tracer_2",
+        "discrete",
+        "rsd",
     )
     def halo_mass_mock_tracer(self):
         """
@@ -1147,7 +1164,7 @@ class HIGalaxySimulation(MockSimulation):
     @property
     @tagging(
         "hm",
-        "cosmo",
+        "cosmo_model",
         "nu",
         "mock",
         "box",
@@ -1181,7 +1198,7 @@ class HIGalaxySimulation(MockSimulation):
     @property
     @tagging(
         "hm",
-        "cosmo",
+        "cosmo_model",
         "nu",
         "mock",
         "box",
@@ -1213,7 +1230,7 @@ class HIGalaxySimulation(MockSimulation):
             self.nu,
             self.tf_slope,
             self.tf_zero,
-            cosmo=self.cosmo,
+            cosmo=self.astropy_cosmo_true,
             seed=self.seed,
             no_vel=self.no_vel,
             num_ch_ext_on_each_side=self.num_ch_ext_on_each_side,

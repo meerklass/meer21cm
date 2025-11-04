@@ -25,6 +25,7 @@ from meer21cm.util import (
     freq_to_redshift,
     get_nd_slicer,
     omega_hi_to_average_temp,
+    legendre_polynomial_with_factor,
 )
 from meer21cm.dataanalysis import Specification
 import healpy as hp
@@ -42,9 +43,9 @@ class ModelPowerSpectrum(CosmologyCalculator):
     Parameters
     ----------
     kmode: np.ndarray, default None
-        The mode of k in Mpc-1.
+        The **true** mode of k in Mpc-1.
     mumode: np.ndarray, default None
-        The mu values of each k-mode so that :math:`k_\parallel = k \times \mu`.
+        The **true** mu values of each k-mode so that :math:`k_\parallel = k \times \mu`.
     tracer_bias_1: float, default 1.0
         The linear bias of the first tracer.
     sigma_v_1: float, default 0.0
@@ -593,7 +594,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
                 self.clean_cache(self.tracer_2_dep_attr)
 
     @property
-    @tagging("cosmo", "nu", "kmode")
+    @tagging("cosmo_model", "nu", "kmode")
     def auto_power_matter_model_r(self):
         """
         The model matter power spectrum in real space (without RSD).
@@ -610,7 +611,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         self._auto_power_matter_model_r = self.matter_power_spectrum_fnc(self.kmode)
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "rsd")
     def auto_power_matter_model(self):
         """
         The model matter power spectrum with RSD effects.
@@ -621,7 +622,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._auto_power_matter_model
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_1", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_1", "rsd")
     def auto_power_tracer_1_model_noobs(self):
         """
         The model power spectrum for the first tracer without observational effects.
@@ -632,7 +633,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._auto_power_tracer_1_model_noobs
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_2", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_2", "rsd")
     def auto_power_tracer_2_model_noobs(self):
         """
         The model power spectrum for the second tracer without observational effects.
@@ -644,7 +645,14 @@ class ModelPowerSpectrum(CosmologyCalculator):
 
     @property
     @tagging(
-        "cosmo", "nu", "kmode", "mumode", "tracer_1", "tracer_2", "rsd", "cross_coeff"
+        "cosmo_model",
+        "nu",
+        "kmode",
+        "mumode",
+        "tracer_1",
+        "tracer_2",
+        "rsd",
+        "cross_coeff",
     )
     def cross_power_tracer_model_noobs(self):
         """
@@ -656,7 +664,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._cross_power_tracer_model_noobs
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_1", "beam", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_1", "beam", "rsd")
     def auto_power_tracer_1_model(self):
         """
         The 3D model power spectrum for the first tracer.
@@ -676,7 +684,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         return self._auto_power_tracer_1_model * mean_amp**2
 
     @property
-    @tagging("cosmo", "nu", "kmode", "mumode", "tracer_2", "beam", "rsd")
+    @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_2", "beam", "rsd")
     def auto_power_tracer_2_model(self):
         """
         The 3D model power spectrum for the second tracer.
@@ -700,7 +708,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
 
     @property
     @tagging(
-        "cosmo",
+        "cosmo_model",
         "nu",
         "kmode",
         "mumode",
@@ -835,7 +843,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         """
         pk3d_mm_r = self.auto_power_matter_model_r
         if self.kaiser_rsd:
-            beta_m = self.f_growth
+            beta_m = self.f_growth_true
             self._auto_power_matter_model = self.cal_rsd_power(
                 pk3d_mm_r,
                 beta_m,
@@ -862,7 +870,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
         pk3d_tt_r = tracer_bias_i**2 * pk3d_mm_r
         # apply the RSD
         if self.kaiser_rsd:
-            beta_i = self.f_growth / tracer_bias_i
+            beta_i = self.f_growth_true / tracer_bias_i
             power_noobs_i = self.cal_rsd_power(
                 pk3d_tt_r,
                 beta_i,
@@ -943,8 +951,8 @@ class ModelPowerSpectrum(CosmologyCalculator):
         pk3d_mm_r = self.auto_power_matter_model_r
         pk3d_tt_r = self.tracer_bias_1 * self.tracer_bias_2 * pk3d_mm_r
         if self.kaiser_rsd:
-            beta_1 = self.f_growth / self.tracer_bias_1
-            beta_2 = self.f_growth / self.tracer_bias_2
+            beta_1 = self.f_growth_true / self.tracer_bias_1
+            beta_2 = self.f_growth_true / self.tracer_bias_2
             result = self.cal_rsd_power(
                 pk3d_tt_r,
                 beta1=beta_1,
@@ -1191,23 +1199,31 @@ class FieldPowerSpectrum(Specification):
     @property
     def k_perp(self):
         """
-        The perpendicular k-vector of the 3D box.
+        The **fiducial** perpendicular k-vector of the 3D box.
         """
         return get_vec_mode(self.k_vec[:-1])
 
     @property
     def k_para(self):
         """
-        The parallel k-mode of the 3D box.
+        The **fiducial** parallel k-mode of the 3D box.
         """
         return self.k_vec[-1]
 
     @property
     def k_mode(self):
         """
-        The mode of the 3D k-vector.
+        The **fiducial** (observed) mode of the 3D k-vector.
         """
         return get_vec_mode(self.k_vec)
+
+    @property
+    def mu_mode(self):
+        """
+        The **fiducial** (observed) mu values of each k-mode so that :math:`k_\parallel = k \times \mu`.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.nan_to_num(self.k_para[None, None, :] / self.k_mode)
 
     @property
     def field_1(self):
@@ -2024,45 +2040,6 @@ def bin_3d_to_cy(
     return pscy
 
 
-# def get_independent_fourier_modes(box_dim):
-#    r"""
-#    Return a boolean array on whether the k-mode is independent.
-#    For real-valued signal, a specific k-mode :math:`\vec{k}` and it's opposite
-#    :math:`-\vec{k}` are conjugate to each other. This functions finds all the
-#    pairs and only assign one of them with ``True``.
-#
-#    The indexing of the output array is consistent with the ``np.fft.fftfreq``
-#    convention.
-#
-#    Parameters
-#    ----------
-#    box_dim: array.
-#        The shape of the signal.
-#
-#    Returns
-#    -------
-#    unique: boolean array.
-#        Whether the k-mode is indendent.
-#
-#    """
-#    kvec = get_k_vector(box_dim, np.ones(len(box_dim)))
-#    kvecmin = [(np.abs(kvec[i])[kvec[i] != 0]).min() for i in range(len(box_dim))]
-#    kvec = [kvec[i] / kvecmin[i] for i in range(len(box_dim))]
-#    kvecmax = [(np.abs(kvec[i])).max() for i in range(len(box_dim))]
-#    kvecmax = np.max(kvecmax)
-#    base = 2 * kvecmax + 1
-#    kvec = [kvec[i] * (base**i) for i in range(len(box_dim))]
-#    k_indx = np.sum(
-#        (np.meshgrid(*([(vec) for vec in kvec]), indexing="ij")),
-#        0,
-#    )
-#    _, indx = np.unique(np.abs(k_indx), return_index=True)
-#    unique = np.zeros(np.prod(box_dim))
-#    unique[indx] += 1
-#    unique = unique.reshape(box_dim) > 0
-#    return unique
-
-
 def gaussian_beam_attenuation(k_perp, beam_sigma_in_mpc):
     """
     The beam attenuation term to be multiplied to model power
@@ -2285,9 +2262,6 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         )
         self.kmode = kmode
         self.mumode = mumode
-        if model_k_from_field:
-            self.propagate_field_k_to_model()
-        self.model_k_from_field = model_k_from_field
         ModelPowerSpectrum.__init__(
             self,
             kmode=self.kmode,
@@ -2311,6 +2285,9 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             compensate=compensate,
             **params,
         )
+        if model_k_from_field:
+            self.propagate_field_k_to_model()
+        self.model_k_from_field = model_k_from_field
         self.k1dbins = k1dbins
         self.kperpbins = kperpbins
         self.kparabins = kparabins
@@ -2322,6 +2299,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             "_counts_in_box",
             "_flat_sky",
             "_box_origin",
+            "_box_voxel_redshift",
         ]
         for attr in init_attr:
             setattr(self, attr, None)
@@ -2496,18 +2474,21 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             setattr(self, attr, None)
 
     def propagate_field_k_to_model(self):
-        """
-        Use field k-modes for the model
+        r"""
+        Use field k-modes for the model, taking into account the Alcock–Paczynski effect.
+
+        .. math::
+            k_\perp^\text{fiducial} = k_\perp^\text{true} \times \alpha_\perp
+
+            k_\parallel^\text{fiducial} = k_\parallel^\text{true} \times \alpha_\parallel
+
         """
         # use field kmode to propagate into model
-        kmode = self.k_mode
-        mumode = self.k_para
-        slice_indx = (None,) * (len(self.box_len.shape) - 1)
-        slice_indx += (slice(None, None, None),)
+        kperp = self.k_perp / self.alpha_perp
+        kpara = self.k_para / self.alpha_parallel
+        self.kmode = np.sqrt(kperp[:, :, None] ** 2 + kpara[None, None, :] ** 2)
         with np.errstate(divide="ignore", invalid="ignore"):
-            mumode = np.nan_to_num(self.k_para[slice_indx] / kmode)
-        self.kmode = kmode
-        self.mumode = mumode
+            self.mumode = np.nan_to_num(kpara[None, None, :] / self.kmode)
 
     def get_1d_power(
         self,
@@ -2518,12 +2499,17 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         k_xyz_max=None,
         k_perppara_min=None,
         k_perppara_max=None,
+        multipole_ell=0,
+        mu_model=None,
     ):
         """
         Bin the 3D power spectrum into 1D power spectrum.
         If the input ``power3d`` is a string, it is assumed to be an attribute of the class,
         for example ``auto_power_3d_1``.
         Also see :meth:`meer21cm.power.bin_3d_to_1d` for more details.
+
+        By default the 1D power spectrum is calculated for the monopole.
+        Passing ``multipole_ell`` will calculate the 1D power spectrum for the given multipole.
 
         Parameters
         ----------
@@ -2541,6 +2527,12 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             The minimum k_perp and k_para for the 1D power spectrum.
         k_perppara_max: list of size 2, default None
             The maximum k_perp and k_para for the 1D power spectrum.
+        multipole_ell: int, default 0
+            The multipole order for the 1D power spectrum.
+            By default the 1D power spectrum is calculated for the monopole.
+        mu_model: np.ndarray, default None
+            The mu-modes for the legendre polynomial.
+            If None, use the class attribute ``mumode``.
 
         Returns
         -------
@@ -2590,8 +2582,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             k1dweights * k_3d_sel_min * k_3d_sel_max * k_cy_sel_min * k_cy_sel_max
         )
         k1dweights[0, 0, 0] = 0.0
+        if mu_model is None:
+            mu_model = self.mumode
+        multipole_factor = np.poly1d(legendre_polynomial_with_factor(multipole_ell))(
+            mu_model
+        )
         power1d, k1deff, nmodes = bin_3d_to_1d(
-            power3d,
+            power3d * multipole_factor,
             self.k_mode,
             k1dbins,
             weights=k1dweights,
@@ -2604,12 +2601,16 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         kperpbins=None,
         kparabins=None,
         kcyweights=None,
+        multipole_ell=0,
+        mu_model=None,
     ):
         """
         Bin the 3D power spectrum into cylindrical k_perp-k_para power spectrum.
         If the input ``power3d`` is a string, it is assumed to be an attribute of the class,
         for example ``auto_power_3d_1``.
         Also see :meth:`meer21cm.power.bin_3d_to_cy` for more details.
+
+        Passing ``multipole_ell`` will calculate the cylindrical power spectrum multiplied by the Legendre polynomial.
 
         Parameters
         ----------
@@ -2621,6 +2622,12 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             The k_para bins for the cylindrical ps. Default is the same as the class attribute.
         kcyweights: np.ndarray, default None
             The weights for the 3D power spectrum. Default is equal weights for every k-mode.
+        multipole_ell: int, default 0
+            The multipole order for the cylindrical power spectrum.
+            By default the cylindrical power spectrum is calculated for the monopole.
+        mu_model: np.ndarray, default None
+            The mu-modes for the legendre polynomial.
+            If None, use the class attribute ``mumode``.
 
         Returns
         -------
@@ -2638,8 +2645,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         if isinstance(power3d, str):
             power3d = getattr(self, power3d)
         kcyweights[0, 0, 0] = 0.0
+        if mu_model is None:
+            mu_model = self.mumode
+        multipole_factor = np.poly1d(legendre_polynomial_with_factor(multipole_ell))(
+            mu_model
+        )
         powercy = bin_3d_to_cy(
-            power3d,
+            power3d * multipole_factor,
             self.k_perp,
             kperpbins,
             weights=kcyweights,
@@ -2822,7 +2834,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             ra,
             dec,
             self.nu,
-            cosmo=self.cosmo,
+            cosmo=self.astropy_cosmo_fiducial,
             return_coord=True,
             buffkick=self.box_buffkick,
             rot_mat=rot_mat,
@@ -2875,7 +2887,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 ra_sample[i],
                 dec_sample[i],
                 nu_sample[i],
-                cosmo=self.cosmo,
+                cosmo=self.astropy_cosmo_fiducial,
                 return_coord=True,
                 buffkick=self.box_buffkick,
                 rot_mat=self.rot_mat_sky_to_box,
@@ -2923,8 +2935,11 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
     def average_model_hi_temp(self):
         """
         Calculate the average HI brightness temperature in the map cube, taking care of redshift evolution and map sampling.
+        Calculation is based on the true (fitted) cosmology.
         """
-        t_bar = omega_hi_to_average_temp(self.omega_hi, z=self.z_ch, cosmo=self.cosmo)
+        t_bar = omega_hi_to_average_temp(
+            self.omega_hi, z=self.z_ch, cosmo=self.astropy_cosmo_true
+        )
         t_bar = (t_bar * self.w_HI.sum((0, 1))).sum() / self.w_HI.sum()
         return t_bar
 
@@ -2937,10 +2952,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         is used as the average t_bar in the model power spectrum (by passing it to ``mean_amp_1``),
         whereas the 3D ``model_hi_temp_in_box`` is used as the field weight to account for the effect of
         the redshift evolution of Omega_HI in the power spectrum.
+        Calculation is based on the true (fitted) cosmology.
         """
         z_grid = self._box_voxel_redshift
         omega_hi_grid = self.omega_hi_z_func(z_grid)
-        t_bar_grid = omega_hi_to_average_temp(omega_hi_grid, z=z_grid, cosmo=self.cosmo)
+        t_bar_grid = omega_hi_to_average_temp(
+            omega_hi_grid, z=z_grid, cosmo=self.astropy_cosmo_true
+        )
         return t_bar_grid
 
     def get_counts_in_box(self, partial_sel=None):
@@ -3106,15 +3124,15 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             gal_pos_in_box[:, 0] = pos_indx_1 / self.num_pix_x * self.box_len[0]
             gal_pos_in_box[:, 1] = pos_indx_2 / self.num_pix_y * self.box_len[1]
             gal_pos_in_box[:, 2] = (
-                self.comoving_distance(z_gal).value
-                - self.comoving_distance(self.z_ch.min()).value
+                self.astropy_cosmo_fiducial.comoving_distance(z_gal).value
+                - self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.min()).value
             )
         else:
             (_, _, _, _, _, _, _, gal_pos_arr) = minimum_enclosing_box_of_lightcone(
                 ra_gal,
                 dec_gal,
                 freq_gal,
-                cosmo=self.cosmo,
+                cosmo=self.astropy_cosmo_fiducial,
                 return_coord=True,
                 tile=False,
                 rot_mat=self.rot_mat_sky_to_box,
@@ -3152,7 +3170,8 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         self.field_2 = gal_map_rg
         # only pixels sampled by the lightcone is used
         weights_g = (self.counts_in_box > 0).astype(float)
-        self.weights_2 = weights_g
+        self.weights_field_2 = weights_g
+        self.weights_grid_2 = np.ones_like(self.field_2)
         self.mean_center_2 = True
         self.unitless_2 = True
         include_beam = np.array(self.include_beam)
@@ -3312,8 +3331,12 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         dec_rand += rand_disp[num_g_rand:]
         # in future this should be a dNdz
         cov_dist_limit = [
-            self.comoving_distance(self.z_ch.min()).to("Mpc").value,
-            self.comoving_distance(self.z_ch.max()).to("Mpc").value,
+            self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.min())
+            .to("Mpc")
+            .value,
+            self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.max())
+            .to("Mpc")
+            .value,
         ]
         cov_dist_rand = rng.uniform(
             cov_dist_limit[0], cov_dist_limit[1], size=num_g_rand
@@ -3352,3 +3375,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             slice_list_i = tuple(slice_list_i)
             taper = taper * taper_i[i][slice_list_i]
         setattr(self, f"weights_{field}", getattr(self, f"weights_{field}") * taper)
+
+    @property
+    @tagging("cosmo_fiducial", "nu", "mock", "box")
+    def box_voxel_redshift(self):
+        """
+        The redshift of each voxel in the rectangular box.
+        """
+        if self._box_voxel_redshift is None:
+            return np.ones(self.box_ndim) * self.z
+        return self._box_voxel_redshift

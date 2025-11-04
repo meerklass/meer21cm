@@ -5,7 +5,14 @@ from meer21cm.util import *
 import sys
 from scipy.special import erf
 from halomod import TracerHaloModel
-from meer21cm import Specification
+from meer21cm import PowerSpectrum
+
+
+def test_legendre_polynomial_with_factor():
+    coeff = legendre_polynomial_with_factor(2)
+    assert np.allclose(coeff, np.array([3 / 2, 0, -1 / 2]) * 5)
+    poly = legendre_polynomial_with_factor(2, return_coeff=False)
+    assert np.allclose(poly.c, np.array([3 / 2, 0, -1 / 2]) * 5)
 
 
 def test_get_nd_slicer():
@@ -66,21 +73,25 @@ def test_angle_in_range():
 
 
 def test_sample_map_from_highres():
-    mock = Specification()
+    mock = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+    )
     w = create_udres_wproj(mock.wproj, 3)
-    mock2 = Specification(
+    mock2 = PowerSpectrum(
+        nu=mock.nu,
         wproj=w,
         num_pix_x=mock.num_pix_x * 3,
         num_pix_y=mock.num_pix_y * 3,
     )
-    map_hires = np.ones((mock.num_pix_x * 3, mock.num_pix_y * 3, 1))
+    map_hires = np.ones((mock.num_pix_x * 3, mock.num_pix_y * 3, mock.nu.size))
     map_lowres = sample_map_from_highres(
         map_hires,
         mock2.ra_map,
         mock2.dec_map,
         mock.wproj,
-        mock2.num_pix_x,
-        mock2.num_pix_y,
+        mock.num_pix_x,
+        mock.num_pix_y,
         average=True,
     )
     # get rid of nan
@@ -89,9 +100,14 @@ def test_sample_map_from_highres():
 
 
 def test_create_udres_wproj():
-    mock = Specification()
+    mock = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+    )
     w = create_udres_wproj(mock.wproj, 3)
-    mock2 = Specification(
+    mock2 = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
         wproj=w,
         num_pix_x=mock.num_pix_x * 3,
         num_pix_y=mock.num_pix_y * 3,

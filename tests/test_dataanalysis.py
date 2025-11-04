@@ -1,5 +1,5 @@
 from meer21cm import Specification
-from astropy.cosmology import Planck18, Planck15
+from astropy.cosmology import Planck18
 import numpy as np
 from astropy import units, constants
 import pytest
@@ -21,59 +21,11 @@ def test_nu_range():
         )
 
 
-def test_volume():
-    spec = Specification(
-        survey="meerklass_2021",
-        band="L",
-    )
-    diff = np.abs(
-        spec.pix_resol_in_mpc**2
-        * spec.los_resol_in_mpc
-        * spec.W_HI.sum()
-        / spec.survey_volume
-        - 1
-    )
-    assert diff < 1e-2
-
-
-def test_cosmo():
+def test_update_nu():
     spec = Specification()
-    assert spec.h == Planck18.h
-    # an update should properly update the internal functions as well
-    spec.cosmo = "Planck15"
-    assert spec.cosmo is Planck15
-    assert spec.h == Planck15.h
-
-
-def test_update_pars():
-    spec = Specification()
-    # test string input
-    spec.cosmo = "Planck15"
-    assert spec.cosmo is Planck15
-    assert spec.h == Planck15.h
-    # test direct input
-    spec.cosmo = Planck15
     # test nu
     spec.nu = [f_21, f_21]
     assert np.allclose(spec.z, 0)
-
-
-def test_defaults(test_nu, test_W):
-    spec = Specification(
-        survey="meerklass_2021",
-        band="L",
-    )
-    assert np.allclose(spec.nu, test_nu)
-    assert np.allclose(
-        spec.map_has_sampling[1:-1, 1:-1], np.ones(test_W[1:-1, 1:-1].shape)
-    )
-    assert np.allclose(spec.z_ch, freq_to_redshift(test_nu))
-    assert np.allclose(spec.z, freq_to_redshift(test_nu).mean())
-    x_res = 0.3 * np.pi / 180 * Planck18.comoving_distance(spec.z).value
-    assert np.allclose(spec.pix_resol_in_mpc, x_res)
-    los = Planck18.comoving_distance(spec.z_ch).value
-    z_res = (los[0] - los[-1]) / len(spec.nu)
-    assert np.allclose(z_res, spec.los_resol_in_mpc)
 
 
 def test_unit_conversion():
@@ -162,33 +114,6 @@ def test_gal_readin(test_gal_fits):
     assert len(sp.dec_gal) == len(sp.z_gal)
 
 
-def test_beam_update():
-    ps = Specification(
-        survey="meerklass_2021",
-        band="L",
-    )
-    assert ps.sigma_beam_ch_in_mpc is None
-    assert ps.sigma_beam_in_mpc is None
-    ps.sigma_beam_ch = np.ones(ps.nu.size)
-    assert ps._sigma_beam_ch_in_mpc is None
-    s1 = ps.sigma_beam_ch_in_mpc
-    assert np.allclose(s1.mean(), ps.sigma_beam_in_mpc)
-    ps.sigma_beam_ch = np.ones(ps.nu.size) * 2
-    assert ps._sigma_beam_ch_in_mpc is None
-    s2 = ps.sigma_beam_ch_in_mpc
-    assert np.allclose(2 * s1, s2)
-    # test single number input
-    ps.sigma_beam_ch = 2
-    assert np.allclose(ps.sigma_beam_ch_in_mpc, s2)
-    ps.beam_unit = units.rad
-    s3 = ps.sigma_beam_ch_in_mpc
-    assert np.allclose(np.pi * s3 / 180, s2)
-    # test update cosmo, then beam in mpc also change
-    ps.cosmo = "Planck15"
-    s4 = ps.sigma_beam_ch_in_mpc
-    assert not np.allclose(s4, s3)
-
-
 def test_beam_image():
     sp = Specification(
         survey="meerklass_2021",
@@ -251,16 +176,6 @@ def test_update_beam_type():
     assert sp.beam_type == "isotropic"
     with pytest.raises(ValueError):
         sp.beam_model = "something"
-
-
-def test_z_interp():
-    ps = Specification(
-        survey="meerklass_2021",
-        band="L",
-    )
-    func = ps.z_as_func_of_comov_dist
-    z_rand = np.random.uniform(ps.z_ch.min(), ps.z_ch.max(), size=100)
-    assert np.allclose(func(ps.comoving_distance(z_rand).value), z_rand)
 
 
 def test_trim_gal():

@@ -52,6 +52,13 @@ def test_rsd_from_field(parallel_plane):
                 parallel_plane=parallel_plane,
                 rsd_from_field=False,
             )
+        with pytest.warns(UserWarning):
+            mock = MockSimulation(
+                survey="meerklass_2021",
+                band="L",
+                true_cosmology="WMAP1",
+                fiducial_cosmology="Planck18",
+            )
 
 
 @pytest.mark.parametrize("density", [("lognormal"), ("gaussian"), ("test")])
@@ -64,7 +71,7 @@ def test_matter_mock(test_W, density):
         survey="meerklass_2021",
         band="L",
         density=density,
-        cosmo="WMAP1",
+        true_cosmology="WMAP1",
         k1dbins=k1dedges,
         model_k_from_field=True,
         upgrade_sampling_from_gridding=True,
@@ -131,6 +138,11 @@ def test_tracer_mock(tracer_i, kaiser_rsd, parallel_plane):
     )
     mock.ones_func = 1
     setattr(mock, f"mean_amp_{tracer_i}", "ones_func")
+    mock.field_2 = getattr(mock, f"mock_tracer_field_{tracer_i}")
+    ratio = mock.auto_power_3d_2 / mock.auto_power_tracer_2_model
+    # mumode will be slightly smaller if not using parallel plane
+    assert np.abs(ratio.mean() - 1) < 2e-1
+    setattr(mock, f"mock_amp_{tracer_i}", "ones_func")
     mock.field_2 = getattr(mock, f"mock_tracer_field_{tracer_i}")
     ratio = mock.auto_power_3d_2 / mock.auto_power_tracer_2_model
     # mumode will be slightly smaller if not using parallel plane
@@ -202,14 +214,14 @@ def test_hi_mass_to_flux():
         himass_g,
         mock.z_mock_tracer,
         mock.nu,
-        cosmo=mock.cosmo,
+        cosmo=mock.astropy_cosmo_true,
         seed=mock.seed,
     )
     # approximate from 1705.04210
     approx_mass = (
         hifluxd_ch.sum(0)
         * mock.freq_resol
-        * mock.luminosity_distance(mock.z_mock_tracer).value ** 2
+        * mock.astropy_cosmo_true.luminosity_distance(mock.z_mock_tracer).value ** 2
         * 49.7
     )
     ratio = approx_mass / 10**himass_g
@@ -222,7 +234,7 @@ def test_hi_mass_to_flux():
         himass_g,
         mock.z_mock_tracer,
         mock.nu,
-        cosmo=mock.cosmo,
+        cosmo=mock.astropy_cosmo_true,
         seed=mock.seed,
         tf_slope=3.66,
         tf_zero=1.6,
@@ -232,7 +244,7 @@ def test_hi_mass_to_flux():
     approx_mass = (
         hifluxd_ch.sum(0)
         * mock.freq_resol
-        * mock.luminosity_distance(mock.z_mock_tracer).value ** 2
+        * mock.astropy_cosmo_true.luminosity_distance(mock.z_mock_tracer).value ** 2
         * 49.7
     )
     ratio = approx_mass / 10**himass_g
@@ -272,7 +284,7 @@ def test_mock_hi_profile():
     approx_mass = (
         hifluxd_ch.sum(0)
         * hisim.freq_resol
-        * hisim.luminosity_distance(hisim.z_mock_tracer).value ** 2
+        * hisim.astropy_cosmo_true.luminosity_distance(hisim.z_mock_tracer).value ** 2
         * 49.7
     )
     ratio = approx_mass / 10**hisim.hi_mass_mock_tracer
@@ -296,7 +308,7 @@ def test_mock_hi_profile():
     approx_mass = (
         hifluxd_ch.sum(0)
         * hisim.freq_resol
-        * hisim.luminosity_distance(hisim.z_mock_tracer).value ** 2
+        * hisim.astropy_cosmo_true.luminosity_distance(hisim.z_mock_tracer).value ** 2
         * 49.7
     )
     # scaling should be exact
@@ -420,14 +432,16 @@ def test_flat_sky():
     )
     mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
     mock.grid_data_to_field()
-    mock.weights_1 = np.ones_like(mock.data)
+    mock.weights_field_1 = None
+    mock.weights_grid_1 = None
     mock.include_sky_sampling = [False, False]
     mock.compensate = False
     ratio = mock.auto_power_3d_1 / mock.auto_power_tracer_1_model
     assert np.abs(ratio.mean() - 1) < 2e-1
     mock.propagate_mock_tracer_to_gal_cat()
     mock.grid_gal_to_field()
-    mock.weights_2 = np.ones_like(mock.field_2)
+    mock.weights_field_2 = None
+    mock.weights_grid_2 = None
     mock.compensate = False
     shot_noise = np.prod(mock.box_len) / mock.field_2.sum()
     ratio = (mock.auto_power_3d_2 - shot_noise) / mock.auto_power_tracer_2_model

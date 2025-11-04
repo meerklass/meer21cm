@@ -249,6 +249,29 @@ def test_bin_functions():
     )
 
 
+def test_propagate_field_k_to_model():
+    ps = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+        true_cosmology="Planck15",
+        fiducial_cosmology="WMAP1",
+    )
+    ps.get_enclosing_box()
+    kmode_test = (
+        ps.k_mode
+        * ps.alpha_AP ** (1 / 3)
+        / ps.alpha_iso
+        * (1 + ps.mu_mode**2 * (1 / ps.alpha_AP**2 - 1)) ** (1 / 2)
+    )
+    assert np.allclose(ps.kmode, kmode_test)
+    mumode_test = (
+        ps.mu_mode
+        / ps.alpha_AP
+        * (1 + ps.mu_mode**2 * (1 / ps.alpha_AP**2 - 1)) ** (-1 / 2)
+    )
+    assert np.allclose(ps.mumode, mumode_test)
+
+
 def test_cy_power_in_ps():
     ps = PowerSpectrum(
         kaiser_rsd=False,
@@ -471,7 +494,9 @@ def test_ModelPowerSpectrum(fog_profile):
     # add rsd, test kaiser term
     model.mumode = np.ones_like(model.kmode)
     matter_ps_rsd = model.auto_power_matter_model
-    assert np.allclose(matter_ps_rsd / matter_ps_real, (1 + model.f_growth) ** 2)
+    assert np.allclose(
+        matter_ps_rsd / matter_ps_real, (1 + model.cospar_true.f_growth) ** 2
+    )
 
     # has mumode, but turn off rsd
     model.kaiser_rsd = False
@@ -488,7 +513,7 @@ def test_ModelPowerSpectrum(fog_profile):
     model.mumode = np.ones_like(model.kmode)
     tracer_ps_rsd = model.auto_power_tracer_1_model
     assert np.allclose(
-        tracer_ps_rsd / matter_ps_real, (1 + model.f_growth / 2.0) ** 2 * 4
+        tracer_ps_rsd / matter_ps_real, (1 + model.cospar_true.f_growth / 2.0) ** 2 * 4
     )
 
     # test 2 tracers with no rsd but with bias
@@ -513,18 +538,26 @@ def test_ModelPowerSpectrum(fog_profile):
     tracer_ps_rsd = model.auto_power_tracer_2_model
     cross_ps_rsd = model.cross_power_tracer_model
     assert np.allclose(
-        tracer_ps_rsd / matter_ps_real, (1 + model.f_growth / 3.0) ** 2 * 9
+        tracer_ps_rsd / matter_ps_real, (1 + model.cospar_true.f_growth / 3.0) ** 2 * 9
     )
     assert np.allclose(
         cross_ps_rsd / matter_ps_real,
-        (1 + model.f_growth / 2.0) * (1 + model.f_growth / 3.0) * 6 - 6 + 6 * 0.5,
+        (1 + model.cospar_true.f_growth / 2.0)
+        * (1 + model.cospar_true.f_growth / 3.0)
+        * 6
+        - 6
+        + 6 * 0.5,
     )
     # test change r
     model.cross_coeff = 0.9
     cross_ps_rsd = model.cross_power_tracer_model
     assert np.allclose(
         cross_ps_rsd / matter_ps_real,
-        (1 + model.f_growth / 2.0) * (1 + model.f_growth / 3.0) * 6 - 6 + 6 * 0.9,
+        (1 + model.cospar_true.f_growth / 2.0)
+        * (1 + model.cospar_true.f_growth / 3.0)
+        * 6
+        - 6
+        + 6 * 0.9,
     )
     # test change v
     model.sigma_v_1 = 1e20
@@ -897,8 +930,8 @@ def test_poisson_gal_gen():
         (ps.W_HI[:, :, 0].sum() * ps.pixel_area * (np.pi / 180) ** 2)
         / 3
         * (
-            ps.comoving_distance(ps.z_ch.max()) ** 3
-            - ps.comoving_distance(ps.z_ch.min()) ** 3
+            ps.astropy_cosmo_true.comoving_distance(ps.z_ch.max()) ** 3
+            - ps.astropy_cosmo_true.comoving_distance(ps.z_ch.min()) ** 3
         ).value
     )
     k1dedges = np.geomspace(0.05, 1, 21)
@@ -962,3 +995,57 @@ def test_average_model_hi_temp():
         ps.model_hi_temp_in_box * ps.counts_in_box
     ).sum() / ps.counts_in_box.sum()
     assert np.allclose(temp_box_avg, ps.average_model_hi_temp, rtol=1e-3)
+
+
+def test_update_cosmo():
+    ps = ModelPowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_2=1.0,
+    )
+    ps_m = ps.auto_power_matter_model
+    ps_t1 = ps.auto_power_tracer_1_model
+    ps_t2 = ps.auto_power_tracer_2_model
+    ps_c = ps.cross_power_tracer_model
+    ps_c_noobs = ps.cross_power_tracer_model_noobs
+    ps_t1_noobs = ps.auto_power_tracer_1_model_noobs
+    ps_t2_noobs = ps.auto_power_tracer_2_model_noobs
+    # update fiducial does not change model power
+    ps.fiducial_cosmology = "WMAP1"
+    ps_m_new = ps.auto_power_matter_model
+    ps_t1_new = ps.auto_power_tracer_1_model
+    ps_t2_new = ps.auto_power_tracer_2_model
+    ps_c_new = ps.cross_power_tracer_model
+    ps_c_noobs_new = ps.cross_power_tracer_model_noobs
+    ps_t1_noobs_new = ps.auto_power_tracer_1_model_noobs
+    ps_t2_noobs_new = ps.auto_power_tracer_2_model_noobs
+    assert np.allclose(ps_m, ps_m_new)
+    assert np.allclose(ps_t1, ps_t1_new)
+    assert np.allclose(ps_t2, ps_t2_new)
+    assert np.allclose(ps_c, ps_c_new)
+    assert np.allclose(ps_c_noobs, ps_c_noobs_new)
+    assert np.allclose(ps_t1_noobs, ps_t1_noobs_new)
+    assert np.allclose(ps_t2_noobs, ps_t2_noobs_new)
+    # update true changes model power
+    ps.true_cosmology = "WMAP1"
+    ps_m_new = ps.auto_power_matter_model
+    ps_t1_new = ps.auto_power_tracer_1_model
+    ps_t2_new = ps.auto_power_tracer_2_model
+    ps_c_new = ps.cross_power_tracer_model
+    ps_c_noobs_new = ps.cross_power_tracer_model_noobs
+    ps_t1_noobs_new = ps.auto_power_tracer_1_model_noobs
+    ps_t2_noobs_new = ps.auto_power_tracer_2_model_noobs
+    assert not np.allclose(ps_m, ps_m_new)
+    assert not np.allclose(ps_t1, ps_t1_new)
+    assert not np.allclose(ps_t2, ps_t2_new)
+    assert not np.allclose(ps_c, ps_c_new)
+    assert not np.allclose(ps_c_noobs, ps_c_noobs_new)
+    assert not np.allclose(ps_t1_noobs, ps_t1_noobs_new)
+    assert not np.allclose(ps_t2_noobs, ps_t2_noobs_new)
+
+
+def test_manual_box():
+    ps = PowerSpectrum()
+    ps._box_len = np.array([100, 100, 100])
+    ps._box_ndim = np.array([10, 10, 10])
+    assert np.allclose(ps.box_voxel_redshift, ps.z)
