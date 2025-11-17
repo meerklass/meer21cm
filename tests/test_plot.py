@@ -11,6 +11,15 @@ def test_plt(test_W, test_nu, test_wproj):
     plot_map(test_W, test_wproj, W=test_W, vmin=0, vmax=1)
     plot_map(test_W, test_wproj, vmin=0, vmax=1)
     plt.close("all")
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(20, 20),
+        subplot_kw={"projection": test_wproj},
+    )
+    plot_map(test_W, test_wproj, W=test_W, vmin=0, vmax=1, ax=axes[0])
+    plot_map(test_W, test_wproj, vmin=0, vmax=1, ax=axes[1])
+    plt.close("all")
 
 
 def test_plot_projected_map():

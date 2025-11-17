@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import numpy as np
+import copy
+import matplotlib
 
 
 def plot_pixels_along_los(
@@ -51,19 +53,21 @@ def plot_map(
     invert_x=True,
     dpi=100,
     cbar_aspect=25,
+    ax=None,
 ):
     """
     Stolen from meerpower
     """
-    plt.figure(dpi=dpi)
-    plt.subplot(projection=wproj)
-    ax = plt.gca()
+    if ax is None:
+        plt.figure(dpi=dpi)
+        plt.subplot(projection=wproj)
+        ax = plt.gca()
     lon = ax.coords[0]
     lat = ax.coords[1]
     lon.set_major_formatter("d")
     lon.set_ticks_position("b")
     lat.set_ticks_position("l")
-    plt.grid(True, color="grey", ls="solid", lw=0.5)
+    ax.grid(True, color="grey", ls="solid", lw=0.5)
     map_in = map_plot.copy()
     if len(np.shape(map_in)) == 3:
         map_in = np.mean(
@@ -86,22 +90,24 @@ def plot_map(
         divnorm = None
     if W is not None:
         map_in[W == 0] = np.nan
-    plt.imshow(map_in.T, cmap=cmap, norm=divnorm)
+    im = ax.imshow(map_in.T, cmap=cmap, norm=divnorm)
     if vmax is not None or vmin is not None:
-        plt.clim(vmin, vmax)
+        ax.get_images()[0].set_clim(vmin, vmax)
     if have_cbar:
         cbar = plt.colorbar(
+            im,
             orientation="horizontal",
             shrink=cbarshrink,
             pad=0.2,
             aspect=cbar_aspect,
+            ax=ax,
         )
         cbar.set_label(cbar_label)
     if invert_x:
         ax.invert_xaxis()
-    plt.xlabel("R.A [deg]")
-    plt.ylabel("Dec. [deg]")
-    plt.title(title)
+    ax.set_xlabel("R.A [deg]")
+    ax.set_ylabel("Dec. [deg]")
+    ax.set_title(title)
 
 
 def plot_eigenspectrum(
@@ -129,9 +135,21 @@ def plot_eigenspectrum(
 
 def plot_projected_map(A, data, wproj, W=None):
     S_pca_full = np.nan_to_num(A[:, None, :] * A[None, :, :])
-    for i in range(A.shape[1]):
+    num_of_maps = A.shape[1]
+    num_rows = int(np.ceil(num_of_maps / 4))
+    num_pix_x, num_pix_y = data.shape[:2]
+    ratio = num_pix_x / num_pix_y
+    fig, axes = plt.subplots(
+        num_rows,
+        4,
+        figsize=(int(np.ceil(16 * ratio)), int(np.ceil(6 * num_rows))),
+        subplot_kw={"projection": wproj},
+        gridspec_kw={"hspace": 0.1, "wspace": 0.1},
+    )
+    for i in range(num_of_maps):
         res_i = np.einsum("ij,abj->abi", S_pca_full[:, :, i], np.nan_to_num(data))
-        plot_map(res_i, wproj, W=W)
+        plot_map(res_i, wproj, W=W, ax=axes.ravel()[i], title=f"mode {i}")
+    return fig, axes
 
 
 def visualise_patch_split(mask_arr, wproj):
