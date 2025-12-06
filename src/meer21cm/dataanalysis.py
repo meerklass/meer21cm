@@ -118,6 +118,11 @@ class Specification:
         If False, any line of sight that is not 100% sampled will be removed.
         If True, the maximum sampling fraction of the map cube is calculated and used as the criterion.
         See :meth:`meer21cm.io.filter_incomplete_los`.
+    filter_los_threshold: float, default None
+        If given, instead of filtering out incomplete los by checking
+        the maximum sampling fraction along the los,
+        a fixed threshold is used to filter out incomplete los.
+        See :meth:`meer21cm.io.filter_incomplete_los`.
     data_column: str, default "map"
         The column name of the map data.
     counts_column: str, default "hit"
@@ -157,6 +162,7 @@ class Specification:
         band="",
         z_interp_max=6.0,
         soft_filter_los=True,
+        filter_los_threshold=None,
         data_column="map",
         counts_column="hit",
         freq_column="freq",
@@ -243,6 +249,7 @@ class Specification:
         self.__dict__.update(kwparams)
         self.filter_map_los = filter_map_los
         self.soft_filter_los = soft_filter_los
+        self.filter_los_threshold = filter_los_threshold
         self.gal_file = gal_file
         self.weighting = weighting
         self.ra_range = ra_range
@@ -620,6 +627,7 @@ class Specification:
                 self.counts,
                 self.counts,
                 soft_mask=self.soft_filter_los,
+                threshold_instead_of_filter=self.filter_los_threshold,
             )
 
         if self.weighting.lower()[:5] == "count":
@@ -667,6 +675,7 @@ class Specification:
                 self.counts,
                 self.counts,
                 soft_mask=self.soft_filter_los,
+                threshold_instead_of_filter=self.filter_los_threshold,
             )
 
         if self.weighting.lower()[:5] == "count":
