@@ -9,6 +9,34 @@ default_data_dir = meer21cm.__file__.rsplit("/", 1)[0] + "/data/"
 
 
 class ForegroundSimulation:
+    """
+    Foreground simulation class.
+    All outputs are in units of K_RJ (Kelvin).
+
+    Parameters
+    ----------
+    hp_nside: int
+        HEALPix nside.
+    wproj: tuple
+        WCS projection parameters.
+    num_pix_x: int
+        Number of pixels in x direction.
+    num_pix_y: int
+        Number of pixels in y direction.
+    backend: str, default 'haslam'
+        Backend to use for foreground simulation.
+        Options: 'gdsm' (Global Sky Model), 'pysm' (PySM3), 'haslam' (Haslam 408 MHz map).
+    pysm_preset_strings: list, default ['d1', 's1', 'f1', 'a1', 'c1']
+        List of PySM3 preset strings for included components.
+        Default: ['d1', 's1', 'f1', 'a1', 'c1'].
+    sp_indx_for_haslam_backend: float, default -2.0
+        Index of the spectral index for the Haslam 408 MHz map.
+        Only used for 'haslam' backend.
+    coord_system: str, default 'C'
+        Coordinate system to use for the foreground simulation.
+        Options: 'G' (Galactic), 'C' (Celestial), 'E' (Ecliptic).
+    """
+
     def __init__(
         self,
         hp_nside=256,
@@ -20,33 +48,6 @@ class ForegroundSimulation:
         sp_indx_for_haslam_backend=-2.0,
         coord_system="C",
     ):
-        """
-        Foreground simulation class.
-        All outputs are in units of K_RJ (Kelvin).
-
-        Parameters
-        ----------
-        hp_nside: int
-            HEALPix nside.
-        wproj: tuple
-            WCS projection parameters.
-        num_pix_x: int
-            Number of pixels in x direction.
-        num_pix_y: int
-            Number of pixels in y direction.
-        backend: str, default 'haslam'
-            Backend to use for foreground simulation.
-            Options: 'gdsm' (Global Sky Model), 'pysm' (PySM3), 'haslam' (Haslam 408 MHz map).
-        pysm_preset_strings: list, default ['d1', 's1', 'f1', 'a1', 'c1']
-            List of PySM3 preset strings for included components.
-            Default: ['d1', 's1', 'f1', 'a1', 'c1'].
-        sp_indx_for_haslam_backend: float, default -2.0
-            Index of the spectral index for the Haslam 408 MHz map.
-            Only used for 'haslam' backend.
-        coord_system: str, default 'C'
-            Coordinate system to use for the foreground simulation.
-            Options: 'G' (Galactic), 'C' (Celestial), 'E' (Ecliptic).
-        """
         self.backend = backend
         assert backend in [
             "gdsm",
@@ -65,6 +66,16 @@ class ForegroundSimulation:
     def healpix_gen_haslam(self, freq):
         """
         Generate HEALPix map of foregrounds using Haslam 408 MHz map.
+
+        Parameters
+        ----------
+        freq: float or array-like
+            Frequency in Hz.
+
+        Returns
+        -------
+        cube: numpy.ndarray
+            HEALPix map of foregrounds in units of K_RJ.
         """
         sp_indx = self.sp_indx_for_haslam_backend
         freq = np.atleast_1d(freq)
@@ -85,8 +96,13 @@ class ForegroundSimulation:
 
         Parameters
         ----------
-        freq: float or array-likesss
+        freq: float or array-like
             Frequency in Hz.
+
+        Returns
+        -------
+        cube: numpy.ndarray
+            HEALPix map of foregrounds in units of K_RJ.
         """
         from pygdsm import GlobalSkyModel16
 
@@ -107,6 +123,16 @@ class ForegroundSimulation:
     def healpix_gen_pysm(self, freq):
         """
         Generate HEALPix map of foregrounds using PySM3.
+
+        Parameters
+        ----------
+        freq: float or array-like
+            Frequency in Hz.
+
+        Returns
+        -------
+        cube: numpy.ndarray
+            HEALPix map of foregrounds in units of K_RJ.
         """
         import pysm3
 
@@ -125,6 +151,21 @@ class ForegroundSimulation:
         self,
         freq,
     ):
+        """
+        Generate WCS cube of foregrounds.
+        The function will call the appropriate healpix_gen_* function based on the backend,
+        and then project the map to the WCS coordinates if provided.
+
+        Parameters
+        ----------
+        freq: float or array-like
+            Frequency in Hz.
+
+        Returns
+        -------
+        out_map: numpy.ndarray
+            WCS cube of foregrounds in units of K_RJ.
+        """
         freq = np.atleast_1d(freq)
         wproj = self.wproj
         xdim = self.num_pix_x
