@@ -129,6 +129,10 @@ def read_pickle(
     nu_min=-np.inf,
     nu_max=np.inf,
     los_axis=-1,
+    data_column="map",
+    counts_column="hit",
+    freq_column="freq",
+    wcs_column="wcs",
 ):
     """
     Read pickle file of MeerKLASS UHF-band data into arrays.
@@ -150,6 +154,14 @@ def read_pickle(
             Channels above this frequency will be thrown away.
         los_axis: int, default -1.
             which axis is the los.
+        data_column: str, default "map".
+            The column name of the map data.
+        counts_column: str, default "hit".
+            The column name of the number of sampling for each pixel.
+        freq_column: str, default "freq".
+            The column name of the frequencies of each channel in the data.
+        wcs_column: str, default "wcs".
+            The column name of the :class:`astropy.wcs.WCS` object for the map.
 
     Returns
     -------
@@ -158,11 +170,11 @@ def read_pickle(
     """
     with open(pickle_file, "rb") as f:
         data = pickle.load(f)
-    map_data = data["map"]
+    map_data = data[data_column]
     map_has_sampling = np.logical_not(map_data.mask)
-    counts = data["hit"]
-    nu = data["freq"] * 1e6  # MHz to Hz
-    wproj = data["wcs"]
+    counts = data[counts_column]
+    nu = data[freq_column] * 1e6  # MHz to Hz
+    wproj = data[wcs_column]
     nu_sel = np.where((nu > nu_min) & (nu < nu_max))[0]
     nu_sel_min, nu_sel_max = nu_sel.min(), nu_sel.max()
     sel_indx = [

@@ -118,6 +118,14 @@ class Specification:
         If False, any line of sight that is not 100% sampled will be removed.
         If True, the maximum sampling fraction of the map cube is calculated and used as the criterion.
         See :meth:`meer21cm.io.filter_incomplete_los`.
+    data_column: str, default "map"
+        The column name of the map data.
+    counts_column: str, default "hit"
+        The column name of the number of sampling for each pixel.
+    freq_column: str, default "freq"
+        The column name of the frequencies of each channel in the data.
+    wcs_column: str, default "wcs"
+        The column name of the :class:`astropy.wcs.WCS` object for the map.
     """
 
     def __init__(
@@ -149,6 +157,10 @@ class Specification:
         band="",
         z_interp_max=6.0,
         soft_filter_los=True,
+        data_column="map",
+        counts_column="hit",
+        freq_column="freq",
+        wcs_column="wcs",
         **kwparams,
     ):
         self.survey = survey
@@ -255,6 +267,10 @@ class Specification:
         self._beam_image = None
         self._z_as_func_of_comov_dist = None
         self.z_interp_max = z_interp_max
+        self.data_column = data_column
+        self.counts_column = counts_column
+        self.freq_column = freq_column
+        self.wcs_column = wcs_column
 
     @property
     def map_unit_type(self):
@@ -590,6 +606,10 @@ class Specification:
             nu_min=self.nu_min,
             nu_max=self.nu_max,
             los_axis=self.los_axis,
+            data_column=self.data_column,
+            counts_column=self.counts_column,
+            freq_column=self.freq_column,
+            wcs_column=self.wcs_column,
         )
         self.num_pix_x, self.num_pix_y = self._ra_map.shape
         if self.filter_map_los:
