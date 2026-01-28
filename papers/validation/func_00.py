@@ -1,3 +1,4 @@
+# 00: just mock simulation
 import numpy as np
 from meer21cm.mock import MockSimulation
 from specs import *
@@ -8,11 +9,14 @@ from multiprocessing import Pool
 from meer21cm.power import bin_3d_to_cy, bin_3d_to_1d
 import scipy.signal.windows as windows
 
+
 def get_3d_power(
     seed,
 ):
     # z_count is in redshift bins, convert to Mpc-3 unit
-    z_func = interp1d(z_cen, z_count/dV_arr, kind="linear", bounds_error=False, fill_value=0)
+    z_func = interp1d(
+        z_cen, z_count / dV_arr, kind="linear", bounds_error=False, fill_value=0
+    )
     mock = MockSimulation(
         wproj=wcs,
         num_pix_x=num_pix_x,
@@ -84,15 +88,15 @@ def main():
     pgmod3d_arr = np.array(pgmod3d_arr)[0][None]
     pcross3d_arr = np.array(pcross3d_arr)
     pcrossmod3d_arr = np.array(pcrossmod3d_arr)[0][None]
-    
+
     np.savez(
-        'data/00.npz',
-        pdata3d_arr = pdata3d_arr,
-        phimod3d_arr = phimod3d_arr,
-        pg3d_arr = pg3d_arr,
-        pgmod3d_arr = pgmod3d_arr,
-        pcross3d_arr = pcross3d_arr,
-        pcrossmod3d_arr = pcrossmod3d_arr,
+        "data/00.npz",
+        pdata3d_arr=pdata3d_arr,
+        phimod3d_arr=phimod3d_arr,
+        pg3d_arr=pg3d_arr,
+        pgmod3d_arr=pgmod3d_arr,
+        pcross3d_arr=pcross3d_arr,
+        pcrossmod3d_arr=pcrossmod3d_arr,
     )
 
 

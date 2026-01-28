@@ -1,3 +1,4 @@
+# test noise with beam, split along y axis
 from meer21cm import MockSimulation
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,10 +13,14 @@ from meer21cm.power import bin_3d_to_cy, bin_3d_to_1d
 
 # one process uses about 64GB mem for 0.4-1.1
 # mpi needed
-window_name = 'tukey'
+window_name = "tukey"
+
+
 def get_3d_power(seed):
-    z_func = interp1d(z_cen, z_count/dV_arr, kind="linear", bounds_error=False, fill_value=0)
-    sigma_beam_ch = dish_beam_sigma(13.5,nu_arr)
+    z_func = interp1d(
+        z_cen, z_count / dV_arr, kind="linear", bounds_error=False, fill_value=0
+    )
+    sigma_beam_ch = dish_beam_sigma(13.5, nu_arr)
     mock = MockSimulation(
         wproj=wcs,
         num_pix_x=num_pix_x,
@@ -35,77 +40,83 @@ def get_3d_power(seed):
     )
     mock.taper_func = getattr(windows, window_name)
     rng = np.random.default_rng(seed)
-    noise = rng.normal(0,1,mock.data.shape)
+    noise = rng.normal(0, 1, mock.data.shape)
     mock.data = noise.copy()
     mock.trim_map_to_range()
     mock.downres_factor_transverse = 3
     mock.downres_factor_radial = 6
     mock.get_enclosing_box()
-    mock.grid_scheme = 'cic'
-    himap_rg,_,_ = mock.grid_data_to_field()
+    mock.grid_scheme = "cic"
+    himap_rg, _, _ = mock.grid_data_to_field()
     box_counts = mock.counts_in_box.copy()
     box_len = mock.box_len.copy()
     box_ndim = mock.box_ndim.copy()
     box_resol = mock.box_resol.copy()
-    split_indx = box_ndim[1]//2
-    mock._box_ndim = np.array([box_ndim[0],split_indx,box_ndim[2]])
+    split_indx = box_ndim[1] // 2
+    mock._box_ndim = np.array([box_ndim[0], split_indx, box_ndim[2]])
     mock._box_len = mock._box_ndim * box_resol
     mock.propagate_field_k_to_model()
-    mock._counts_in_box = box_counts[:,:split_indx,:]
-    mock.field_1 = himap_rg[:,:split_indx,:]
-    mock.weights_1 = mock.counts_in_box.astype('float')
-    mock.apply_taper_to_field(1,axis=[0,1,2])
+    mock._counts_in_box = box_counts[:, :split_indx, :]
+    mock.field_1 = himap_rg[:, :split_indx, :]
+    mock.weights_1 = mock.counts_in_box.astype("float")
+    mock.apply_taper_to_field(1, axis=[0, 1, 2])
     mock.include_sky_sampling = [True, False]
     mock.compensate = [True, True]
     mock.include_beam = [True, False]
-    power_beam_theory_1 = mock.auto_power_3d_1 * mock.beam_attenuation()**2
-    mock._box_ndim = np.array([box_ndim[0],box_ndim[1] - split_indx,box_ndim[2]])
+    power_beam_theory_1 = mock.auto_power_3d_1 * mock.beam_attenuation() ** 2
+    mock._box_ndim = np.array([box_ndim[0], box_ndim[1] - split_indx, box_ndim[2]])
     mock._box_len = mock._box_ndim * box_resol
     mock.propagate_field_k_to_model()
-    mock._counts_in_box = box_counts[:,split_indx:,:]
-    mock.field_1 = himap_rg[:,split_indx:,:]
-    mock.weights_1 = mock.counts_in_box.astype('float')
-    mock.apply_taper_to_field(1,axis=[0,1,2])
+    mock._counts_in_box = box_counts[:, split_indx:, :]
+    mock.field_1 = himap_rg[:, split_indx:, :]
+    mock.weights_1 = mock.counts_in_box.astype("float")
+    mock.apply_taper_to_field(1, axis=[0, 1, 2])
     mock.include_sky_sampling = [True, False]
     mock.compensate = [True, True]
     mock.include_beam = [True, False]
-    power_beam_theory_2 = mock.auto_power_3d_1 * mock.beam_attenuation()**2
-    
+    power_beam_theory_2 = mock.auto_power_3d_1 * mock.beam_attenuation() ** 2
+
     mock.data = mock.data.copy()
     mock.W_HI = np.ones_like(mock.W_HI)
     mock.w_HI = np.ones_like(mock.w_HI)
     mock.convolve_data(mock.beam_image)
     mock.trim_map_to_range()
     mock.get_enclosing_box()
-    himap_rg,_,_ = mock.grid_data_to_field()
+    himap_rg, _, _ = mock.grid_data_to_field()
     box_counts = mock.counts_in_box.copy()
     box_len = mock.box_len.copy()
     box_ndim = mock.box_ndim.copy()
     box_resol = mock.box_resol.copy()
-    split_indx = box_ndim[1]//2
-    mock._box_ndim = np.array([box_ndim[0],split_indx,box_ndim[2]])
+    split_indx = box_ndim[1] // 2
+    mock._box_ndim = np.array([box_ndim[0], split_indx, box_ndim[2]])
     mock._box_len = mock._box_ndim * box_resol
     mock.propagate_field_k_to_model()
-    mock._counts_in_box = box_counts[:,:split_indx,:]
-    mock.field_1 = himap_rg[:,:split_indx,:]
-    mock.weights_1 = mock.counts_in_box.astype('float')
-    mock.apply_taper_to_field(1,axis=[0,1,2])
+    mock._counts_in_box = box_counts[:, :split_indx, :]
+    mock.field_1 = himap_rg[:, :split_indx, :]
+    mock.weights_1 = mock.counts_in_box.astype("float")
+    mock.apply_taper_to_field(1, axis=[0, 1, 2])
     mock.include_sky_sampling = [True, False]
     mock.compensate = [True, True]
     mock.include_beam = [True, False]
     power_beam_noise_1 = mock.auto_power_3d_1
-    mock._box_ndim = np.array([box_ndim[0],box_ndim[1] - split_indx,box_ndim[2]])
+    mock._box_ndim = np.array([box_ndim[0], box_ndim[1] - split_indx, box_ndim[2]])
     mock._box_len = mock._box_ndim * box_resol
     mock.propagate_field_k_to_model()
-    mock._counts_in_box = box_counts[:,split_indx:,:]
-    mock.field_1 = himap_rg[:,split_indx:,:]
-    mock.weights_1 = mock.counts_in_box.astype('float')
-    mock.apply_taper_to_field(1,axis=[0,1,2])
+    mock._counts_in_box = box_counts[:, split_indx:, :]
+    mock.field_1 = himap_rg[:, split_indx:, :]
+    mock.weights_1 = mock.counts_in_box.astype("float")
+    mock.apply_taper_to_field(1, axis=[0, 1, 2])
     mock.include_sky_sampling = [True, False]
     mock.compensate = [True, True]
     mock.include_beam = [True, False]
     power_beam_noise_2 = mock.auto_power_3d_1
-    return power_beam_theory_1, power_beam_noise_1, power_beam_theory_2, power_beam_noise_2
+    return (
+        power_beam_theory_1,
+        power_beam_noise_1,
+        power_beam_theory_2,
+        power_beam_noise_2,
+    )
+
 
 if __name__ == "__main__":
     power_beam_theory_arr_1 = []
@@ -113,9 +124,12 @@ if __name__ == "__main__":
     power_beam_theory_arr_2 = []
     power_beam_noise_arr_2 = []
     with Pool(16) as p:
-        for power_beam_theory, power_beam_noise,power_beam_theory2, power_beam_noise2 in p.map(
-            get_3d_power, range(128)
-        ):
+        for (
+            power_beam_theory,
+            power_beam_noise,
+            power_beam_theory2,
+            power_beam_noise2,
+        ) in p.map(get_3d_power, range(128)):
             power_beam_theory_arr_1.append(power_beam_theory)
             power_beam_noise_arr_1.append(power_beam_noise)
             power_beam_theory_arr_2.append(power_beam_theory2)
@@ -125,7 +139,9 @@ if __name__ == "__main__":
     power_beam_theory_arr_2 = np.array(power_beam_theory_arr_2).mean(0)
     power_beam_noise_arr_2 = np.array(power_beam_noise_arr_2).mean(0)
     np.savez(
-        f'data/beam_theory_{window_name}_split.npz', 
-        power_beam_theory_arr_1=power_beam_theory_arr_1, power_beam_noise_arr_1=power_beam_noise_arr_1,
-        power_beam_theory_arr_2=power_beam_theory_arr_2, power_beam_noise_arr_2=power_beam_noise_arr_2,
+        f"data/beam_theory_{window_name}_split.npz",
+        power_beam_theory_arr_1=power_beam_theory_arr_1,
+        power_beam_noise_arr_1=power_beam_noise_arr_1,
+        power_beam_theory_arr_2=power_beam_theory_arr_2,
+        power_beam_noise_arr_2=power_beam_noise_arr_2,
     )

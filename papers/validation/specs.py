@@ -1,3 +1,4 @@
+# specifications for the simulation
 import numpy as np
 import matplotlib.pyplot as plt
 from meer21cm.plot import plot_map
@@ -7,10 +8,10 @@ from astropy.cosmology import Planck18
 num_pix_x = 120
 num_pix_y = 40
 
-#z_min = 0.8
+# z_min = 0.8
 z_min = 0.6
 z_max = 0.8
-#z_max = 1.1
+# z_max = 1.1
 nu_min = redshift_to_freq(z_max)
 nu_max = redshift_to_freq(z_min)
 nu_resol = 132812.5
@@ -27,7 +28,7 @@ wcs = create_wcs(
 ra_range = [125, 175]
 dec_range = [-10.1, 5]
 
-#dndz_data = np.load("LRG_dndz.npz")
+# dndz_data = np.load("LRG_dndz.npz")
 dndz_data = np.load("LRGELG_dndz.npz")
 z_bin = dndz_data["z_bin"]
 z_count = dndz_data["z_count"]
@@ -35,22 +36,22 @@ z_cen = (z_bin[:-1] + z_bin[1:]) / 2
 dV_arr = Planck18.differential_comoving_volume(z_cen)
 
 # LRG3, DESI DR1
-#n_gal = 859824 / 5 / 1e9 #Mpc-3
+# n_gal = 859824 / 5 / 1e9 #Mpc-3
 # LRG2, DESI DR1
-n_gal = 771875  / 4 / 1e9 #Mpc-3
+n_gal = 771875 / 4 / 1e9  # Mpc-3
 
 k1dbins = np.linspace(0.003, 0.2, 25)[1:]
 kperpbins = np.linspace(0, 0.048, 17)[2:]
 kparabins = np.linspace(0, 0.5, 51)
 
-def plot_cy_power(
-    xbins, ybins, pdatacy, pmodcy,
-    vmin_ratio,vmax_ratio
-    ):
-    arr = np.array([
-        np.log10(pdatacy.mean(axis=0).T),
-        np.log10(pmodcy.T),
-    ])
+
+def plot_cy_power(xbins, ybins, pdatacy, pmodcy, vmin_ratio, vmax_ratio):
+    arr = np.array(
+        [
+            np.log10(pdatacy.mean(axis=0).T),
+            np.log10(pmodcy.T),
+        ]
+    )
     vmin = np.nanmin(arr)
     vmax = np.nanmax(arr)
     fig, axes = plt.subplots(1, 3)
@@ -68,7 +69,7 @@ def plot_cy_power(
         vmin=vmin,
         vmax=vmax,
     )
-    plt.colorbar(im,ax=axes[:-1],location="top",fraction=0.046,pad=0.04)
+    plt.colorbar(im, ax=axes[:-1], location="top", fraction=0.046, pad=0.04)
     im = axes[2].pcolormesh(
         xbins,
         ybins,
@@ -77,11 +78,14 @@ def plot_cy_power(
         vmax=vmax_ratio,
         cmap="bwr",
     )
-    plt.colorbar(im,ax=axes[2],location="top",fraction=0.046,pad=0.04)
+    plt.colorbar(im, ax=axes[2], location="top", fraction=0.046, pad=0.04)
     return fig
 
+
 def plot_1d_power(
-    keff, pdatad, pmodd,
+    keff,
+    pdatad,
+    pmodd,
     ratio_min,
     ratio_max,
 ):
@@ -90,11 +94,14 @@ def plot_1d_power(
     pmodd = np.array(pmodd)
     sel = keff == keff
     keff = keff[sel]
-    pdatad = pdatad[:,sel]
+    pdatad = pdatad[:, sel]
     pmodd = pmodd[sel]
-    fig,axes=plt.subplots(
-        2,1,figsize=(10,5),sharex=True,
-        height_ratios=[2,1],
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(10, 5),
+        sharex=True,
+        height_ratios=[2, 1],
     )
     axes[0].errorbar(
         keff,
@@ -112,10 +119,13 @@ def plot_1d_power(
     )
     axes[1].axhline(0, color="black", ls="--")
     axes[1].fill_between(
-        np.linspace(keff.min()-0.005,keff.max()+0.005,100), 
-        -0.05, 0.05, color="black", alpha=0.2,
+        np.linspace(keff.min() - 0.005, keff.max() + 0.005, 100),
+        -0.05,
+        0.05,
+        color="black",
+        alpha=0.2,
     )
-    axes[1].set_xlim(keff.min()-0.005,keff.max()+0.005)
-    axes[1].set_ylim(ratio_min,ratio_max)
+    axes[1].set_xlim(keff.min() - 0.005, keff.max() + 0.005)
+    axes[1].set_ylim(ratio_min, ratio_max)
     axes[1].legend()
     return fig
