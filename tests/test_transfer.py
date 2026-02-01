@@ -155,6 +155,7 @@ def test_transfer_function_value():
         upres_transverse=1,
         upres_radial=1,
         num_process=1,
+        unmask_during_mock=True,
     )
     arglist = tf.get_arg_list_for_parallel_auto(
         range(10), return_power_3d=True, return_power_1d=True

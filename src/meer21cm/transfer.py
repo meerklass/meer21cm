@@ -279,6 +279,12 @@ class TransferFunction:
         num_process: int, default None
             The number of processes to use for parallelisation.
             If not provided, the number of processes is set to the number of cores available.
+        unmask_during_mock: bool, default False
+            Whether to unmask the wcs during the mock simulation.
+            If True, the survey area will be unmasked during the mock simulation, and then masked again after mock HI is generated.
+            This is useful for mitigating edge effects and when box buffer is small.
+            For a large patch with a wide z-range, it is recommended to set this to True,
+            otherwise the mock HI map may contain nan and cause errors.
     """
 
     def __init__(
@@ -297,6 +303,7 @@ class TransferFunction:
         discrete_source_dndz: Callable = np.ones_like,
         pool: str = "multiprocessing",
         num_process: int | None = None,
+        unmask_during_mock: bool = False,
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -316,6 +323,7 @@ class TransferFunction:
         self.pool = pool
         self.num_process = num_process
         self.R_mat = R_mat
+        self.unmask_during_mock = unmask_during_mock
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -394,6 +402,7 @@ class TransferFunction:
                     self.ps.weights_grid_2,
                     self.ps.k1dweights,
                     return_power_3d,
+                    self.unmask_during_mock,
                 )
             )
         return arg_list
@@ -440,6 +449,7 @@ class TransferFunction:
                     self.uncleaned_data,
                     return_power_3d,
                     return_power_1d,
+                    self.unmask_during_mock,
                 )
             )
         return arg_list
@@ -484,6 +494,7 @@ class TransferFunction:
                     self.uncleaned_data,
                     return_power_3d,
                     return_power_1d,
+                    self.unmask_during_mock,
                 )
             )
         return arg_list
@@ -580,6 +591,7 @@ def run_tf_calculation_cross(
     uncleaned_data=0.0,
     return_power_3d=False,
     return_power_1d=False,
+    unmask_during_mock=False,
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -619,15 +631,29 @@ def run_tf_calculation_cross(
             Whether to return the 3D power spectrum of the mock results, including the uncleaned and cleaned data.
         return_power_1d: bool, default False
             Whether to return the 1D power spectrum of the mock results, including the uncleaned and cleaned data.
-
+        unmask_during_mock: bool, default False
+            Whether to unmask the wcs during the mock simulation.
+            If True, the survey area will be unmasked during the mock simulation, and then masked again after mock HI is generated.
+            This is useful for mitigating edge effects and when box buffer is small.
+            For a large patch with a wide z-range, it is recommended to set this to True,
+            otherwise the mock HI map may contain nan and cause errors.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
     mock = MockSimulation(**mock_attr_dict)
+    if unmask_during_mock:
+        W_HI_mock = mock.W_HI.copy()
+        w_HI_mock = mock.w_HI.copy()
+        mock.W_HI = np.ones_like(mock.W_HI)
+        mock.w_HI = np.ones_like(mock.w_HI)
     mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
     mock.propagate_mock_tracer_to_gal_cat()
+    if unmask_during_mock:
+        mock.W_HI = W_HI_mock
+        mock.w_HI = w_HI_mock
+        mock.data[mock.W_HI == 0] = 0
     mock.downres_factor_radial = downres_factor_radial
     mock.downres_factor_transverse = downres_factor_transverse
     mock.get_enclosing_box()
@@ -688,6 +714,7 @@ def run_tf_calculation_auto(
     uncleaned_data=0.0,
     return_power_3d=False,
     return_power_1d=False,
+    unmask_during_mock=False,
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -723,14 +750,28 @@ def run_tf_calculation_auto(
             Whether to return the 3D power spectrum of the mock results, including the uncleaned and cleaned data.
         return_power_1d: bool, default False
             Whether to return the 1D power spectrum of the mock results, including the uncleaned and cleaned data.
-
+        unmask_during_mock: bool, default False
+            Whether to unmask the wcs during the mock simulation.
+            If True, the survey area will be unmasked during the mock simulation, and then masked again after mock HI is generated.
+            This is useful for mitigating edge effects and when box buffer is small.
+            For a large patch with a wide z-range, it is recommended to set this to True,
+            otherwise the mock HI map may contain nan and cause errors.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
     mock = MockSimulation(**mock_attr_dict)
+    if unmask_during_mock:
+        W_HI_mock = mock.W_HI.copy()
+        w_HI_mock = mock.w_HI.copy()
+        mock.W_HI = np.ones_like(mock.W_HI)
+        mock.w_HI = np.ones_like(mock.w_HI)
     mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
+    if unmask_during_mock:
+        mock.W_HI = W_HI_mock
+        mock.w_HI = w_HI_mock
+        mock.data[mock.W_HI == 0] = 0
     mock.downres_factor_radial = downres_factor_radial
     mock.downres_factor_transverse = downres_factor_transverse
     mock.get_enclosing_box()
@@ -790,6 +831,7 @@ def run_null_test(
     weights_grid_2,
     k_sel_3d_to_1d,
     return_power_3d=False,
+    unmask_during_mock=False,
 ):
     """
     Run null test realisations by calculating the 1D cross-power spectrum of the mock galaxy x data map.
@@ -816,7 +858,12 @@ def run_null_test(
             The weights for averaging the 3D power spectrum k-modes to 1D power spectrum.
         return_power_3d: bool, default False
             Whether to return the 3D power spectrum of the mock results.
-
+        unmask_during_mock: bool, default False
+            Whether to unmask the wcs during the mock simulation.
+            If True, the survey area will be unmasked during the mock simulation, and then masked again after mock HI is generated.
+            This is useful for mitigating edge effects and when box buffer is small.
+            For a large patch with a wide z-range, it is recommended to set this to True,
+            otherwise the mock HI map may contain nan and cause errors.
     Returns
     -------
         result: list
@@ -824,7 +871,15 @@ def run_null_test(
             If ``return_power_3d`` is True, the second element is the 3D power spectrum of the mock results.
     """
     mock = MockSimulation(**mock_attr_dict)
+    if unmask_during_mock:
+        W_HI_mock = mock.W_HI.copy()
+        w_HI_mock = mock.w_HI.copy()
+        mock.W_HI = np.ones_like(mock.W_HI)
+        mock.w_HI = np.ones_like(mock.w_HI)
     mock.propagate_mock_tracer_to_gal_cat()
+    if unmask_during_mock:
+        mock.W_HI = W_HI_mock
+        mock.w_HI = w_HI_mock
     mock.downres_factor_radial = downres_factor_radial
     mock.downres_factor_transverse = downres_factor_transverse
     mock.get_enclosing_box()
