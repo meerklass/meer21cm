@@ -781,10 +781,10 @@ def pca_clean(
     eigenval, V = np.linalg.eigh(covariance)
     if nan_flag:
         eigenvec = np.zeros((nz, nz)) * np.nan
-        eigenvec[np.where(sel)[0][:, None], np.where(sel)[0]] = V
+        eigenvec[np.where(sel)[0], -sel.sum() :] = V
         V = eigenvec
         eval = np.zeros(nz) * np.nan
-        eval[sel] = eigenval
+        eval[-sel.sum() :] = eigenval
         eigenval = eval
     V = V[:, ::-1]  # Eigenvectors from covariance matrix with most dominant first
     if return_analysis:

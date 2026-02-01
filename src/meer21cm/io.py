@@ -55,11 +55,16 @@ def filter_incomplete_los(
     map_pix_counts,
     los_axis=-1,
     soft_mask=False,
+    threshold_instead_of_filter=None,
 ):
     """
     Filter the map so that along the line-of-sight, only pixels that has sampling at every channel gets selected.
 
     If `soft_mask` is True, instead of filtering out incomplete los,
+    the filtering is applied by checking the maximum sampling fraction along the los, and
+    the pixels with less than the maximum sampling fraction are masked.
+
+    If `threshold_instead_of_filter` is given, instead of filtering out incomplete los,
     the filtering is applied by checking the maximum sampling fraction along the los, and
     the pixels with less than the maximum sampling fraction are masked.
 
@@ -77,6 +82,10 @@ def filter_incomplete_los(
             which axis is the los.
         soft_mask: boolean, default False.
             whether to apply soft masking.
+        threshold_instead_of_filter: float, default None.
+            if given, instead of filtering out incomplete los,
+            the filtering is applied by checking the sampling fraction along the los,
+            and pixels with less than the threshold are masked.
 
     Returns
     -------
@@ -104,6 +113,8 @@ def filter_incomplete_los(
     sampling_fraction = map_has_sampling.mean(axis=-1)
     if soft_mask:
         full_sample_los = sampling_fraction == sampling_fraction.max()
+    elif threshold_instead_of_filter is not None:
+        full_sample_los = sampling_fraction >= threshold_instead_of_filter
     else:
         full_sample_los = sampling_fraction == 1.0
     map_intensity *= full_sample_los[:, :, None]

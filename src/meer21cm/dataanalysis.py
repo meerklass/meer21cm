@@ -118,6 +118,11 @@ class Specification:
         If False, any line of sight that is not 100% sampled will be removed.
         If True, the maximum sampling fraction of the map cube is calculated and used as the criterion.
         See :meth:`meer21cm.io.filter_incomplete_los`.
+    filter_los_threshold: float, default None
+        If given, instead of filtering out incomplete los by checking
+        the maximum sampling fraction along the los,
+        a fixed threshold is used to filter out incomplete los.
+        See :meth:`meer21cm.io.filter_incomplete_los`.
     data_column: str, default "map"
         The column name of the map data.
     counts_column: str, default "hit"
@@ -157,6 +162,7 @@ class Specification:
         band="",
         z_interp_max=6.0,
         soft_filter_los=True,
+        filter_los_threshold=None,
         data_column="map",
         counts_column="hit",
         freq_column="freq",
@@ -243,6 +249,7 @@ class Specification:
         self.__dict__.update(kwparams)
         self.filter_map_los = filter_map_los
         self.soft_filter_los = soft_filter_los
+        self.filter_los_threshold = filter_los_threshold
         self.gal_file = gal_file
         self.weighting = weighting
         self.ra_range = ra_range
@@ -620,6 +627,7 @@ class Specification:
                 self.counts,
                 self.counts,
                 soft_mask=self.soft_filter_los,
+                threshold_instead_of_filter=self.filter_los_threshold,
             )
 
         if self.weighting.lower()[:5] == "count":
@@ -667,6 +675,7 @@ class Specification:
                 self.counts,
                 self.counts,
                 soft_mask=self.soft_filter_los,
+                threshold_instead_of_filter=self.filter_los_threshold,
             )
 
         if self.weighting.lower()[:5] == "count":
@@ -798,21 +807,46 @@ class Specification:
             self._beam_image = beam_image
         return beam_image
 
-    def convolve_data(self, kernel):
+    def convolve_data(self, kernel, data=None, weights=None, assign_to_self=True):
         """
         convolve data with an input kernel, and
         update the corresponding weights.
+
+        Parameters
+        ----------
+        kernel: np.ndarray
+            The kernel to convolve the data with.
+        data: np.ndarray, default None
+            The data to convolve. Default uses `self.data`.
+        weights: np.ndarray, default None
+            The weights to convolve the data with. Default uses `self.w_HI`.
+        assign_to_self: bool, default True
+            Whether to assign the convolved data and weights to `self.data` and `self.w_HI`.
+            If True, the convolved data and weights will be assigned to `self.data` and `self.w_HI`.
+
+        Returns
+        -------
+        data: np.ndarray
+            The convolved data.
+        weights: np.ndarray
+            The convolved weights.
         """
         logger.info(
             f"invoking {inspect.currentframe().f_code.co_name} to convolve map data with kernel: {kernel}"
         )
-        data, w_HI = telescope.weighted_convolution(
-            self.data,
+        if data is None:
+            data = self.data
+        if weights is None:
+            weights = self.w_HI
+        data, weights = telescope.weighted_convolution(
+            data,
             kernel,
-            self.w_HI,
+            weights,
         )
-        self.data = data
-        self.w_HI = w_HI
+        if assign_to_self:
+            self.data = data
+            self.w_HI = weights
+        return data, weights
 
     @property
     def maximum_sampling_channel(self):

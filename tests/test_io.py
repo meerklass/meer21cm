@@ -18,8 +18,10 @@ def test_cal_freq(test_nu):
     assert cal_freq(4096, band="UHF") == meerkat_UHF_band_nu_max
 
 
-@pytest.mark.parametrize("soft_mask", [True, False])
-def test_filter_incomplete_los(soft_mask):
+@pytest.mark.parametrize(
+    "soft_mask, filter_threshold", [(True, None), (False, None), (False, 1.0)]
+)
+def test_filter_incomplete_los(soft_mask, filter_threshold):
     input_array = np.ones((3, 3, 4))
     has_sampling = np.ones((3, 3, 4))
     has_sampling[0, 0, 0] = 0
@@ -31,6 +33,7 @@ def test_filter_incomplete_los(soft_mask):
         has_sampling,
         has_sampling,
         soft_mask=soft_mask,
+        threshold_instead_of_filter=filter_threshold,
     )
     assert output_array[0, 0].mean() == 0.0
     assert output_array[1, 1].mean() == 0.0
@@ -48,6 +51,7 @@ def test_filter_incomplete_los(soft_mask):
         has_sampling,
         los_axis=1,
         soft_mask=soft_mask,
+        threshold_instead_of_filter=filter_threshold,
     )
     assert output_array[0, :, 0].mean() == 0.0
     assert output_array[1, :, 1].mean() == 0.0
