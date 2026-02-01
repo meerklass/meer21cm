@@ -807,21 +807,46 @@ class Specification:
             self._beam_image = beam_image
         return beam_image
 
-    def convolve_data(self, kernel):
+    def convolve_data(self, kernel, data=None, weights=None, assign_to_self=True):
         """
         convolve data with an input kernel, and
         update the corresponding weights.
+
+        Parameters
+        ----------
+        kernel: np.ndarray
+            The kernel to convolve the data with.
+        data: np.ndarray, default None
+            The data to convolve. Default uses `self.data`.
+        weights: np.ndarray, default None
+            The weights to convolve the data with. Default uses `self.w_HI`.
+        assign_to_self: bool, default True
+            Whether to assign the convolved data and weights to `self.data` and `self.w_HI`.
+            If True, the convolved data and weights will be assigned to `self.data` and `self.w_HI`.
+
+        Returns
+        -------
+        data: np.ndarray
+            The convolved data.
+        weights: np.ndarray
+            The convolved weights.
         """
         logger.info(
             f"invoking {inspect.currentframe().f_code.co_name} to convolve map data with kernel: {kernel}"
         )
-        data, w_HI = telescope.weighted_convolution(
-            self.data,
+        if data is None:
+            data = self.data
+        if weights is None:
+            weights = self.w_HI
+        data, weights = telescope.weighted_convolution(
+            data,
             kernel,
-            self.w_HI,
+            weights,
         )
-        self.data = data
-        self.w_HI = w_HI
+        if assign_to_self:
+            self.data = data
+            self.w_HI = weights
+        return data, weights
 
     @property
     def maximum_sampling_channel(self):

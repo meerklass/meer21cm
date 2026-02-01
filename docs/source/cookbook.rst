@@ -30,3 +30,4 @@ Mock Recipes
 
     cookbook/resolution
     cookbook/gal_dndz
+    cookbook/fg_sim
