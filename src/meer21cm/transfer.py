@@ -250,7 +250,7 @@ class TransferFunction:
             If not provided, the mock HI signal is injected into ``ps.data``.
             Note that this can be **wrong** if ``ps.data`` is already overridden by the residual map.
             In that case, you should provide the original map.
-        highres_sim: int, default 3
+        highres_sim: int, default Nones
             The mock field will be gridded to a high resolution sky map,
             with the resolution specified by this integer times the pixel resolution, and then
             down-sampled to the pixel resolution.
@@ -293,7 +293,7 @@ class TransferFunction:
         N_fg: int,
         R_mat: np.ndarray | None = None,
         uncleaned_data: np.ndarray | None = None,
-        highres_sim: None | int = 3,
+        highres_sim: int | None = None,
         upres_transverse: float = 4,
         upres_radial: float = 4,
         mean_center_map: bool = True,
