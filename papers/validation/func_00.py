@@ -72,7 +72,7 @@ def main():
     pgmod3d_arr = []
     pcross3d_arr = []
     pcrossmod3d_arr = []
-    with Pool(8) as p:
+    with Pool(32) as p:
         for pdata3d, phimod3d, pg3d, pgmod3d, pcross3d, pcrossmod3d in p.map(
             get_3d_power, range(512)
         ):
@@ -90,7 +90,7 @@ def main():
     pcrossmod3d_arr = np.array(pcrossmod3d_arr)[0][None]
 
     np.savez(
-        "data/00.npz",
+        "/scratch3/users/ztchen/validation/00.npz",
         pdata3d_arr=pdata3d_arr,
         phimod3d_arr=phimod3d_arr,
         pg3d_arr=pg3d_arr,
