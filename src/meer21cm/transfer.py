@@ -349,6 +349,9 @@ class TransferFunction:
         attr_dict["seed"] = seed
         if hasattr(self.ps, "ra_gal"):
             attr_dict["num_discrete_source"] = self.ps.ra_gal.size
+        # if it is a mock itself then overrides with its own attribute
+        if hasattr(self.ps, "num_discrete_source"):
+            attr_dict["num_discrete_source"] = self.ps.num_discrete_source
         attr_dict["highres_sim"] = self.highres_sim
         attr_dict["parallel_plane"] = self.parallel_plane
         attr_dict["rsd_from_field"] = self.rsd_from_field
