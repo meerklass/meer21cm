@@ -148,6 +148,7 @@ def test_transfer_function_value():
     pnotf_1d, _, _ = mock.get_1d_power(mock.auto_power_3d_1)
     tf_true = pnotf_1d / porig_1d
     mock.data = fg + mock.field_1
+    dndz_arr = [np.linspace(0, 1, 100), np.ones_like(np.linspace(0, 1, 100))]
     tf = TransferFunction(
         mock,
         N_fg=3,
@@ -156,6 +157,7 @@ def test_transfer_function_value():
         upres_radial=1,
         num_process=1,
         unmask_during_mock=True,
+        discrete_source_dndz=dndz_arr,
     )
     arglist = tf.get_arg_list_for_parallel_auto(
         range(10), return_power_3d=True, return_power_1d=True
