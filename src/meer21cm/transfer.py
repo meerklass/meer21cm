@@ -721,6 +721,11 @@ def run_tf_calculation_cross(
         R_mat_mock = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
+    if mean_center_map:
+        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
+            pca_map_weights, axis=(0, 1)
+        )
+        mock.data -= data_mean[None, None, :]
     mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
     mock.data = mock_map_cleaned
     # regrid the cleaned data
@@ -844,6 +849,11 @@ def run_tf_calculation_auto(
         R_mat_mock = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
+    if mean_center_map:
+        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
+            pca_map_weights, axis=(0, 1)
+        )
+        mock.data -= data_mean[None, None, :]
     mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
     mock.data = mock_map_cleaned
     # regrid the cleaned data
