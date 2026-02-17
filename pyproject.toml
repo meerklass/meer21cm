@@ -25,7 +25,7 @@ dependencies = [
     "matplotlib",
     "astropy",
     'halomod',
-    "katversion"
+    "katversion",
     'katbeam@git+https://github.com/ska-sa/katbeam@5ce6fcc35471168f4c4b84605cf601d57ced8d9e',
     "emcee",
     "nautilus-sampler",
