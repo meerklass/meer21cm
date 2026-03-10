@@ -16,11 +16,12 @@ The default installation of meer21cm does not include ``mpi4py``,
 and you need to configure MPI first (usually with openmpi or mpich), and then install ``mpi4py`` manually.
 """
 import numpy as np
-from meer21cm.util import pca_clean, dft_matrix, inv_dft_matrix
-from meer21cm.mock import MockSimulation
+from .util import pca_clean, dft_matrix, inv_dft_matrix
+from .mock import MockSimulation
 from multiprocessing import Pool
-from meer21cm.power import PowerSpectrum
+from .power import PowerSpectrum
 from typing import Callable
+from scipy.interpolate import interp1d
 
 
 def fft_matrix(mat, norm="backward"):
@@ -250,7 +251,7 @@ class TransferFunction:
             If not provided, the mock HI signal is injected into ``ps.data``.
             Note that this can be **wrong** if ``ps.data`` is already overridden by the residual map.
             In that case, you should provide the original map.
-        highres_sim: int, default 3
+        highres_sim: int, default Nones
             The mock field will be gridded to a high resolution sky map,
             with the resolution specified by this integer times the pixel resolution, and then
             down-sampled to the pixel resolution.
@@ -269,11 +270,14 @@ class TransferFunction:
             Only used if ``rsd_from_field`` is True, otherwise parallel-plane is hard-coded to True.
         rsd_from_field: bool, default False
             Whether to generate the RSD effect at field level. If False, the RSD effect is generated at power spectrum level.
-        discrete_source_dndz: function, default np.ones_like
+        discrete_source_dndz: list or function, default np.ones_like
             The redshift distribution of the discrete tracer sources.
             Must be a function of redshift.
-            Note that the overall number of discrete sources is set to ``ps.ra_gal.size``, so
+            Note that the overall number of discrete sources is set to ``ps.ra_gal.size``
+            or ``ps.num_discrete_source``, so
             only the shape of the dndz is used, not the normalization.
+            If a list is provided, the first element is the redshift array, and the second element is the dndz array,
+            and a 1D linear interpolation is used to get the dndz function.
         pool: str, default "multiprocessing"
             The pool to use for parallelisation. Can be "multiprocessing" or "mpi".
         num_process: int, default None
@@ -293,14 +297,14 @@ class TransferFunction:
         N_fg: int,
         R_mat: np.ndarray | None = None,
         uncleaned_data: np.ndarray | None = None,
-        highres_sim: None | int = 3,
+        highres_sim: int | None = None,
         upres_transverse: float = 4,
         upres_radial: float = 4,
         mean_center_map: bool = True,
         pca_map_weights: np.ndarray | None = None,
         parallel_plane: bool = True,
         rsd_from_field: bool = False,
-        discrete_source_dndz: Callable = np.ones_like,
+        discrete_source_dndz: list | Callable = np.ones_like,
         pool: str = "multiprocessing",
         num_process: int | None = None,
         unmask_during_mock: bool = False,
@@ -318,7 +322,7 @@ class TransferFunction:
         self.rsd_from_field = rsd_from_field
         self.discrete_source_dndz = discrete_source_dndz
         if uncleaned_data is None:
-            uncleaned_data = ps.data
+            uncleaned_data = np.zeros_like(ps.data)
         self.uncleaned_data = uncleaned_data
         self.pool = pool
         self.num_process = num_process
@@ -349,10 +353,13 @@ class TransferFunction:
         attr_dict["seed"] = seed
         if hasattr(self.ps, "ra_gal"):
             attr_dict["num_discrete_source"] = self.ps.ra_gal.size
+        # if it is a mock itself then overrides with its own attribute
+        if hasattr(self.ps, "num_discrete_source"):
+            attr_dict["num_discrete_source"] = self.ps.num_discrete_source
         attr_dict["highres_sim"] = self.highres_sim
         attr_dict["parallel_plane"] = self.parallel_plane
         attr_dict["rsd_from_field"] = self.rsd_from_field
-        attr_dict["discrete_source_dndz"] = self.discrete_source_dndz
+        # attr_dict["discrete_source_dndz"] = self.discrete_source_dndz
         attr_dict["downres_factor_radial"] = 1 / self.upres_radial
         attr_dict["downres_factor_transverse"] = 1 / self.upres_transverse
         highres_sim = self.highres_sim if self.highres_sim is not None else 1
@@ -403,6 +410,9 @@ class TransferFunction:
                     self.ps.k1dweights,
                     return_power_3d,
                     self.unmask_during_mock,
+                    self.ps.ra_range,
+                    self.ps.dec_range,
+                    self.discrete_source_dndz,
                 )
             )
         return arg_list
@@ -450,6 +460,9 @@ class TransferFunction:
                     return_power_3d,
                     return_power_1d,
                     self.unmask_during_mock,
+                    self.ps.ra_range,
+                    self.ps.dec_range,
+                    self.discrete_source_dndz,
                 )
             )
         return arg_list
@@ -495,6 +508,8 @@ class TransferFunction:
                     return_power_3d,
                     return_power_1d,
                     self.unmask_during_mock,
+                    self.ps.ra_range,
+                    self.ps.dec_range,
                 )
             )
         return arg_list
@@ -592,6 +607,9 @@ def run_tf_calculation_cross(
     return_power_3d=False,
     return_power_1d=False,
     unmask_during_mock=False,
+    ra_range=None,
+    dec_range=None,
+    discrete_source_dndz=None,
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -637,12 +655,33 @@ def run_tf_calculation_cross(
             This is useful for mitigating edge effects and when box buffer is small.
             For a large patch with a wide z-range, it is recommended to set this to True,
             otherwise the mock HI map may contain nan and cause errors.
+        ra_range: tuple, default None
+            The range of the RA in the sky map. Map and galaxy will be trimmed to this range.
+        dec_range: tuple, default None
+            The range of the Dec in the sky map. Map and galaxy will be trimmed to this range.
+        discrete_source_dndz: list or function, default None
+            The redshift distribution of the discrete tracer sources.
+            Must be a function of redshift.
+            Note that the overall number of discrete sources is set to ``ps.ra_gal.size``
+            or ``ps.num_discrete_source``, so
+            only the shape of the dndz is used, not the normalization.
+            If a list is provided, the first element is the redshift array, and the second element is the dndz array,
+            and a 1D linear interpolation is used to get the dndz function.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
     mock = MockSimulation(**mock_attr_dict)
+    if not isinstance(discrete_source_dndz, Callable):
+        discrete_source_dndz = interp1d(
+            discrete_source_dndz[0],
+            discrete_source_dndz[1],
+            kind="linear",
+            bounds_error=False,
+            fill_value=0,
+        )
+    mock.discrete_source_dndz = discrete_source_dndz
     if unmask_during_mock:
         W_HI_mock = mock.W_HI.copy()
         w_HI_mock = mock.w_HI.copy()
@@ -654,6 +693,10 @@ def run_tf_calculation_cross(
         mock.W_HI = W_HI_mock
         mock.w_HI = w_HI_mock
         mock.data[mock.W_HI == 0] = 0
+    mock.ra_range = ra_range
+    mock.dec_range = dec_range
+    mock.trim_map_to_range()
+    mock.trim_gal_to_range()
     mock.downres_factor_radial = downres_factor_radial
     mock.downres_factor_transverse = downres_factor_transverse
     mock.get_enclosing_box()
@@ -678,6 +721,11 @@ def run_tf_calculation_cross(
         R_mat_mock = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
+    if mean_center_map:
+        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
+            pca_map_weights, axis=(0, 1)
+        )
+        mock.data -= data_mean[None, None, :]
     mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
     mock.data = mock_map_cleaned
     # regrid the cleaned data
@@ -715,6 +763,8 @@ def run_tf_calculation_auto(
     return_power_3d=False,
     return_power_1d=False,
     unmask_during_mock=False,
+    ra_range=None,
+    dec_range=None,
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -756,6 +806,10 @@ def run_tf_calculation_auto(
             This is useful for mitigating edge effects and when box buffer is small.
             For a large patch with a wide z-range, it is recommended to set this to True,
             otherwise the mock HI map may contain nan and cause errors.
+        ra_range: tuple, default None
+            The range of the RA in the sky map. Map and galaxy will be trimmed to this range.
+        dec_range: tuple, default None
+            The range of the Dec in the sky map. Map and galaxy will be trimmed to this range.
     Returns
     -------
         result: list
@@ -772,6 +826,9 @@ def run_tf_calculation_auto(
         mock.W_HI = W_HI_mock
         mock.w_HI = w_HI_mock
         mock.data[mock.W_HI == 0] = 0
+    mock.ra_range = ra_range
+    mock.dec_range = dec_range
+    mock.trim_map_to_range()
     mock.downres_factor_radial = downres_factor_radial
     mock.downres_factor_transverse = downres_factor_transverse
     mock.get_enclosing_box()
@@ -792,6 +849,11 @@ def run_tf_calculation_auto(
         R_mat_mock = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
+    if mean_center_map:
+        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
+            pca_map_weights, axis=(0, 1)
+        )
+        mock.data -= data_mean[None, None, :]
     mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
     mock.data = mock_map_cleaned
     # regrid the cleaned data
@@ -832,6 +894,9 @@ def run_null_test(
     k_sel_3d_to_1d,
     return_power_3d=False,
     unmask_during_mock=False,
+    ra_range=None,
+    dec_range=None,
+    discrete_source_dndz=None,
 ):
     """
     Run null test realisations by calculating the 1D cross-power spectrum of the mock galaxy x data map.
@@ -864,6 +929,18 @@ def run_null_test(
             This is useful for mitigating edge effects and when box buffer is small.
             For a large patch with a wide z-range, it is recommended to set this to True,
             otherwise the mock HI map may contain nan and cause errors.
+        ra_range: tuple, default None
+            The range of the RA in the sky map. Map and galaxy will be trimmed to this range.
+        dec_range: tuple, default None
+            The range of the Dec in the sky map. Map and galaxy will be trimmed to this range.
+        discrete_source_dndz: list or function, default None
+            The redshift distribution of the discrete tracer sources.
+            Must be a function of redshift.
+            Note that the overall number of discrete sources is set to ``ps.ra_gal.size``
+            or ``ps.num_discrete_source``, so
+            only the shape of the dndz is used, not the normalization.
+            If a list is provided, the first element is the redshift array, and the second element is the dndz array,
+            and a 1D linear interpolation is used to get the dndz function.
     Returns
     -------
         result: list
@@ -871,6 +948,15 @@ def run_null_test(
             If ``return_power_3d`` is True, the second element is the 3D power spectrum of the mock results.
     """
     mock = MockSimulation(**mock_attr_dict)
+    if not isinstance(discrete_source_dndz, Callable):
+        discrete_source_dndz = interp1d(
+            discrete_source_dndz[0],
+            discrete_source_dndz[1],
+            kind="linear",
+            bounds_error=False,
+            fill_value=0,
+        )
+    mock.discrete_source_dndz = discrete_source_dndz
     if unmask_during_mock:
         W_HI_mock = mock.W_HI.copy()
         w_HI_mock = mock.w_HI.copy()
@@ -880,6 +966,10 @@ def run_null_test(
     if unmask_during_mock:
         mock.W_HI = W_HI_mock
         mock.w_HI = w_HI_mock
+    mock.ra_range = ra_range
+    mock.dec_range = dec_range
+    mock.trim_map_to_range()
+    mock.trim_gal_to_range()
     mock.downres_factor_radial = downres_factor_radial
     mock.downres_factor_transverse = downres_factor_transverse
     mock.get_enclosing_box()

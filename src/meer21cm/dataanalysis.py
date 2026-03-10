@@ -8,7 +8,7 @@ It is typically used as a base class for other classes that inherit from it, and
 
 import numpy as np
 from astropy.io import fits
-from meer21cm.util import (
+from .util import (
     check_unit_equiv,
     get_wcs_coor,
     freq_to_redshift,
@@ -21,7 +21,7 @@ from meer21cm.util import (
     create_wcs,
 )
 from astropy import constants, units
-from meer21cm.io import (
+from .io import (
     cal_freq,
     read_map,
     filter_incomplete_los,
@@ -29,9 +29,9 @@ from meer21cm.io import (
 )
 from astropy.wcs.utils import proj_plane_pixel_area
 from itertools import chain
+from . import telescope
+from .telescope import *
 import meer21cm
-from meer21cm.telescope import *
-import meer21cm.telescope as telescope
 import logging
 import numbers
 import inspect
