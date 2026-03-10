@@ -4,7 +4,6 @@ from astropy import units, constants
 from scipy.signal import convolve
 from astropy.cosmology import Planck18
 import healpy as hp
-from katbeam import JimBeam
 from astropy.wcs import WCS
 import meer21cm
 
@@ -189,6 +188,8 @@ def kat_beam(nu, wproj, xdim, ydim, band="L"):
     ----------
     .. [1] Asad et al., "Primary beam effects of radio astronomy antennas -- II. Modelling the MeerKAT L-band beam", https://arxiv.org/abs/1904.07155
     """
+    from katbeam import JimBeam
+
     xx, yy = get_beam_xy(
         wproj,
         xdim,

@@ -10,15 +10,15 @@ and provides an interface for gridding the intensity mapping data as well as the
 power spectrum estimation and for auto-correlation and cross-correlation.
 """
 import numpy as np
-from meer21cm.cosmology import CosmologyCalculator
-from meer21cm.grid import (
+from .cosmology import CosmologyCalculator
+from .grid import (
     minimum_enclosing_box_of_lightcone,
     project_particle_to_regular_grid,
     interlace_two_fields,
     fourier_window_for_assignment,
 )
 from scipy.signal import windows
-from meer21cm.util import (
+from .util import (
     tagging,
     radec_to_indx,
     redshift_to_freq,
@@ -27,7 +27,7 @@ from meer21cm.util import (
     omega_hi_to_average_temp,
     legendre_polynomial_with_factor,
 )
-from meer21cm.dataanalysis import Specification
+from .dataanalysis import Specification
 import healpy as hp
 from collections.abc import Iterable
 import inspect
