@@ -693,9 +693,6 @@ class ModelPowerSpectrum(CosmologyCalculator):
         """
         if self._auto_power_tracer_2_model is None:
             self.get_model_power_i(2)
-        # if still None, means tracer 2 is not set
-        if self._auto_power_tracer_2_model is None:
-            return None
         mean_amp = self.mean_amp_2
         if isinstance(mean_amp, str):
             logger.info(f"getting mean_amp_2 from self.{mean_amp}")
@@ -726,9 +723,6 @@ class ModelPowerSpectrum(CosmologyCalculator):
         """
         if self._cross_power_tracer_model is None:
             self.get_model_power_cross()
-        # if still None, means tracer 2 is not set
-        if self._cross_power_tracer_model is None:
-            return None
         mean_amp2 = self.mean_amp_2
         if isinstance(mean_amp2, str):
             mean_amp2 = getattr(self, mean_amp2)
@@ -864,7 +858,17 @@ class ModelPowerSpectrum(CosmologyCalculator):
         """
         tracer_bias_i = getattr(self, "tracer_bias_" + str(i))
         if tracer_bias_i is None:
-            return None
+            # For the second tracer, many higher-level APIs (e.g. PowerSpectrum, MockSimulation)
+            # rely on the existence of a well-defined theoretical model. If ``tracer_bias_2``
+            # is not set, calculating these model power spectra would fail in a non-obvious way
+            # later on. Raise an explicit error here instead.
+            if i == 2:
+                raise ValueError(
+                    "tracer_bias_2 is not set, so the theoretical power spectrum for "
+                    "tracer_2 (and any cross-correlation involving tracer_2) cannot be "
+                    "computed. Please pass tracer_bias_2 when initialising the object "
+                    "or set ``obj.tracer_bias_2`` before accessing tracer_2 model power."
+                )
         pk3d_mm_r = self.auto_power_matter_model_r
         # tracer in real space is just the matter ps times the bias
         pk3d_tt_r = tracer_bias_i**2 * pk3d_mm_r
@@ -899,9 +903,6 @@ class ModelPowerSpectrum(CosmologyCalculator):
         auto_power_model: np.ndarray
             The model power spectrum for the i-th tracer.
         """
-        if getattr(self, "tracer_bias_" + str(i)) is None:
-            logger.info("tracer_bias_%s is None, returning None", i)
-            return None
         logger.debug(
             "calculating model power for tracer %s with bias %s",
             i,
@@ -946,8 +947,13 @@ class ModelPowerSpectrum(CosmologyCalculator):
         Calculate the model cross power spectrum between the two tracers without observational effects.
         The attribute f"_cross_power_tracer_model_noobs" will be set by the output.
         """
-        if self.tracer_bias_1 is None or self.tracer_bias_2 is None:
-            return None
+        if self.tracer_bias_2 is None:
+            raise ValueError(
+                "tracer_bias_2 is not set, so the theoretical cross power spectrum for "
+                "cross-correlation cannot be computed. "
+                "Please pass tracer_bias_2 when initialising the object "
+                "or set ``obj.tracer_bias_2`` before accessing cross-power model quantities."
+            )
         pk3d_mm_r = self.auto_power_matter_model_r
         pk3d_tt_r = self.tracer_bias_1 * self.tracer_bias_2 * pk3d_mm_r
         if self.kaiser_rsd:
@@ -973,9 +979,12 @@ class ModelPowerSpectrum(CosmologyCalculator):
         The attribute f"_cross_power_tracer_model" will be set by the output.
         """
         if getattr(self, "tracer_bias_" + str(2)) is None:
-            logger.info("tracer bias 2 is None, returning None")
-        if self.tracer_bias_1 is None or self.tracer_bias_2 is None:
-            return None
+            raise ValueError(
+                "tracer_bias_2 is not set, so the theoretical cross power spectrum "
+                "between tracer_1 and tracer_2 cannot be computed. Please pass "
+                "tracer_bias_2 when initialising the object or set "
+                "``obj.tracer_bias_2`` before accessing cross-power model quantities."
+            )
         B_beam = self.beam_attenuation()
         B_sampling = self.map_sampling()
         B_comp = self.gridding_compensation()
