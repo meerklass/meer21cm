@@ -68,6 +68,13 @@ def test_emcee_run():
         save_filename="test_fit.h5",
         save_model_blobs=True,
     )
+    assert sampler.hartlap_factor == 1.0
+    assert sampler.percival_factor == 1.0
+    sampler.do_hartlap_correction = True
+    sampler.do_percival_correction = True
+    sampler.num_mocks = 1000000000
+    assert np.allclose(sampler.hartlap_factor, 1.0)
+    assert np.allclose(sampler.percival_factor, 1.0)
     ll_test = sampler.log_likelihood(np.array([1.5]))[0]
     assert np.isclose(ll_test, 0.0)
     ll_test, blob_test = sampler.log_likelihood(np.array([3]))
