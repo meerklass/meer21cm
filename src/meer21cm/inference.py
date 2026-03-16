@@ -92,6 +92,13 @@ class SamplerBase:
     save_model_blobs : bool, default False
         Whether to save the model blobs.
         The model blobs are the model vectors listed in the ``observables`` argument.
+    do_hartlap_correction : bool, default False
+        Whether to apply the Hartlap correction to the data covariance matrix.
+    num_mocks : int, default None
+        The number of mock data vectors to use for the Hartlap correction.
+        If not provided, the Hartlap correction will not be applied.
+    do_percival_correction : bool, default False
+        Whether to apply the Percival correction to the data covariance matrix.
     """
 
     def __init__(
@@ -105,6 +112,9 @@ class SamplerBase:
         save: bool = False,
         save_filename: str | None = None,
         save_model_blobs: bool = False,
+        do_hartlap_correction: bool = False,
+        num_mocks: int | None = None,
+        do_percival_correction: bool = False,
     ):
         self.ps_dict = ps_dict
         self.params_name = params_name
@@ -116,7 +126,98 @@ class SamplerBase:
         self.data_covariance = data_covariance
         self._inverse_covariance = None
         self.save_model_blobs = save_model_blobs
+        self.do_hartlap_correction = do_hartlap_correction
+        self.num_mocks = num_mocks
+        self.do_percival_correction = do_percival_correction
         self.validate_input()
+
+    @property
+    def do_hartlap_correction(self) -> bool:
+        """
+        Whether to apply the Hartlap correction to the data covariance matrix.
+        """
+        return self._do_hartlap_correction
+
+    @do_hartlap_correction.setter
+    def do_hartlap_correction(self, value: bool):
+        self._do_hartlap_correction = value
+        self._inverse_covariance = None
+
+    @property
+    def do_percival_correction(self) -> bool:
+        """
+        Whether to apply the Percival correction to the data covariance matrix.
+        """
+        return self._do_percival_correction
+
+    @do_percival_correction.setter
+    def do_percival_correction(self, value: bool):
+        self._do_percival_correction = value
+        self._inverse_covariance = None
+
+    @property
+    def num_mocks(self) -> int | None:
+        """
+        The number of mock data vectors to use for the Hartlap and Percival corrections.
+        """
+        return self._num_mocks
+
+    @num_mocks.setter
+    def num_mocks(self, value: int | None):
+        self._num_mocks = value
+        self._inverse_covariance = None
+
+    @property
+    def hartlap_factor(self) -> float:
+        r"""
+        The Hartlap factor.
+        The Hartlap correction is given by [1]_ :
+
+        .. math::
+            \hat{\Sigma^{-1}} = \frac{N_m - N_d - 2}{N_m - 1} \Sigma^{-1}
+        where :math:`N_m` is the number of mock realisations for calculating the covariance, :math:`N_d` is the number of data points,
+        and :math:`\Sigma` is the mock-based covariance matrix.
+
+        References
+        ----------
+        .. [1] Hartlap, J., et al. 2007, A&A, astro-ph/0608064
+        """
+        if self.do_hartlap_correction and self.num_mocks is not None:
+            return (self.num_mocks - self.data_vector.size - 2) / (self.num_mocks - 1)
+        return 1.0
+
+    @property
+    def percival_factor(self) -> float:
+        r"""
+        The Percival factor.
+        The Percival correction is given by [1]_ :
+
+        .. math::
+            \hat{\Sigma^{-1}} = \frac{1 + B(N_d - N_p)}{1 + A + B(N_p + 1)} \Sigma^{-1}
+
+        .. math::
+            A = \frac{2}{(N_m - N_d - 1) (N_m - N_d - 4)}
+
+        .. math::
+            B = \frac{N_m - N_d - 2}{(N_m - N_d - 1)(N_m - N_d - 4)}
+
+        where :math:`N_d` is the number of data points,
+        :math:`N_p` is the number of parameters,
+        :math:`N_m` is the number of mock realisations for calculating the covariance,
+        and :math:`\Sigma` is the mock-based covariance matrix.
+
+        References
+        ----------
+        .. [1] Percival, W. J. et al. 2014, MNRAS, 1312.4841
+        """
+        if self.do_percival_correction and self.num_mocks is not None:
+            N_d = self.data_vector.size
+            N_p = len(self.params_name)
+            N_m = self.num_mocks
+            A = 2 / ((N_m - N_d - 1) * (N_m - N_d - 4))
+            B = (N_m - N_d - 2) / ((N_m - N_d - 1) * (N_m - N_d - 4))
+            return (1 + B * (N_d - N_p)) / (1 + A + B * (N_p + 1))
+        return 1.0
 
     @property
     def inverse_covariance(self) -> np.ndarray:
@@ -125,6 +226,9 @@ class SamplerBase:
         """
         if self._inverse_covariance is None:
             self._inverse_covariance = np.linalg.inv(self.data_covariance)
+            self._inverse_covariance = (
+                self.hartlap_factor * self.percival_factor * self._inverse_covariance
+            )
         return self._inverse_covariance
 
     @property
@@ -283,7 +387,13 @@ class SamplerEmcee(SamplerBase):
     save_model_blobs : bool, default False
         Whether to save the model blobs.
         The model blobs are the model vectors listed in the ``observables`` argument.
-
+    do_hartlap_correction : bool, default False
+        Whether to apply the Hartlap correction to the data covariance matrix.
+    num_mocks : int, default None
+        The number of mock data vectors to use for the Hartlap correction.
+        If not provided, the Hartlap correction will not be applied.
+    do_percival_correction : bool, default False
+        Whether to apply the Percival correction to the data covariance matrix.
     """
 
     def __init__(
@@ -301,6 +411,9 @@ class SamplerEmcee(SamplerBase):
         save: bool = False,
         save_filename: str | None = None,
         save_model_blobs: bool = False,
+        do_hartlap_correction: bool = False,
+        num_mocks: int | None = None,
+        do_percival_correction: bool = False,
     ):
         self.nwalkers = nwalkers
         self.nsteps = nsteps
@@ -316,6 +429,9 @@ class SamplerEmcee(SamplerBase):
             save,
             save_filename,
             save_model_blobs,
+            do_hartlap_correction,
+            num_mocks,
+            do_percival_correction,
         )
 
     def log_prior_gaussian(self, value, mean, sigma):
@@ -617,6 +733,13 @@ class SamplerNautilus(SamplerBase):
     save_model_blobs : bool, default False
         Whether to save the model blobs.
         The model blobs are the model vectors listed in the ``observables`` argument.
+    hartlap_correction : bool, default False
+        Whether to apply the Hartlap correction to the data covariance matrix.
+    num_mocks : int, default None
+        The number of mock data vectors to use for the Hartlap correction.
+        If not provided, the Hartlap correction will not be applied.
+    percival_correction : bool, default False
+        Whether to apply the Percival correction to the data covariance matrix.
     """
 
     def __init__(
@@ -637,6 +760,9 @@ class SamplerNautilus(SamplerBase):
         nthreads: int = 1,
         timeout: float = np.inf,
         save_model_blobs: bool = False,
+        do_hartlap_correction: bool = False,
+        num_mocks: int | None = None,
+        do_percival_correction: bool = False,
     ):
         self.n_live_points = n_live_points
         self.f_live = f_live
@@ -655,6 +781,9 @@ class SamplerNautilus(SamplerBase):
             save,
             save_filename,
             save_model_blobs,
+            do_hartlap_correction,
+            num_mocks,
+            do_percival_correction,
         )
 
     def get_nautilus_prior(self):
