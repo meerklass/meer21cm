@@ -504,8 +504,10 @@ def test_ModelPowerSpectrum(fog_profile):
 
     # test tracer with no rsd but with bias
     model = ModelPowerSpectrum(tracer_bias_1=2.0, fog_profile=fog_profile)
-    assert model.auto_power_tracer_2_model is None
-    assert model.cross_power_tracer_model is None
+    with pytest.raises(ValueError):
+        _ = model.auto_power_tracer_2_model
+    with pytest.raises(ValueError):
+        _ = model.cross_power_tracer_model
     tracer_ps_rsd = model.auto_power_tracer_1_model
     assert np.allclose(tracer_ps_rsd, matter_ps_real * 4)
 
@@ -961,8 +963,10 @@ def test_1d_k_cut():
 
 def test_no_init_power():
     ps = PowerSpectrum()
-    assert ps.auto_power_tracer_2_model_noobs is None
-    assert ps.cross_power_tracer_model_noobs is None
+    with pytest.raises(ValueError):
+        _ = ps.auto_power_tracer_2_model_noobs
+    with pytest.raises(ValueError):
+        _ = ps.cross_power_tracer_model_noobs
 
 
 def test_map_sampling():
