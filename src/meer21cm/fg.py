@@ -1,7 +1,7 @@
 import healpy as hp
 import numpy as np
 import meer21cm
-from meer21cm.util import healpix_to_wcs, read_healpix_fits, check_unit_equiv
+from .util import healpix_to_wcs, read_healpix_fits, check_unit_equiv
 from astropy import units
 from healpy.rotator import Rotator
 

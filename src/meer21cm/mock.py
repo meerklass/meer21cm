@@ -27,8 +27,8 @@ from .util import (
     angle_in_range,
     get_nd_slicer,
 )
-from meer21cm.power import PowerSpectrum, Specification
-from meer21cm.telescope import weighted_convolution
+from .power import PowerSpectrum, Specification
+from .telescope import weighted_convolution
 from halomod import TracerHaloModel as THM
 import warnings
 import inspect

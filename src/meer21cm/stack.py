@@ -1,5 +1,5 @@
 import numpy as np
-from meer21cm.util import radec_to_indx, find_ch_id, redshift_to_freq
+from .util import radec_to_indx, find_ch_id, redshift_to_freq
 
 
 def stack(

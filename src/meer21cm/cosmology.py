@@ -17,9 +17,9 @@ the field k-modes to model k-modes (see :py:class:`meer21cm.power.PowerSpectrum`
 import numpy as np
 import camb
 import astropy
-from meer21cm import Specification
+from .dataanalysis import Specification
 from scipy.interpolate import interp1d
-from meer21cm.util import (
+from .util import (
     omega_hi_to_average_temp,
     tagging,
     HiddenPrints,

@@ -16,10 +16,10 @@ The default installation of meer21cm does not include ``mpi4py``,
 and you need to configure MPI first (usually with openmpi or mpich), and then install ``mpi4py`` manually.
 """
 import numpy as np
-from meer21cm.util import pca_clean, dft_matrix, inv_dft_matrix
-from meer21cm.mock import MockSimulation
+from .util import pca_clean, dft_matrix, inv_dft_matrix
+from .mock import MockSimulation
 from multiprocessing import Pool
-from meer21cm.power import PowerSpectrum
+from .power import PowerSpectrum
 from typing import Callable
 from scipy.interpolate import interp1d
 
