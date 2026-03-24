@@ -2,12 +2,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from meer21cm.plot import plot_map
-from meer21cm.util import create_wcs, redshift_to_freq
+from meer21cm.util import create_wcs, redshift_to_freq, HiddenPrints
 from astropy.cosmology import Planck18
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter
 from meer21cm import MockSimulation
 from meer21cm.grid import project_particle_to_regular_grid
+import warnings
+import os
+import sys
+import contextlib
 
 mock = MockSimulation()
 fiducial_cosmology = mock.fiducial_cosmology
@@ -181,25 +185,29 @@ def sim_pdf(params, bins=np.linspace(-1, 2.5, 100), seed=None):
 
 
 def log_likelihood(params, hist_data=None, bins=np.linspace(-1, 2.5, 100)):
-    hist_model_arr = sim_pdf(params, bins=bins)
-    bin_sel = (hist_model_arr > 0) * (hist_data > 0)
-    pdf_model = hist_model_arr / hist_model_arr.sum()
-    pdf_data = hist_data / hist_data.sum()
-    logl_plus = hist_data.sum() * (
-        (
-            -pdf_data[bin_sel] * np.log(pdf_data[bin_sel])
-            + pdf_data[bin_sel] * np.log(pdf_model[bin_sel])
-        ).sum()
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        hist_model_arr = sim_pdf(params, bins=bins)
+        bin_sel = (hist_model_arr > 0) * (hist_data > 0)
+        pdf_model = hist_model_arr / hist_model_arr.sum()
+        pdf_data = hist_data / hist_data.sum()
+        logl_plus = hist_data.sum() * (
+            (
+                -pdf_data[bin_sel] * np.log(pdf_data[bin_sel])
+                + pdf_data[bin_sel] * np.log(pdf_model[bin_sel])
+            ).sum()
+        )
     return logl_plus
 
 
-def log_likelihood_cov(params, hist_data, hist_inv_cov, bins=np.linspace(-1, 2.5, 100)):
-    hist_model_arr = sim_pdf(params, bins=bins)
-    logl = (
-        -0.5
-        * (hist_model_arr - hist_data)
-        @ hist_inv_cov
-        @ (hist_model_arr - hist_data)
-    )
+def log_likelihood_cov(params, hist_data=None, hist_inv_cov=None, bins=np.linspace(-1, 2.5, 100)):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        hist_model_arr = sim_pdf(params, bins=bins)
+        logl = (
+            -0.5
+            * (hist_model_arr - hist_data)
+            @ hist_inv_cov
+            @ (hist_model_arr - hist_data)
+        )
     return logl
