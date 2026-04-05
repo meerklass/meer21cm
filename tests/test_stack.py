@@ -74,7 +74,8 @@ def test_stack(sym):
     assert np.allclose(average_profile, source_avg * 2)
 
 
-def test_raise_error():
+def test_warn_out_of_range_galaxies_filtered():
+    """Galaxies outside the map or frequency range emit a warning and are dropped."""
     raminMK, ramaxMK = 334, 357
     decminMK, decmaxMK = -35, -26.5
     ra_range_MK = (raminMK, ramaxMK)
@@ -85,29 +86,44 @@ def test_raise_error():
         survey="meerklass_2021",
         band="L",
     )
+    z_g = np.array([sp.z_ch[80], sp.z_ch[140]])
+
     ra_g = np.array([180, 181])
     dec_g = np.array([sp.dec_map[80, 30], sp.dec_map[50, 40]])
-    z_g = np.array([sp.z_ch[80], sp.z_ch[140]])
     sp._ra_gal = ra_g
     sp._dec_gal = dec_g
     sp._z_gal = z_g
-    with pytest.raises(ValueError):
-        stack(sp)
+    with pytest.warns(
+        UserWarning, match="galaxies are outside survey area or frequency range"
+    ):
+        stack_3D_map, stack_3D_weight = stack(sp)
+    assert stack_3D_weight.sum() == 0
+    assert stack_3D_map.sum() == 0
+
     ra_g = np.array([sp.ra_map[80, 30], sp.ra_map[50, 40]])
     dec_g = np.array([20, 30])
     sp._ra_gal = ra_g
     sp._dec_gal = dec_g
     sp._z_gal = z_g
-    with pytest.raises(ValueError):
-        stack(sp)
+    with pytest.warns(
+        UserWarning, match="galaxies are outside survey area or frequency range"
+    ):
+        stack_3D_map, stack_3D_weight = stack(sp)
+    assert stack_3D_weight.sum() == 0
+    assert stack_3D_map.sum() == 0
+
     ra_g = np.array([sp.ra_map[80, 30], sp.ra_map[50, 40]])
     dec_g = np.array([sp.dec_map[80, 30], sp.dec_map[50, 40]])
     z_g = np.array([sp.z_ch[0] + 0.2, sp.z_ch[-1] - 0.2])
     sp._ra_gal = ra_g
     sp._dec_gal = dec_g
     sp._z_gal = z_g
-    with pytest.raises(ValueError):
-        stack(sp)
+    with pytest.warns(
+        UserWarning, match="galaxies are outside survey area or frequency range"
+    ):
+        stack_3D_map, stack_3D_weight = stack(sp)
+    assert stack_3D_weight.sum() == 0
+    assert stack_3D_map.sum() == 0
 
 
 def test_sum_3d_stack():

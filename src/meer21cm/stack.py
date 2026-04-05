@@ -1,5 +1,6 @@
 import numpy as np
 from .util import radec_to_indx, find_ch_id, redshift_to_freq
+import warnings
 
 
 def stack(
@@ -57,7 +58,6 @@ def stack(
     ra_g_in = sp.ra_gal.copy()
     dec_g_in = sp.dec_gal.copy()
     z_g_in = sp.z_gal.copy()
-    num_g = ra_g_in.size
     wproj = sp.wproj
     # retrive the centre pixel positions
     indx_0_g, indx_1_g = radec_to_indx(ra_g_in, dec_g_in, wproj)
@@ -71,7 +71,15 @@ def stack(
         + (indx_z_g == num_ch)
     )
     if sel.sum() > 0:
-        raise ValueError("some galaxies are outside survey area or frequency range")
+        warnings.warn(
+            f"{sel.mean() * 100:.2f}% galaxies are outside survey area or frequency range"
+        )
+        ra_g_in = ra_g_in[sel == 0]
+        dec_g_in = dec_g_in[sel == 0]
+        z_g_in = z_g_in[sel == 0]
+        indx_0_g = indx_0_g[sel == 0]
+        indx_1_g = indx_1_g[sel == 0]
+        indx_z_g = indx_z_g[sel == 0]
     # zero pad the sky map and the weights
     map_stack = np.zeros(
         (
