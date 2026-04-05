@@ -7,4 +7,3 @@ Examples
     examples/custom_survey
     examples/busy_week_1
     examples/quick_start
-    examples/log
