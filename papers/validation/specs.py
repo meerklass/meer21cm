@@ -110,7 +110,10 @@ def plot_1d_power(
         label="mock",
     )
     axes[0].plot(keff, pmodd * keff, label="model", ls="--")
-    axes[0].set_ylim((pmodd * keff).min() * 0.7, (pmodd * keff).max() * 1.2)
+    axes[0].set_ylim(
+        np.nanmin(pmodd * keff) * 0.7, 
+        np.nanmax(pmodd * keff) * 1.2
+    )
     axes[0].legend()
     axes[1].errorbar(
         keff,

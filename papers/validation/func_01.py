@@ -73,8 +73,8 @@ def get_3d_power(seed):
     mock.include_beam = [True, False]
     mock.field_2 = galmap_rg
     mock.weights_field_2 = dndz_box
-    # mock.weights_grid_2 = ((dndz_box>0)*mock.counts_in_box).astype('float') # test
-    mock.weights_grid_2 = ((dndz_box * mock.counts_in_box) > 0).astype("float")  # test2
+    mock.weights_grid_2 = ((dndz_box>0)*mock.counts_in_box).astype('float') # test
+    #mock.weights_grid_2 = ((dndz_box * mock.counts_in_box) > 0).astype("float")  # test2
     mock.apply_taper_to_field(2, axis=[0, 1, 2])
     shot_noise = get_shot_noise_galaxy(
         galmap_rg,
