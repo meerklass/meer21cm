@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from astropy.cosmology import Planck18, WMAP1
 from meer21cm.util import *
+from meer21cm.util import _ra_range_is_subset_of
 import sys
 from scipy.special import erf
 from halomod import TracerHaloModel
@@ -70,6 +71,49 @@ def test_angle_in_range():
     assert angle_in_range(-10, 0, 360)
     assert angle_in_range(350, 340, 10)
     assert angle_in_range(5, 0, 10)
+
+
+def test_extreme_cases_ra_range_is_subset_of():
+    assert not _ra_range_is_subset_of(0, 360 - 1e-10, 0, 350)
+
+
+def test_ra_array_crosses_zero():
+    assert ra_array_crosses_zero([355.0, 357.0, 2.0, 5.0])
+    assert not ra_array_crosses_zero([350.0, 10.0])
+    assert not ra_array_crosses_zero([10.0, 20.0, 30.0])
+
+
+def test_tightest_ra_interval():
+    lo, hi = tightest_ra_interval([355.0, 357.0, 2.0, 5.0])
+    assert lo == 355.0 and hi == 5.0
+    lo2, hi2 = tightest_ra_interval([10.0, 20.0, 30.0])
+    assert lo2 == 10.0 and hi2 == 30.0
+    assert tightest_ra_interval([42.0]) == (42.0, 42.0)
+    with pytest.raises(ValueError):
+        tightest_ra_interval([])
+
+
+def test_tightest_ra_interval_full_sky_branch():
+    # gaps sum to 360°; the wrap gap is >= 360 - 1e-12 only when all unique RAs lie in
+    # an arc of length <= 1e-12° (complement almost the whole circle).
+    base = 123.456789
+    lo, hi = tightest_ra_interval([base, base + 5e-13])
+    assert (lo, hi) == (0.0, 360.0)
+
+
+def test_which_ra_range_is_tighter():
+    assert which_ra_range_is_tighter((10.0, 30.0), (5.0, 40.0)) == -1
+    assert which_ra_range_is_tighter((5.0, 40.0), (10.0, 30.0)) == 1
+    assert which_ra_range_is_tighter((10.0, 30.0), (10.0, 30.0)) == 0
+    assert which_ra_range_is_tighter((355.0, 5.0), (350.0, 10.0)) == -1
+    assert which_ra_range_is_tighter((350.0, 10.0), (355.0, 5.0)) == 1
+    assert which_ra_range_is_tighter((0.0, 360.0), (15.0, 20.0)) == 1
+    assert which_ra_range_is_tighter((15.0, 20.0), (0.0, 360.0)) == -1
+    with pytest.raises(ValueError):
+        which_ra_range_is_tighter((10.0, 25.0), (20.0, 40.0))
+    # Endpoints of each arc lie in the other, but neither arc (angle_in_range) nests
+    with pytest.raises(ValueError):
+        which_ra_range_is_tighter((190.0, 10.0), (0.0, 200.0))
 
 
 def test_sample_map_from_highres():

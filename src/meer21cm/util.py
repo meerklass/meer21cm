@@ -198,6 +198,151 @@ def angle_in_range(alpha, lower, upper):
     return (alpha - lower) % 360 <= (upper - lower) % 360
 
 
+def ra_array_crosses_zero(ra_deg, atol=1e-9):
+    """
+    Return True if the smallest RA arc containing all values passes through 0° / 360°.
+
+    Longitudes are taken modulo 360°. For example, an array mixing values near
+    350° and near 10° returns True (the short arc bridges the branch cut). An
+    array confined to a single segment that does not wrap, such as 10°–30°,
+    returns False.
+
+    Parameters
+    ----------
+    ra_deg : array_like
+        Right ascensions in degrees.
+    atol : float
+        Numerical tolerance in degrees (for comparing arc lengths).
+
+    Returns
+    -------
+    bool
+    """
+    ra = np.asarray(ra_deg, dtype=float).ravel() % 360.0
+    s = np.unique(ra)
+    # if just two points or less, no way to tell if it crosses zero
+    if s.size <= 2:
+        return False
+    gaps = np.diff(s)
+    gaps = np.append(gaps, s[0] + 360.0 - s[-1])
+    largest_gap = float(np.max(gaps))
+    complement_arc = 360.0 - largest_gap
+    linear_span = float(s[-1] - s[0])
+    return complement_arc < (linear_span - atol)
+
+
+def tightest_ra_interval(ra_deg):
+    """
+    Smallest RA interval ``(lower, upper)`` in degrees that contains all values,
+    using the same wrap convention as :func:`angle_in_range` (``lower > upper`` when
+    the arc crosses 0°).
+
+    Parameters
+    ----------
+    ra_deg : array_like
+        Right ascensions in degrees.
+
+    Returns
+    -------
+    lower, upper : float
+        Bounds in degrees. If all values coincide, both are that longitude.
+        If the points span the full circle, returns ``(0.0, 360.0)``.
+
+    Raises
+    ------
+    ValueError
+        If ``ra_deg`` is empty.
+    """
+    ra = np.asarray(ra_deg, dtype=float).ravel() % 360.0
+    if ra.size == 0:
+        raise ValueError("tightest_ra_interval: empty array")
+    u = np.unique(ra)
+    if len(u) == 1:
+        v = float(u[0])
+        return v, v
+    s = np.sort(u)
+    gaps = np.diff(s)
+    gaps = np.append(gaps, s[0] + 360.0 - s[-1])
+    imax = int(np.argmax(gaps))
+    if gaps[imax] >= 360.0 - 1e-12:
+        return 0.0, 360.0
+    n = len(s)
+    if imax < n - 1:
+        return float(s[imax + 1]), float(s[imax])
+    return float(s[0]), float(s[-1])
+
+
+def _ra_modular_span_deg(lower, upper):
+    """Arc length in degrees for ``(lower, upper)`` as used by :func:`angle_in_range`."""
+    return (float(upper) - float(lower)) % 360.0
+
+
+def _ra_range_is_subset_of(inner_lo, inner_hi, outer_lo, outer_hi, atol=1e-9):
+    """
+    True if every longitude on the ``inner`` arc lies on the ``outer`` arc (degrees).
+
+    Uses the same convention as :func:`angle_in_range`. The check is algebraic: rotate
+    so ``outer_lo`` is 0°, then the outer arc is ``[0, L_out]`` with ``L_out`` the
+    modular span; the inner arc starts at ``psi0 = (inner_lo - outer_lo) % 360``.
+    """
+    L_out = _ra_modular_span_deg(outer_lo, outer_hi)
+    L_in = _ra_modular_span_deg(inner_lo, inner_hi)
+    if np.isclose(L_out, 0.0, atol=atol):
+        return True
+    if np.isclose(L_in, 0.0, atol=atol):
+        return np.isclose(L_out, 0.0, atol=atol)
+    if L_in >= 360.0 - atol:
+        print("test")
+        return np.isclose(L_out, 0.0, atol=atol)
+    psi0 = (float(inner_lo) - float(outer_lo)) % 360.0
+    if psi0 + L_in > 360.0 + atol:
+        return False
+    return psi0 + L_in <= L_out + atol
+
+
+def which_ra_range_is_tighter(range_a, range_b, atol=1e-9):
+    """
+    Compare two RA intervals given as ``(lower, upper)`` in degrees, using the same
+    wrap convention as :func:`angle_in_range` (``lower`` may be greater than ``upper``).
+
+    Exactly one range must enclose the other (as sets of longitudes on the circle),
+    or the two ranges must be equivalent; otherwise a :class:`ValueError` is raised.
+
+    Parameters
+    ----------
+    range_a, range_b : tuple of float
+        ``(ra_lower_deg, ra_upper_deg)``.
+    atol : float
+        Numerical tolerance in degrees (full-sky detection and span comparisons).
+
+    Returns
+    -------
+    int
+        ``-1`` if ``range_a`` is strictly tighter (proper subset of ``range_b``),
+        ``1`` if ``range_b`` is strictly tighter,
+        ``0`` if the two ranges describe the same coverage.
+
+    Raises
+    ------
+    ValueError
+        If neither range encloses the other (including partial overlap without nesting).
+    """
+    a_lo, a_hi = float(range_a[0]), float(range_a[1])
+    b_lo, b_hi = float(range_b[0]), float(range_b[1])
+    a_in_b = _ra_range_is_subset_of(a_lo, a_hi, b_lo, b_hi, atol=atol)
+    b_in_a = _ra_range_is_subset_of(b_lo, b_hi, a_lo, a_hi, atol=atol)
+    if a_in_b and b_in_a:
+        return 0
+    if a_in_b:
+        return -1
+    if b_in_a:
+        return 1
+    raise ValueError(
+        "The two RA ranges are not nested: neither encloses the other "
+        f"(range_a={range_a!r}, range_b={range_b!r})."
+    )
+
+
 def sample_map_from_highres(
     map_highres, ra_map, dec_map, wproj_lowres, num_pix_x, num_pix_y, average=True
 ):
