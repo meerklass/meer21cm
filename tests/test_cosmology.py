@@ -43,6 +43,38 @@ def test_compare_matter_power(ps_type, accuracy):
     assert np.allclose(np.abs(pkcamb / pkbacco - 1) < accuracy, True)
 
 
+def test_ps_type_change_refreshes_matter_power():
+    """Changing ps_type must update embedded cospar_* used by matter_power_spectrum_fnc."""
+    cal = CosmologyCalculator(ps_type="linear")
+    k = np.geomspace(0.002, 0.5, 80)
+    pk_linear = cal.matter_power_spectrum_fnc(k)
+    cal.ps_type = "nonlinear"
+    assert cal.cospar_true.ps_type == "nonlinear"
+    assert cal.cospar_fiducial.ps_type == "nonlinear"
+    pk_nonlinear = cal.matter_power_spectrum_fnc(k)
+    assert not np.allclose(pk_linear, pk_nonlinear)
+    mock1 = CosmologyCalculator(
+        ps_type="linear",
+    )
+    mock2 = CosmologyCalculator(
+        ps_type="nonlinear",
+    )
+    ps_nonlinear = mock2.matter_power_spectrum_fnc(np.linspace(0.002, 0.5, 300))
+    ps_linear = mock1.matter_power_spectrum_fnc(np.linspace(0.002, 0.5, 300))
+    assert not np.allclose(ps_nonlinear, ps_linear)  # False
+
+    mock1 = CosmologyCalculator(
+        ps_type="linear",
+    )
+    mock2 = CosmologyCalculator(
+        ps_type="linear",
+    )
+    mock2.ps_type = "nonlinear"
+    ps_nonlinear = mock2.matter_power_spectrum_fnc(np.linspace(0.002, 0.5, 300))
+    ps_linear = mock1.matter_power_spectrum_fnc(np.linspace(0.002, 0.5, 300))
+    assert not np.allclose(ps_nonlinear, ps_linear)
+
+
 @pytest.mark.parametrize(
     "flag1, flag2", [(True, False), (False, False), (True, True), (False, True)]
 )
