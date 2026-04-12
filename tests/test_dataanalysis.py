@@ -81,6 +81,11 @@ def test_read_fits(test_fits):
     sp.num_pix_x = 1
     sp.num_pix_y = 1
     sp.read_from_fits()
+    assert np.isfinite(sp.nu_min) and np.isfinite(sp.nu_max)
+    assert sp.nu_min == pytest.approx(float(np.min(sp.nu)))
+    assert sp.nu_max == pytest.approx(float(np.max(sp.nu)))
+    assert sp.dec_range[0] == pytest.approx(float(np.min(sp.dec_map)))
+    assert sp.dec_range[1] == pytest.approx(float(np.max(sp.dec_map)))
     assert np.allclose(sp.data.shape, (133, 73, 2))
     assert np.allclose(sp.counts.shape, (133, 73, 2))
     assert np.allclose(sp.ra_map.shape, (133, 73))
@@ -97,6 +102,19 @@ def test_read_fits(test_fits):
     sp.weighting = "uniform"
     sp.read_from_fits()
     assert np.allclose(sp.w_HI, sp.counts > 0)
+
+
+def test_read_fits_auto_set_radecnu_bounds_off(test_fits):
+    sp = Specification(
+        nu_min=-np.inf,
+        nu_max=np.inf,
+        auto_set_radecnu_bounds=False,
+    )
+    sp.map_file = test_fits
+    sp.read_from_fits()
+    assert sp.nu_min == -np.inf and sp.nu_max == np.inf
+    assert sp.dec_range == (-90, 90)
+    assert sp.ra_range == (0, 360)
 
 
 def test_gal_readin(test_gal_fits):

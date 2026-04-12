@@ -19,6 +19,8 @@ from .util import (
     find_property_with_tags,
     angle_in_range,
     create_wcs,
+    tightest_ra_interval,
+    which_ra_range_is_tighter,
 )
 from astropy import constants, units
 from .io import (
@@ -131,6 +133,10 @@ class Specification:
         The column name of the frequencies of each channel in the data.
     wcs_column: str, default "wcs"
         The column name of the :class:`astropy.wcs.WCS` object for the map.
+    auto_set_radecnu_bounds: bool, default True
+        If True, :meth:`read_from_fits` and :meth:`read_from_pickle` call
+        :meth:`set_radecnu_bounds_from_map` after loading so ``ra_range``,
+        ``dec_range``, ``nu_min``, and ``nu_max`` match the loaded grid and channels.
     """
 
     def __init__(
@@ -167,6 +173,7 @@ class Specification:
         counts_column="hit",
         freq_column="freq",
         wcs_column="wcs",
+        auto_set_radecnu_bounds=True,
         **kwparams,
     ):
         self.survey = survey
@@ -278,6 +285,38 @@ class Specification:
         self.counts_column = counts_column
         self.freq_column = freq_column
         self.wcs_column = wcs_column
+        self.auto_set_radecnu_bounds = auto_set_radecnu_bounds
+
+    def set_radecnu_bounds_from_map(self):
+        """
+        Set ``ra_range``, ``dec_range``, ``nu_min``, and ``nu_max`` from the loaded
+        ``_ra_map``, ``_dec_map``, and ``nu`` (tight RA interval, declination min/max,
+        frequency min/max). Only consider unmaksed pixels.
+        """
+        # in case it is not properly initialized, use the full grid
+        if self.W_HI.shape == self.ra_map.shape:
+            ra = self.ra_map[self.W_HI.sum(-1) > 0]
+            dec = self.dec_map[self.W_HI.sum(-1) > 0]
+        else:
+            ra = self.ra_map
+            dec = self.dec_map
+        ra_range = tightest_ra_interval(ra)
+        nu_min = self.nu.min()
+        nu_max = self.nu.max()
+        nu_min = np.max([self.nu_min, nu_min]) - 1
+        nu_max = np.min([self.nu_max, nu_max]) + 1
+        dec_min = np.max([self.dec_range[0], dec.min()]) - 1e-5
+        dec_max = np.min([self.dec_range[1], dec.max()]) + 1e-5
+        ra_flag = which_ra_range_is_tighter(ra_range, self.ra_range)
+        if ra_flag > 0:
+            ra_range = self.ra_range
+        ra_0 = np.max([ra_range[0] - 1e-5, 0])
+        ra_1 = np.min([ra_range[1] + 1e-5, 360])
+        ra_range = (ra_0, ra_1)
+        self.dec_range = (dec_min, dec_max)
+        self.nu_min = nu_min
+        self.nu_max = nu_max
+        self.ra_range = ra_range
 
     @property
     def map_unit_type(self):
@@ -634,6 +673,8 @@ class Specification:
             self.weights_map_pixel = self.counts
         elif self.weighting.lower()[:7] == "uniform":
             self.weights_map_pixel = (self.counts > 0).astype("float")
+        if self.auto_set_radecnu_bounds:
+            self.set_radecnu_bounds_from_map()
         self.trim_map_to_range()
 
     def read_from_fits(self):
@@ -682,6 +723,8 @@ class Specification:
             self.weights_map_pixel = self.counts
         elif self.weighting.lower()[:7] == "uniform":
             self.weights_map_pixel = (self.counts > 0).astype("float")
+        if self.auto_set_radecnu_bounds:
+            self.set_radecnu_bounds_from_map()
         self.trim_map_to_range()
 
     def trim_map_to_range(self):
