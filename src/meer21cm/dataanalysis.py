@@ -294,7 +294,7 @@ class Specification:
         frequency min/max). Only consider unmaksed pixels.
         """
         # in case it is not properly initialized, use the full grid
-        if self.W_HI.shape == self.ra_map.shape:
+        if self.W_HI.sum() > 0:
             ra = self.ra_map[self.W_HI.sum(-1) > 0]
             dec = self.dec_map[self.W_HI.sum(-1) > 0]
         else:
@@ -310,9 +310,10 @@ class Specification:
         ra_flag = which_ra_range_is_tighter(ra_range, self.ra_range)
         if ra_flag > 0:
             ra_range = self.ra_range
-        ra_0 = np.max([ra_range[0] - 1e-5, 0])
-        ra_1 = np.min([ra_range[1] + 1e-5, 360])
-        ra_range = (ra_0, ra_1)
+        else:
+            ra_0 = np.max([ra_range[0] - 1e-5, 0])
+            ra_1 = np.min([ra_range[1] + 1e-5, 360])
+            ra_range = (ra_0, ra_1)
         self.dec_range = (dec_min, dec_max)
         self.nu_min = nu_min
         self.nu_max = nu_max

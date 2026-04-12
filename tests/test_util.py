@@ -89,6 +89,16 @@ def test_tightest_ra_interval():
     lo2, hi2 = tightest_ra_interval([10.0, 20.0, 30.0])
     assert lo2 == 10.0 and hi2 == 30.0
     assert tightest_ra_interval([42.0]) == (42.0, 42.0)
+    with pytest.raises(ValueError):
+        tightest_ra_interval([])
+
+
+def test_tightest_ra_interval_full_sky_branch():
+    # gaps sum to 360°; the wrap gap is >= 360 - 1e-12 only when all unique RAs lie in
+    # an arc of length <= 1e-12° (complement almost the whole circle).
+    base = 123.456789
+    lo, hi = tightest_ra_interval([base, base + 5e-13])
+    assert (lo, hi) == (0.0, 360.0)
 
 
 def test_which_ra_range_is_tighter():

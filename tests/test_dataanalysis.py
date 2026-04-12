@@ -115,6 +115,13 @@ def test_read_fits_auto_set_radecnu_bounds_off(test_fits):
     assert sp.nu_min == -np.inf and sp.nu_max == np.inf
     assert sp.dec_range == (-90, 90)
     assert sp.ra_range == (0, 360)
+    sp.set_radecnu_bounds_from_map()
+    assert sp.nu_min == pytest.approx(float(np.min(sp.nu)))
+    assert sp.nu_max == pytest.approx(float(np.max(sp.nu)))
+    # test manually override
+    sp.ra_range = (350, 5)
+    sp.set_radecnu_bounds_from_map()
+    assert np.allclose(sp.ra_range, (350, 5))
 
 
 def test_gal_readin(test_gal_fits):
