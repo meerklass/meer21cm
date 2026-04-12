@@ -616,6 +616,15 @@ class CosmologyCalculator(Specification):
     @ps_type.setter
     def ps_type(self, value):
         self._ps_type = value
+        # cospar_true / cospar_fiducial are CosmologyParameters built in get_cospar()
+        # with the ps_type at construction time; refresh them so CAMB/bacco use the
+        # new setting when matter_power_spectrum_fnc is recomputed.
+        _ct = getattr(self, "_cospar_true", None)
+        if _ct is not None:
+            _ct.ps_type = value
+        _cf = getattr(self, "_cospar_fiducial", None)
+        if _cf is not None:
+            _cf.ps_type = value
         logger.debug(
             f"cleaning cache of {self.cosmo_fid_dep_attr} due to resetting ps_type"
         )
