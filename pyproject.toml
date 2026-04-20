@@ -1,10 +1,14 @@
 [build-system]
-requires = ["setuptools>=43.0"]
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "katversion@git+https://github.com/Sefa76/katversion@modernize_package_dist",
+    ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "meer21cm"
-version = "0.7.0"
+dynamic = ["version"]
 authors = [
   { name="Zhaoting Chen", email="ztchenustc@gmail.com" },
 ]
@@ -23,7 +27,7 @@ dependencies = [
     "matplotlib",
     "astropy",
     'halomod',
-    'katbeam@git+https://github.com/ska-sa/katbeam@5ce6fcc35471168f4c4b84605cf601d57ced8d9e',
+    "katbeam@git+https://github.com/Sefa76/katbeam@modernize_package_dist",
     "emcee",
     "nautilus-sampler",
     "pygdsm@git+https://github.com/telegraphic/pygdsm",
