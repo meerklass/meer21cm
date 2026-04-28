@@ -26,6 +26,7 @@ from .util import (
     get_nd_slicer,
     omega_hi_to_average_temp,
     legendre_polynomial_with_factor,
+    real_dtype_from_array,
 )
 from .dataanalysis import Specification
 import healpy as hp
@@ -545,7 +546,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
 
     @kmode.setter
     def kmode(self, value):
-        self._kmode = value
+        self._kmode = np.asarray(value, dtype=self.real_dtype)
         if "kmode_dep_attr" in dir(self):
             logger.debug(
                 f"cleaning cache of {self.kmode_dep_attr} due to resetting kmode"
@@ -1525,10 +1526,12 @@ def get_renormed_field(
     field: np.ndarray
         The renormalized field.
     """
-    field = np.array(real_field)
+    field = np.asarray(real_field)
+    real_dtype = real_dtype_from_array(field)
+    field = field.astype(real_dtype, copy=True)
     if weights is None:
-        weights = np.ones_like(field)
-    weights = np.array(weights)
+        weights = np.ones_like(field, dtype=real_dtype)
+    weights = np.asarray(weights, dtype=real_dtype)
     if mean_center or unitless:
         field_mean = np.sum(weights * field) / np.sum(weights)
     else:
@@ -1580,8 +1583,8 @@ def get_fourier_density(
         unitless=unitless,
     )
     if weights is None:
-        weights = np.ones_like(field)
-    weights = np.array(weights)
+        weights = np.ones_like(field, dtype=real_dtype_from_array(field))
+    weights = np.asarray(weights, dtype=real_dtype_from_array(field))
     fourier_field = np.fft.rfftn(field * weights, norm=norm)
     return fourier_field
 
@@ -1670,10 +1673,14 @@ def get_shot_noise_galaxy(
     """
     Calculate the shot noise of a galaxy number count field.
     """
+    gal_count = np.asarray(gal_count)
+    real_dtype = real_dtype_from_array(gal_count)
     if weights_grid is None:
-        weights_grid = np.ones(gal_count.shape)
+        weights_grid = np.ones(gal_count.shape, dtype=real_dtype)
     if weights_field is None:
-        weights_field = np.ones(gal_count.shape)
+        weights_field = np.ones(gal_count.shape, dtype=real_dtype)
+    weights_grid = np.asarray(weights_grid, dtype=real_dtype)
+    weights_field = np.asarray(weights_field, dtype=real_dtype)
     w_g_n = (weights_grid * gal_count).sum() / gal_count.sum()
     w_2_g_n = (weights_grid**2 * gal_count).sum() / gal_count.sum()
     wfwg_2_v = ((weights_field * weights_grid) ** 2).mean()
@@ -1710,11 +1717,12 @@ def get_shot_noise(
     shot_noise: float
         The shot noise of the field.
     """
-    box_len = np.array(box_len)
+    real_dtype = real_dtype_from_array(real_field)
+    box_len = np.asarray(box_len, dtype=real_dtype)
     box_volume = np.prod(box_len)
     if weights is None:
-        weights = np.ones(real_field.shape)
-    weights = np.array(weights)
+        weights = np.ones(real_field.shape, dtype=real_dtype)
+    weights = np.asarray(weights, dtype=real_dtype)
     weights_renorm = power_weights_renorm(weights, weights)
     shot_noise = (
         box_volume
@@ -3064,8 +3072,13 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         ] * num_p
         if partial_sel is None:
             partial_sel = slice(None)
-        data_particle = np.array(data_particle)[:, partial_sel].ravel()
-        weights_particle = np.array(weights_particle)[:, partial_sel].ravel()
+        real_dtype = real_dtype_from_array(self.data)
+        data_particle = np.asarray(data_particle, dtype=real_dtype)[
+            :, partial_sel
+        ].ravel()
+        weights_particle = np.asarray(weights_particle, dtype=real_dtype)[
+            :, partial_sel
+        ].ravel()
         pix_coor_in_box = self.pix_coor_in_box.reshape(
             (num_p, num_pix, self.nu.size, 3)
         )
@@ -3094,8 +3107,8 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             hi_map_rg2,
             self.interlace_shift,
         )
-        hi_map_rg = np.array(hi_map_rg)
-        hi_weights_rg = np.array(hi_weights_rg)
+        hi_map_rg = np.asarray(hi_map_rg, dtype=real_dtype)
+        hi_weights_rg = np.asarray(hi_weights_rg, dtype=real_dtype)
         # pixel_counts_hi_rg = np.array(pixel_counts_hi_rg)
         # self.pixel_counts_hi_rg = pixel_counts_hi_rg
         self.field_1 = hi_map_rg
@@ -3130,6 +3143,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             freq_gal = self.freq_gal
         else:
             ra_gal, dec_gal, freq_gal = radecfreq
+        real_dtype = self.real_dtype
         if flat_sky:
             self.compensate = False
             z_gal = freq_to_redshift(freq_gal)
@@ -3137,7 +3151,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             pos_indx_1, pos_indx_2 = radec_to_indx(
                 ra_gal, dec_gal, self.wproj, to_int=False
             )
-            gal_pos_in_box = np.zeros((ra_gal.size, 3))
+            gal_pos_in_box = np.zeros((ra_gal.size, 3), dtype=real_dtype)
             gal_pos_in_box[:, 0] = pos_indx_1 / self.num_pix_x * self.box_len[0]
             gal_pos_in_box[:, 1] = pos_indx_2 / self.num_pix_y * self.box_len[1]
             gal_pos_in_box[:, 2] = (
@@ -3154,7 +3168,9 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 tile=False,
                 rot_mat=self.rot_mat_sky_to_box,
             )
-            gal_pos_in_box = gal_pos_arr - self.box_origin[None, :]
+            gal_pos_in_box = (gal_pos_arr - self.box_origin[None, :]).astype(
+                real_dtype, copy=False
+            )
         (
             gal_map_rg,
             gal_weights_rg,
@@ -3181,14 +3197,14 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             gal_map_rg2,
             self.interlace_shift,
         )
-        gal_map_rg = np.array(gal_map_rg)
-        gal_weights_rg = np.array(gal_weights_rg)
-        pixel_counts_gal_rg = np.array(pixel_counts_gal_rg)
+        gal_map_rg = np.asarray(gal_map_rg, dtype=real_dtype)
+        gal_weights_rg = np.asarray(gal_weights_rg, dtype=real_dtype)
+        pixel_counts_gal_rg = np.asarray(pixel_counts_gal_rg, dtype=real_dtype)
         self.field_2 = gal_map_rg
         # only pixels sampled by the lightcone is used
-        weights_g = (self.counts_in_box > 0).astype(float)
+        weights_g = (self.counts_in_box > 0).astype(real_dtype)
         self.weights_field_2 = weights_g
-        self.weights_grid_2 = np.ones_like(self.field_2)
+        self.weights_grid_2 = np.ones_like(self.field_2, dtype=real_dtype)
         self.mean_center_2 = True
         self.unitless_2 = True
         include_beam = np.array(self.include_beam)

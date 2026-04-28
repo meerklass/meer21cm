@@ -24,6 +24,20 @@ def test_get_nd_slicer():
     assert slicer[2] == (None, None, slice(None))
 
 
+def test_real_dtype_from_array_complex_branch():
+    assert real_dtype_from_array(np.array([1 + 1j], dtype=np.complex64)) == np.float32
+    assert real_dtype_from_array(np.array([1 + 1j], dtype=np.complex128)) == np.float64
+
+
+def test_real_dtype_from_array_fallback_default_branch():
+    # integer dtype should fall through to the final return(default)
+    assert real_dtype_from_array(np.array([1, 2, 3], dtype=np.int32)) == np.dtype(
+        np.float64
+    )
+    # object without a dtype attribute should also return default
+    assert real_dtype_from_array([1, 2, 3], default=np.float32) == np.dtype(np.float32)
+
+
 def test_dft_matrix():
     fft_mat = dft_matrix(10)
     assert np.allclose(fft_mat, np.fft.fft(np.eye(10)))

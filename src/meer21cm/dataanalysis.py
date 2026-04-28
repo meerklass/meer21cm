@@ -21,6 +21,7 @@ from .util import (
     create_wcs,
     tightest_ra_interval,
     which_ra_range_is_tighter,
+    real_dtype_from_array,
 )
 from astropy import constants, units
 from .io import (
@@ -41,6 +42,13 @@ import inspect
 logger = logging.getLogger(__name__)
 
 default_data_dir = meer21cm.__file__.rsplit("/", 1)[0] + "/data/"
+
+
+def _validate_precision_flag(value):
+    if not isinstance(value, bool):
+        raise TypeError("precision must be bool: True (float64) or False (float32)")
+    return value
+
 
 default_nu = {
     "meerkat_L": cal_freq(np.arange(4096) + 1, band="L"),
@@ -137,6 +145,9 @@ class Specification:
         If True, :meth:`read_from_fits` and :meth:`read_from_pickle` call
         :meth:`set_radecnu_bounds_from_map` after loading so ``ra_range``,
         ``dec_range``, ``nu_min``, and ``nu_max`` match the loaded grid and channels.
+    precision: bool, default True
+        Floating precision selector for core numeric arrays.
+        If True, use double precision (`np.float64`); if False, use single precision (`np.float32`).
     """
 
     def __init__(
@@ -174,6 +185,7 @@ class Specification:
         freq_column="freq",
         wcs_column="wcs",
         auto_set_radecnu_bounds=True,
+        precision=True,
         **kwparams,
     ):
         self.survey = survey
@@ -210,6 +222,7 @@ class Specification:
         self.counts_file = counts_file
         self.pickle_file = pickle_file
         self.los_axis = los_axis
+        self._precision = _validate_precision_flag(precision)
         sel_nu = True
         if nu is None:
             nu = np.array([f_21 - 1, f_21])
@@ -263,17 +276,19 @@ class Specification:
         self.dec_range = dec_range
         self._sigma_beam_ch_in_mpc = None
         if data is None:
-            data = np.zeros(self.map_has_sampling.shape)
+            data = np.zeros(self.map_has_sampling.shape, dtype=self.real_dtype)
         self.data = data
         if weights_map_pixel is None:
-            weights_map_pixel = np.ones(self.map_has_sampling.shape)
+            weights_map_pixel = np.ones(
+                self.map_has_sampling.shape, dtype=self.real_dtype
+            )
             weights_map_pixel[0] = 0.0
             weights_map_pixel[-1] = 0.0
             weights_map_pixel[:, 0] = 0.0
             weights_map_pixel[:, -1] = 0.0
         self.weights_map_pixel = weights_map_pixel
         if counts is None:
-            counts = np.ones(self.map_has_sampling.shape)
+            counts = np.ones(self.map_has_sampling.shape, dtype=self.real_dtype)
         self.counts = counts
         self.trim_map_to_range()
         self.beam_type = None
@@ -349,6 +364,16 @@ class Specification:
                 setattr(self, att, None)
 
     @property
+    def precision(self):
+        """Floating precision flag. True for float64, False for float32."""
+        return self._precision
+
+    @property
+    def real_dtype(self):
+        """Active real floating dtype controlled by `precision`."""
+        return np.float64 if self.precision else np.float32
+
+    @property
     def beam_type(self):
         """
         The beam type that can be either be
@@ -403,7 +428,9 @@ class Specification:
     @sigma_beam_ch.setter
     def sigma_beam_ch(self, value):
         if isinstance(value, numbers.Number):
-            value = np.ones(self.nu.size) * float(value)
+            value = np.ones(self.nu.size, dtype=self.real_dtype) * float(value)
+        elif value is not None:
+            value = np.asarray(value, dtype=self.real_dtype)
         self._sigma_beam_ch = value
         if "beam_dep_attr" in dir(self):
             self.clean_cache(self.beam_dep_attr)
@@ -426,7 +453,7 @@ class Specification:
 
     @nu.setter
     def nu(self, value):
-        self._nu = np.array(value)
+        self._nu = np.asarray(value, dtype=self.real_dtype)
         if "nu_dep_attr" in dir(self):
             self.clean_cache(self.nu_dep_attr)
 
@@ -504,7 +531,7 @@ class Specification:
 
     @data.setter
     def data(self, value):
-        self._data = value
+        self._data = np.asarray(value, dtype=self.real_dtype)
 
     @property
     def counts(self):
@@ -515,7 +542,7 @@ class Specification:
 
     @counts.setter
     def counts(self, value):
-        self._counts = value
+        self._counts = np.asarray(value, dtype=self.real_dtype)
 
     @property
     def map_has_sampling(self):
@@ -526,7 +553,7 @@ class Specification:
 
     @map_has_sampling.setter
     def map_has_sampling(self, value):
-        self._map_has_sampling = value
+        self._map_has_sampling = np.asarray(value, dtype=bool)
 
     W_HI = map_has_sampling
 
@@ -553,7 +580,7 @@ class Specification:
 
     @weights_map_pixel.setter
     def weights_map_pixel(self, value):
-        self._weights_map_pixel = value
+        self._weights_map_pixel = np.asarray(value, dtype=self.real_dtype)
 
     w_HI = weights_map_pixel
 
@@ -825,7 +852,9 @@ class Specification:
         if num_pix_y is None:
             num_pix_y = self.num_pix_y
         pix_resol = np.sqrt(proj_plane_pixel_area(wproj))
-        beam_image = np.zeros((num_pix_x, num_pix_y, len(self.nu)))
+        beam_image = np.zeros(
+            (num_pix_x, num_pix_y, len(self.nu)), dtype=self.real_dtype
+        )
         beam_model = getattr(telescope, self.beam_model + "_beam")
         if self.beam_type == "isotropic":
             for i in range(len(self.nu)):
@@ -908,11 +937,11 @@ class Specification:
         weights = getattr(self, attr_name)
         if weights is None:
             if hasattr(self, "box_ndim"):
-                weights = np.ones(self.box_ndim)
+                weights = np.ones(self.box_ndim, dtype=self.real_dtype)
             else:
                 shape = np.array(self.kmode.shape)
                 shape[-1] = 2 * shape[-1] - 2
-                weights = np.ones(shape)
+                weights = np.ones(shape, dtype=self.real_dtype)
         return weights
 
     def get_jackknife_patches(
@@ -987,7 +1016,8 @@ class Specification:
         dec_indx -= 1
         nu_indx -= 1
         mask_arr = np.zeros(
-            (ra_patch_num, dec_patch_num, nu_patch_num) + self.W_HI.shape
+            (ra_patch_num, dec_patch_num, nu_patch_num) + self.W_HI.shape,
+            dtype=bool,
         )
         for i in range(len(ra_delta_bins) - 1):
             for j in range(len(dec_bins) - 1):
@@ -1030,9 +1060,13 @@ class Specification:
             The white noise map.
         """
         if counts is None:
-            counts = np.ones(self.data.shape)
+            counts = np.ones(self.data.shape, dtype=self.data.dtype)
+        else:
+            counts = np.asarray(counts, dtype=real_dtype_from_array(self.data))
         rng = np.random.default_rng(seed=seed)
-        noise_map = rng.normal(scale=sigma_N / np.sqrt(counts), size=self.data.shape)
+        noise_map = rng.normal(
+            scale=sigma_N / np.sqrt(counts), size=self.data.shape
+        ).astype(real_dtype_from_array(self.data), copy=False)
         if inf_to_zero:
             noise_map[np.isinf(noise_map)] = 0.0
         return noise_map

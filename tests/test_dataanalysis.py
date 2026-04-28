@@ -28,6 +28,30 @@ def test_update_nu():
     assert np.allclose(spec.z, 0)
 
 
+@pytest.mark.parametrize("precision,dtype", [(True, np.float64), (False, np.float32)])
+def test_precision_dtype_casting(precision, dtype):
+    spec = Specification(precision=precision)
+    assert spec.real_dtype == dtype
+    assert spec.nu.dtype == dtype
+    assert spec.data.dtype == dtype
+    assert spec.counts.dtype == dtype
+    assert spec.weights_map_pixel.dtype == dtype
+    spec.sigma_beam_ch = 0.01
+    assert spec.sigma_beam_ch.dtype == dtype
+
+
+def test_precision_is_init_only():
+    spec = Specification(precision=False)
+    with pytest.raises(AttributeError):
+        spec.precision = True
+
+
+@pytest.mark.parametrize("bad_precision", [1, 0, 1.0, "true", None, np.bool_(True)])
+def test_precision_must_be_python_bool(bad_precision):
+    with pytest.raises(TypeError, match="precision must be bool"):
+        Specification(precision=bad_precision)
+
+
 def test_unit_conversion():
     spec = Specification(map_unit=units.mK)
     assert spec.map_unit_type == "T"
