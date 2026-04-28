@@ -3060,18 +3060,62 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             return self.field_1, self.weights_1, (self.weights_1 > 0).astype(float)
         if self.box_origin is None:
             self.get_enclosing_box()
+        num_pix = (self.W_HI.sum(-1) > 0).sum()
+        all_sel = np.arange(num_pix)
+        if partial_sel is None:
+            selected_pix = all_sel
+        else:
+            selected_pix = all_sel[partial_sel]
+        batch_sel = np.array_split(selected_pix, self.batch_number)
+        batch_sel = [sel for sel in batch_sel if sel.size > 0]
+        if len(batch_sel) == 0:
+            shape = tuple(self.box_ndim.tolist())
+            hi_map_rg = np.zeros(shape, dtype=self.real_dtype)
+            hi_weights_sum = np.zeros(shape, dtype=self.real_dtype)
+            pixel_counts_sum = np.zeros(shape, dtype=self.real_dtype)
+            self.field_1 = hi_map_rg
+            self.weights_1 = pixel_counts_sum.astype(float)
+            self.unitless_1 = False
+            include_beam = np.array(self.include_beam)
+            include_beam[0] = True
+            self.include_beam = include_beam
+            include_sky_sampling = np.array(self.include_sky_sampling)
+            include_sky_sampling[0] = True
+            self.include_sky_sampling = include_sky_sampling
+            return hi_map_rg, hi_weights_sum, pixel_counts_sum
+
+        map_weighted_sum = None
+        hi_weights_sum = None
+        pixel_counts_sum = None
+        for sel in batch_sel:
+            hi_map_i, hi_weights_i, pixel_counts_i = self._grid_data_to_field(sel)
+            if map_weighted_sum is None:
+                map_weighted_sum = np.zeros_like(hi_map_i)
+                hi_weights_sum = np.zeros_like(hi_weights_i)
+                pixel_counts_sum = np.zeros_like(pixel_counts_i)
+            map_weighted_sum += hi_map_i * hi_weights_i
+            hi_weights_sum += hi_weights_i
+            pixel_counts_sum += pixel_counts_i
+        with np.errstate(divide="ignore", invalid="ignore"):
+            hi_map_rg = np.nan_to_num(map_weighted_sum / hi_weights_sum)
+        self.field_1 = hi_map_rg
+        self.weights_1 = pixel_counts_sum.astype(float)
+        self.unitless_1 = False
+        include_beam = np.array(self.include_beam)
+        include_beam[0] = True
+        self.include_beam = include_beam
+        include_sky_sampling = np.array(self.include_sky_sampling)
+        include_sky_sampling[0] = True
+        self.include_sky_sampling = include_sky_sampling
+        return hi_map_rg, hi_weights_sum, pixel_counts_sum
+
+    def _grid_data_to_field(self, partial_sel):
+        num_pix = (self.W_HI.sum(-1) > 0).sum()
         data_particle = self.data[self.W_HI.sum(-1) > 0]
         weights_particle = self.w_HI[self.W_HI.sum(-1) > 0]
-        num_pix = (self.W_HI.sum(-1) > 0).sum()
         num_p = self.num_particle_per_pixel
-        data_particle = [
-            data_particle,
-        ] * num_p
-        weights_particle = [
-            weights_particle,
-        ] * num_p
-        if partial_sel is None:
-            partial_sel = slice(None)
+        data_particle = [data_particle] * num_p
+        weights_particle = [weights_particle] * num_p
         real_dtype = real_dtype_from_array(self.data)
         data_particle = np.asarray(data_particle, dtype=real_dtype)[
             :, partial_sel
@@ -3102,25 +3146,9 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             compensate=False,  # compensate should be at model level
             shift=self.interlace_shift,
         )
-        hi_map_rg = interlace_two_fields(
-            hi_map_rg,
-            hi_map_rg2,
-            self.interlace_shift,
-        )
+        hi_map_rg = interlace_two_fields(hi_map_rg, hi_map_rg2, self.interlace_shift)
         hi_map_rg = np.asarray(hi_map_rg, dtype=real_dtype)
         hi_weights_rg = np.asarray(hi_weights_rg, dtype=real_dtype)
-        # pixel_counts_hi_rg = np.array(pixel_counts_hi_rg)
-        # self.pixel_counts_hi_rg = pixel_counts_hi_rg
-        self.field_1 = hi_map_rg
-        self.weights_1 = (self.counts_in_box).astype(float)
-        # self.apply_taper_to_field(1)
-        self.unitless_1 = False
-        include_beam = np.array(self.include_beam)
-        include_beam[0] = True
-        self.include_beam = include_beam
-        include_sky_sampling = np.array(self.include_sky_sampling)
-        include_sky_sampling[0] = True
-        self.include_sky_sampling = include_sky_sampling
         return hi_map_rg, hi_weights_rg, pixel_counts_hi_rg
 
     def grid_gal_to_field(self, radecfreq=None, flat_sky=None):
@@ -3144,6 +3172,8 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         else:
             ra_gal, dec_gal, freq_gal = radecfreq
         real_dtype = self.real_dtype
+        if ra_gal.size == 0:
+            gal_pos_in_box = np.zeros((0, 3), dtype=real_dtype)
         if flat_sky:
             self.compensate = False
             z_gal = freq_to_redshift(freq_gal)
@@ -3151,52 +3181,53 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             pos_indx_1, pos_indx_2 = radec_to_indx(
                 ra_gal, dec_gal, self.wproj, to_int=False
             )
-            gal_pos_in_box = np.zeros((ra_gal.size, 3), dtype=real_dtype)
-            gal_pos_in_box[:, 0] = pos_indx_1 / self.num_pix_x * self.box_len[0]
-            gal_pos_in_box[:, 1] = pos_indx_2 / self.num_pix_y * self.box_len[1]
-            gal_pos_in_box[:, 2] = (
-                self.astropy_cosmo_fiducial.comoving_distance(z_gal).value
-                - self.astropy_cosmo_fiducial.comoving_distance(self.z_ch.min()).value
-            )
+            if ra_gal.size > 0:
+                gal_pos_in_box = np.zeros((ra_gal.size, 3), dtype=real_dtype)
+                gal_pos_in_box[:, 0] = pos_indx_1 / self.num_pix_x * self.box_len[0]
+                gal_pos_in_box[:, 1] = pos_indx_2 / self.num_pix_y * self.box_len[1]
+                gal_pos_in_box[:, 2] = (
+                    self.astropy_cosmo_fiducial.comoving_distance(z_gal).value
+                    - self.astropy_cosmo_fiducial.comoving_distance(
+                        self.z_ch.min()
+                    ).value
+                )
         else:
-            (_, _, _, _, _, _, _, gal_pos_arr) = minimum_enclosing_box_of_lightcone(
-                ra_gal,
-                dec_gal,
-                freq_gal,
-                cosmo=self.astropy_cosmo_fiducial,
-                return_coord=True,
-                tile=False,
-                rot_mat=self.rot_mat_sky_to_box,
-            )
-            gal_pos_in_box = (gal_pos_arr - self.box_origin[None, :]).astype(
-                real_dtype, copy=False
-            )
-        (
-            gal_map_rg,
-            gal_weights_rg,
-            pixel_counts_gal_rg,
-        ) = project_particle_to_regular_grid(
-            gal_pos_in_box,
-            self.box_len,
-            self.box_ndim,
-            grid_scheme=self.grid_scheme,
-            compensate=False,  # compensate should be at model level
-            average=False,
-        )
-        (gal_map_rg2, _, _,) = project_particle_to_regular_grid(
-            gal_pos_in_box,
-            self.box_len,
-            self.box_ndim,
-            grid_scheme=self.grid_scheme,
-            compensate=False,  # compensate should be at model level
-            average=False,
-            shift=self.interlace_shift,
-        )
-        gal_map_rg = interlace_two_fields(
-            gal_map_rg,
-            gal_map_rg2,
-            self.interlace_shift,
-        )
+            if ra_gal.size > 0:
+                (_, _, _, _, _, _, _, gal_pos_arr) = minimum_enclosing_box_of_lightcone(
+                    ra_gal,
+                    dec_gal,
+                    freq_gal,
+                    cosmo=self.astropy_cosmo_fiducial,
+                    return_coord=True,
+                    tile=False,
+                    rot_mat=self.rot_mat_sky_to_box,
+                )
+                gal_pos_in_box = (gal_pos_arr - self.box_origin[None, :]).astype(
+                    real_dtype, copy=False
+                )
+        all_sel = np.arange(gal_pos_in_box.shape[0])
+        gal_sel_batches = np.array_split(all_sel, self.batch_number)
+        gal_sel_batches = [sel for sel in gal_sel_batches if sel.size > 0]
+        if len(gal_sel_batches) == 0:
+            shape = tuple(self.box_ndim.tolist())
+            gal_map_rg = np.zeros(shape, dtype=real_dtype)
+            gal_weights_rg = np.zeros(shape, dtype=real_dtype)
+            pixel_counts_gal_rg = np.zeros(shape, dtype=real_dtype)
+        else:
+            gal_map_rg = None
+            gal_weights_rg = None
+            pixel_counts_gal_rg = None
+            for sel in gal_sel_batches:
+                gal_map_i, gal_weights_i, pixel_counts_i = self._grid_gal_to_field(
+                    gal_pos_in_box, sel
+                )
+                if gal_map_rg is None:
+                    gal_map_rg = np.zeros_like(gal_map_i)
+                    gal_weights_rg = np.zeros_like(gal_weights_i)
+                    pixel_counts_gal_rg = np.zeros_like(pixel_counts_i)
+                gal_map_rg += gal_map_i
+                gal_weights_rg += gal_weights_i
+                pixel_counts_gal_rg += pixel_counts_i
         gal_map_rg = np.asarray(gal_map_rg, dtype=real_dtype)
         gal_weights_rg = np.asarray(gal_weights_rg, dtype=real_dtype)
         pixel_counts_gal_rg = np.asarray(pixel_counts_gal_rg, dtype=real_dtype)
@@ -3214,6 +3245,36 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         include_sky_sampling[1] = False
         self.include_sky_sampling = include_sky_sampling
 
+        return gal_map_rg, gal_weights_rg, pixel_counts_gal_rg
+
+    def _grid_gal_to_field(self, gal_pos_in_box, partial_sel):
+        gal_pos_i = gal_pos_in_box[partial_sel]
+        (
+            gal_map_rg,
+            gal_weights_rg,
+            pixel_counts_gal_rg,
+        ) = project_particle_to_regular_grid(
+            gal_pos_i,
+            self.box_len,
+            self.box_ndim,
+            grid_scheme=self.grid_scheme,
+            compensate=False,  # compensate should be at model level
+            average=False,
+        )
+        gal_map_rg2, _, _ = project_particle_to_regular_grid(
+            gal_pos_i,
+            self.box_len,
+            self.box_ndim,
+            grid_scheme=self.grid_scheme,
+            compensate=False,  # compensate should be at model level
+            average=False,
+            shift=self.interlace_shift,
+        )
+        gal_map_rg = interlace_two_fields(gal_map_rg, gal_map_rg2, self.interlace_shift)
+        real_dtype = self.real_dtype
+        gal_map_rg = np.asarray(gal_map_rg, dtype=real_dtype)
+        gal_weights_rg = np.asarray(gal_weights_rg, dtype=real_dtype)
+        pixel_counts_gal_rg = np.asarray(pixel_counts_gal_rg, dtype=real_dtype)
         return gal_map_rg, gal_weights_rg, pixel_counts_gal_rg
 
     def get_n_bar_correction(self):

@@ -52,6 +52,16 @@ def test_precision_must_be_python_bool(bad_precision):
         Specification(precision=bad_precision)
 
 
+def test_batch_number_init_and_validation():
+    spec = Specification(batch_number=3)
+    assert spec.batch_number == 3
+    for bad_batch in [0, -1, 1.5, "2", True]:
+        with pytest.raises(TypeError, match="batch_number must be a positive integer"):
+            Specification(batch_number=bad_batch)
+    with pytest.raises(AttributeError):
+        spec.batch_number = 2
+
+
 def test_unit_conversion():
     spec = Specification(map_unit=units.mK)
     assert spec.map_unit_type == "T"

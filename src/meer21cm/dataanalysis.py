@@ -50,6 +50,12 @@ def _validate_precision_flag(value):
     return value
 
 
+def _validate_batch_number(value):
+    if type(value) is not int or value < 1:
+        raise TypeError("batch_number must be a positive integer")
+    return value
+
+
 default_nu = {
     "meerkat_L": cal_freq(np.arange(4096) + 1, band="L"),
     "meerkat_UHF": cal_freq(np.arange(4096) + 1, band="UHF"),
@@ -148,6 +154,9 @@ class Specification:
     precision: bool, default True
         Floating precision selector for core numeric arrays.
         If True, use double precision (`np.float64`); if False, use single precision (`np.float32`).
+    batch_number: int, default 1
+        Number of sequential batches used by various routines.
+        A value of 1 means no batching.
     """
 
     def __init__(
@@ -186,6 +195,7 @@ class Specification:
         wcs_column="wcs",
         auto_set_radecnu_bounds=True,
         precision=True,
+        batch_number=1,
         **kwparams,
     ):
         self.survey = survey
@@ -223,6 +233,7 @@ class Specification:
         self.pickle_file = pickle_file
         self.los_axis = los_axis
         self._precision = _validate_precision_flag(precision)
+        self._batch_number = _validate_batch_number(batch_number)
         sel_nu = True
         if nu is None:
             nu = np.array([f_21 - 1, f_21])
@@ -372,6 +383,11 @@ class Specification:
     def real_dtype(self):
         """Active real floating dtype controlled by `precision`."""
         return np.float64 if self.precision else np.float32
+
+    @property
+    def batch_number(self):
+        """Number of sequential batches used by gridding routines."""
+        return self._batch_number
 
     @property
     def beam_type(self):
