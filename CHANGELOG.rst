@@ -5,11 +5,12 @@ dev
 ------
 Features
 ++++++++
-* TBC
+* optimize PR CI by running test/coverage only when source-impacting files change
+* add Codecov carryforward configuration for flagged test coverage uploads
 
 Fixes
 +++++
-* TBC
+* remove a stray debug print from `util._ra_range_is_subset_of`
 
 v0.8.0
 ------
