@@ -834,6 +834,7 @@ class Specification:
         num_pix_x=None,
         num_pix_y=None,
         cache=True,
+        ch_sel=None,
     ):
         """
         Calculate the beam image projected onto the sky map for the input beam model.
@@ -851,6 +852,9 @@ class Specification:
             If True, the beam image will be cached and returned directly if it is already computed.
             If False, the beam image will be computed and returned.
             The cache is saved into the class attribute `beam_image`.
+        ch_sel: array-like, default None
+            Optional channel selection. If provided, returns beam image only for
+            selected channels. Caching is only applied when `ch_sel` is None.
         """
         if self.sigma_beam_ch is None:
             logger.info(
@@ -867,22 +871,35 @@ class Specification:
             num_pix_x = self.num_pix_x
         if num_pix_y is None:
             num_pix_y = self.num_pix_y
+        if ch_sel is None:
+            ch_sel = np.arange(len(self.nu), dtype=int)
+            use_full_channels = True
+        else:
+            ch_sel = np.asarray(ch_sel, dtype=int)
+            use_full_channels = False
+        if (
+            use_full_channels
+            and cache
+            and self._beam_image is not None
+            and self._beam_image.shape == (num_pix_x, num_pix_y, len(self.nu))
+        ):
+            return self._beam_image
         pix_resol = np.sqrt(proj_plane_pixel_area(wproj))
         beam_image = np.zeros(
-            (num_pix_x, num_pix_y, len(self.nu)), dtype=self.real_dtype
+            (num_pix_x, num_pix_y, len(ch_sel)), dtype=self.real_dtype
         )
         beam_model = getattr(telescope, self.beam_model + "_beam")
         if self.beam_type == "isotropic":
-            for i in range(len(self.nu)):
-                beam_image[:, :, i] = telescope.isotropic_beam_profile(
+            for i_out, i_ch in enumerate(ch_sel):
+                beam_image[:, :, i_out] = telescope.isotropic_beam_profile(
                     num_pix_x,
                     num_pix_y,
                     wproj,
-                    beam_model(self.sigma_beam_ch[i]),
+                    beam_model(self.sigma_beam_ch[i_ch]),
                 )
         else:
             beam_image = beam_model(
-                self.nu,
+                self.nu[ch_sel],
                 wproj,
                 num_pix_x,
                 num_pix_y,
@@ -891,8 +908,9 @@ class Specification:
             sigma_beam_from_image = (
                 np.sqrt(beam_image.sum(axis=(0, 1)) / 2 / np.pi) * pix_resol
             )
-            self.sigma_beam_ch = sigma_beam_from_image
-        if cache:
+            if use_full_channels:
+                self.sigma_beam_ch = sigma_beam_from_image
+        if cache and use_full_channels:
             self._beam_image = beam_image
         return beam_image
 

@@ -3326,6 +3326,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         wproj=None,
         num_pix_x=None,
         num_pix_y=None,
+        los_sel=None,
     ):
         """
         Grid a field in the rectangular box onto the sky.
@@ -3350,6 +3351,14 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         num_pix_y: int, default None.
             The number of pixels along the seconds axis for the sky map. Defulat uses the stored ``self.num_pix_y``.
 
+        los_sel: array-like, default None.
+            Optional selector of line-of-sight (last-axis) indices represented by ``field``.
+            If None, ``field`` is assumed to contain all LOS slices with shape
+            ``self.box_ndim``. If provided, ``field`` must have shape
+            ``(self.box_ndim[0], self.box_ndim[1], len(los_sel))`` and the projected
+            output still uses the full LOS map axis (``self.nu.size``), so multiple
+            chunked calls can be merged by accumulating mass/count outputs.
+
         Returns
         -------
         map_bin: array.
@@ -3364,11 +3373,35 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
             num_pix_x = self.num_pix_x
         if num_pix_y is None:
             num_pix_y = self.num_pix_y
-        pos_xyz = np.array(np.meshgrid(*self.x_vec, indexing="ij")).reshape((3, -1)).T
+        los_sel = (
+            np.arange(self.box_ndim[2], dtype=int)
+            if los_sel is None
+            else np.asarray(los_sel, dtype=int)
+        )
+        expected_shape = (self.box_ndim[0], self.box_ndim[1], los_sel.size)
+        if field.shape != expected_shape:
+            raise ValueError(
+                f"field shape {field.shape} does not match expected shape "
+                f"{expected_shape} for los_sel size {los_sel.size}"
+            )
+        x_vec = self.x_vec[0]
+        y_vec = self.x_vec[1]
+        z_vec = self.x_vec[2][los_sel]
+        nx = x_vec.size
+        ny = y_vec.size
+        nz = z_vec.size
+        nxyz = nx * ny * nz
+        pos_xyz = np.empty((nxyz, 3), dtype=self.real_dtype)
+        pos_xyz[:, 0] = np.repeat(x_vec, ny * nz)
+        pos_xyz[:, 1] = np.tile(np.repeat(y_vec, nz), nx)
+        pos_xyz[:, 2] = np.tile(z_vec, nx * ny)
         pos_ra, pos_dec, pos_z, _ = self.ra_dec_z_for_coord_in_box(pos_xyz)
         pos_indx_1, pos_indx_2 = radec_to_indx(pos_ra, pos_dec, wproj, to_int=False)
         pos_indx_z = redshift_to_freq(pos_z) - self.nu.min()
-        pos_indx_array = np.array([pos_indx_1, pos_indx_2, pos_indx_z]).T
+        pos_indx_array = np.empty((nxyz, 3), dtype=self.real_dtype)
+        pos_indx_array[:, 0] = pos_indx_1
+        pos_indx_array[:, 1] = pos_indx_2
+        pos_indx_array[:, 2] = pos_indx_z
         map_bin, _, count_bin = project_particle_to_regular_grid(
             pos_indx_array,
             np.array([num_pix_x, num_pix_y, self.nu.max() - self.nu.min()]),

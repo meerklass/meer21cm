@@ -209,6 +209,17 @@ def test_beam_image():
     assert np.allclose(sigma_beam_from_image, sp.sigma_beam_ch)
 
 
+def test_get_beam_image_returns_cached_duplicate_call():
+    """Second ``get_beam_image(cache=True)`` reuses `_beam_image` when shape matches."""
+    sp = Specification(survey="meerklass_2021", band="L")
+    D_dish = 13.5
+    sp.sigma_beam_ch = dish_beam_sigma(D_dish, sp.nu)
+    _ = sp.beam_image
+    assert sp._beam_image is not None
+    b_cached = sp.get_beam_image(cache=True)
+    assert b_cached is sp._beam_image
+
+
 def test_convolve_data():
     sp = Specification(
         survey="meerklass_2021",

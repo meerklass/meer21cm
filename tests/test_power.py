@@ -1097,6 +1097,21 @@ def test_average_model_hi_temp():
     assert np.allclose(temp_box_avg, ps.average_model_hi_temp, rtol=1e-3)
 
 
+def test_grid_field_to_sky_map_los_sel_shape_validation():
+    ps = PowerSpectrum(
+        include_sky_sampling=[False, False],
+        survey="meerklass_2021",
+        band="L",
+    )
+    ps.get_enclosing_box()
+    los_sel = np.arange(min(3, ps.box_ndim[2]), dtype=int)
+    bad_field = np.zeros((ps.box_ndim[0], ps.box_ndim[1], los_sel.size + 1))
+    with pytest.raises(
+        ValueError, match="field shape .* does not match expected shape"
+    ):
+        ps.grid_field_to_sky_map(bad_field, los_sel=los_sel)
+
+
 def test_update_cosmo():
     ps = ModelPowerSpectrum(
         survey="meerklass_2021",

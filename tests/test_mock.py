@@ -192,6 +192,40 @@ def test_tracer_position():
     # test of power spectrum is performed in pipeline tests
 
 
+def test_tracer_position_zero_density_chunk_path():
+    mock = MockSimulation(
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_1=1.0,
+        num_discrete_source=100,
+    )
+    mock.get_enclosing_box()
+    mock._mock_tracer_field_1 = np.zeros(mock.box_ndim, dtype=mock.real_dtype)
+    # after +1 in routine this becomes exactly zero, forcing norm==0 path
+    density_field = -np.ones(mock.box_ndim, dtype=mock.real_dtype)
+    mock.get_mock_tracer_position_in_box(tracer_i=1, density_field=density_field)
+    tracer_positions = mock._mock_tracer_position_in_box
+    assert tracer_positions.shape == (0, len(mock.box_ndim))
+
+
+def test_propagate_mock_field_average_false_chunk_merge():
+    mock = MockSimulation(
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_1=1.0,
+        batch_number=3,
+    )
+    mock.get_enclosing_box()
+    field = np.ones(mock.box_ndim, dtype=mock.real_dtype)
+    out = mock.propagate_mock_field_to_data(
+        field=field,
+        beam=False,
+        highres_sim=None,
+        average=False,
+    )
+    assert out.shape == (mock.num_pix_x, mock.num_pix_y, mock.nu.size)
+
+
 def test_hi_mass_to_flux():
     raminMK, ramaxMK = 334, 357
     decminMK, decmaxMK = -35, -26.5
@@ -410,6 +444,51 @@ def test_project_hi_profile(highres):
             ]
             test2 = hifluxd_ch[:, sel][:, i]
             assert np.allclose(test1, test2)
+
+
+def test_apply_weighted_convolution_explicit_beam_slices():
+    """Non-lazy beam path: ``beam_image[..., ch_sel]`` inside batch loop."""
+    mock = MockSimulation(survey="meerklass_2021", band="L")
+    nch = len(mock.nu)
+    nx, ny = 8, 8
+    rng = np.random.RandomState(0)
+    map_data = rng.standard_normal((nx, ny, nch)).astype(mock.real_dtype)
+    map_counts = np.ones_like(map_data)
+    beam_image = np.ones((nx, ny, nch), dtype=float)
+    out = mock._apply_weighted_convolution_in_batches(
+        map_data,
+        map_counts,
+        beam_image=beam_image,
+    )
+    assert out.shape == map_data.shape
+
+
+def test_propagate_hi_profile_explicit_beam_image():
+    """Convolution branch that passes ``beam_image`` explicitly (non-None)."""
+    hisim = HIGalaxySimulation(
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_1=1.5,
+        tracer_bias_2=1.9,
+        num_discrete_source=5,
+        downres_factor_radial=1 / 3,
+        downres_factor_transverse=1 / 3,
+        kmax=20,
+        nonlinear="both",
+        tf_slope=3.66,
+        tf_zero=1.6,
+        no_vel=False,
+        num_ch_ext_on_each_side=3,
+        flat_sky=True,
+    )
+    hi_map_plain = hisim.propagate_hi_profile_to_map(return_highres=True, beam=False)
+    beam_image = np.ones_like(hi_map_plain)
+    hi_conv = hisim.propagate_hi_profile_to_map(
+        return_highres=True,
+        beam=True,
+        beam_image=beam_image,
+    )
+    assert hi_conv.shape == hi_map_plain.shape
 
 
 def test_generate_colored_noise():
