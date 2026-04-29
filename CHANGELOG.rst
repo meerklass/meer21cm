@@ -7,6 +7,7 @@ Features
 ++++++++
 * optimize PR CI by running test/coverage only when source-impacting files change
 * add Codecov carryforward configuration for flagged test coverage uploads
+* switch CI change detection to latest-commit scope for docs-only follow-up commits
 
 Fixes
 +++++
