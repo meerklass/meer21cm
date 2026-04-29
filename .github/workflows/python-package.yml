@@ -17,7 +17,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 2
+        fetch-depth: 0
+    - name: Checkout PR head commit (not merge commit)
+      if: github.event_name == 'pull_request'
+      run: |
+        git checkout --detach "${{ github.event.pull_request.head.sha }}"
+        git fetch --depth=2 origin "${{ github.event.pull_request.head.sha }}"
     - name: Detect code-impacting files in latest commit
       id: detect
       run: |
