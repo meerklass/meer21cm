@@ -28,6 +28,40 @@ def test_update_nu():
     assert np.allclose(spec.z, 0)
 
 
+@pytest.mark.parametrize("precision,dtype", [(True, np.float64), (False, np.float32)])
+def test_precision_dtype_casting(precision, dtype):
+    spec = Specification(precision=precision)
+    assert spec.real_dtype == dtype
+    assert spec.nu.dtype == dtype
+    assert spec.data.dtype == dtype
+    assert spec.counts.dtype == dtype
+    assert spec.weights_map_pixel.dtype == dtype
+    spec.sigma_beam_ch = 0.01
+    assert spec.sigma_beam_ch.dtype == dtype
+
+
+def test_precision_is_init_only():
+    spec = Specification(precision=False)
+    with pytest.raises(AttributeError):
+        spec.precision = True
+
+
+@pytest.mark.parametrize("bad_precision", [1, 0, 1.0, "true", None, np.bool_(True)])
+def test_precision_must_be_python_bool(bad_precision):
+    with pytest.raises(TypeError, match="precision must be bool"):
+        Specification(precision=bad_precision)
+
+
+def test_batch_number_init_and_validation():
+    spec = Specification(batch_number=3)
+    assert spec.batch_number == 3
+    for bad_batch in [0, -1, 1.5, "2", True]:
+        with pytest.raises(TypeError, match="batch_number must be a positive integer"):
+            Specification(batch_number=bad_batch)
+    with pytest.raises(AttributeError):
+        spec.batch_number = 2
+
+
 def test_unit_conversion():
     spec = Specification(map_unit=units.mK)
     assert spec.map_unit_type == "T"
@@ -173,6 +207,17 @@ def test_beam_image():
     )
     # sigma_beam_ch updated by the input model
     assert np.allclose(sigma_beam_from_image, sp.sigma_beam_ch)
+
+
+def test_get_beam_image_returns_cached_duplicate_call():
+    """Second ``get_beam_image(cache=True)`` reuses `_beam_image` when shape matches."""
+    sp = Specification(survey="meerklass_2021", band="L")
+    D_dish = 13.5
+    sp.sigma_beam_ch = dish_beam_sigma(D_dish, sp.nu)
+    _ = sp.beam_image
+    assert sp._beam_image is not None
+    b_cached = sp.get_beam_image(cache=True)
+    assert b_cached is sp._beam_image
 
 
 def test_convolve_data():

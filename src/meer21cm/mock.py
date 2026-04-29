@@ -26,6 +26,7 @@ from .util import (
     sample_map_from_highres,
     angle_in_range,
     get_nd_slicer,
+    real_dtype_from_array,
 )
 from .power import PowerSpectrum, Specification
 from .telescope import weighted_convolution
@@ -129,6 +130,110 @@ class MockSimulation(PowerSpectrum):
                 "true_cosmology != fiducial_cosmology, "
                 "box dimensions and model power will be inconsistent"
             )
+
+    def _iter_last_axis_batches(self, axis_size):
+        """
+        Return stable last-axis batches for chunked processing.
+
+        Always returns at least one non-empty batch so `batch_number=1`
+        exercises the same loop path as `batch_number>1`.
+        """
+        all_indx = np.arange(axis_size)
+        return [
+            sel for sel in np.array_split(all_indx, self.batch_number) if sel.size > 0
+        ]
+
+    def _iter_field_los_chunks(self, field):
+        """
+        Iterate over LOS chunks of a 3D field.
+        """
+        for sel in self._iter_last_axis_batches(field.shape[-1]):
+            yield sel, field[..., sel]
+
+    def _apply_weighted_convolution_in_batches(
+        self,
+        map_data,
+        map_counts,
+        beam_image=None,
+        wproj=None,
+        num_pix_x=None,
+        num_pix_y=None,
+    ):
+        """
+        Apply beam convolution in channel batches.
+
+        This keeps the same behavior for `batch_number=1` while allowing
+        conservative channel-wise execution for larger batch counts.
+        """
+        map_out = np.zeros_like(map_data)
+        lazy_beam = beam_image is None
+        for ch_sel in self._iter_last_axis_batches(map_data.shape[-1]):
+            if lazy_beam:
+                beam_chunk = self.get_beam_image(
+                    wproj=wproj,
+                    num_pix_x=num_pix_x,
+                    num_pix_y=num_pix_y,
+                    cache=False,
+                    ch_sel=ch_sel,
+                )
+            else:
+                beam_chunk = beam_image[..., ch_sel]
+            map_i, _ = weighted_convolution(
+                map_data[..., ch_sel],
+                beam_chunk,
+                (map_counts[..., ch_sel] > 0).astype(float),
+            )
+            map_out[..., ch_sel] = map_i
+        return map_out
+
+    def _project_field_chunk_to_sky_map(
+        self,
+        field_chunk,
+        los_sel,
+        average=True,
+        wproj=None,
+        num_pix_x=None,
+        num_pix_y=None,
+    ):
+        """
+        Project one LOS chunk of a box field to the sky map grid.
+
+        This helper provides a chunk-level boundary for external orchestration.
+        """
+        return self.grid_field_to_sky_map(
+            field_chunk,
+            average=average,
+            mask=False,
+            wproj=wproj,
+            num_pix_x=num_pix_x,
+            num_pix_y=num_pix_y,
+            los_sel=los_sel,
+        )
+
+    def _sample_tracer_positions_from_density_chunk(
+        self, density_chunk, dndz_prob_chunk, z_sel, rng
+    ):
+        """
+        Sample tracer positions from one LOS chunk of density and dN/dz weights.
+        """
+        weighted_density = density_chunk * dndz_prob_chunk
+        n_per_cell = rng.poisson(weighted_density)
+        x_chunk = np.meshgrid(
+            self.x_vec[0], self.x_vec[1], self.x_vec[2][z_sel], indexing="ij"
+        )
+        tracer_positions = np.array([x.flatten() for x in x_chunk]).T
+        tracer_positions = tracer_positions.repeat(n_per_cell.flatten(), axis=0)
+        if tracer_positions.size == 0:
+            return tracer_positions
+        tracer_positions += (
+            rng.uniform(-0.5, 0.5, size=(tracer_positions.shape[0], len(self.box_ndim)))
+            * self.box_resol[None, :]
+        )
+        if self.flat_sky:
+            tracer_positions -= (
+                np.array(self.flat_sky_padding) * np.array(self.box_resol)
+            )[None, :]
+        return tracer_positions
 
     @property
     def tot_num_source_in_box(self):
@@ -321,6 +426,7 @@ class MockSimulation(PowerSpectrum):
             self.get_enclosing_box()
         self.propagate_field_k_to_model()
         power_array = self.auto_power_matter_model_r * bias**2
+        power_array = np.asarray(power_array, dtype=self.real_dtype)
         power_array[0, 0, 0] = 0.0
         delta_x = self.get_mock_field_from_power(power_array)
         return delta_x
@@ -341,6 +447,7 @@ class MockSimulation(PowerSpectrum):
             raise ValueError(
                 f"density must be 'lognormal' or 'gaussian', got {self.density}"
             )
+        power_array = np.asarray(power_array, dtype=self.real_dtype)
         delta_x = backend(self.box_ndim, self.box_len, power_array, self.seed)
         return delta_x
 
@@ -410,20 +517,22 @@ class MockSimulation(PowerSpectrum):
             The normalised peculiar velocity field in real space.
         """
         logger.info(f"invoking {inspect.currentframe().f_code.co_name}")
+        real_dtype = real_dtype_from_array(mock_field)
         delta_k = np.fft.rfftn(mock_field, norm="forward")
+        complex_dtype = delta_k.dtype
         slicer = get_nd_slicer()
         with np.errstate(divide="ignore", invalid="ignore"):
             kvecoverk2 = np.array(
                 [self.k_vec[i][slicer[i]] / self.kmode**2 for i in range(3)]
-            )
+            ).astype(real_dtype, copy=False)
         kvecoverk2[:, self.kmode == 0] = 0
-        u_k = -1j * kvecoverk2 * delta_k[None]
+        u_k = np.asarray(-1j, dtype=complex_dtype) * kvecoverk2 * delta_k[None]
         u_r = np.array(
             [
                 np.fft.irfftn(u_k[i], s=mock_field.shape, norm="forward")
                 for i in range(3)
             ]
-        )
+        ).astype(real_dtype, copy=False)
         return u_r
 
     @property
@@ -479,12 +588,15 @@ class MockSimulation(PowerSpectrum):
         """
         u_r = getattr(self, f"mock_velocity_u_{field}")
         slicer = get_nd_slicer()
+        real_dtype = real_dtype_from_array(u_r)
         if self.parallel_plane:
-            box_coord_l = np.zeros((3,) + tuple(self.box_ndim))
-            box_coord_l[-1] = 1.0
+            box_coord_l = np.zeros((3,) + tuple(self.box_ndim), dtype=real_dtype)
+            box_coord_l[-1] = np.asarray(1.0, dtype=real_dtype)
         else:
             box_coord = np.meshgrid(*self.x_vec, indexing="ij")
-            box_coord = np.array(box_coord) + self.box_origin[:, None, None, None]
+            box_coord = np.array(box_coord, dtype=real_dtype) + np.asarray(
+                self.box_origin[:, None, None, None], dtype=real_dtype
+            )
             box_coord_l = box_coord / np.sqrt((box_coord**2).sum(axis=0))[None]
         self._box_coord_l = box_coord_l
         u_in_xhat = (u_r * box_coord_l).sum(axis=0)
@@ -494,7 +606,9 @@ class MockSimulation(PowerSpectrum):
         y_k_dot_k = np.array(
             [(y_k[i] * self.k_vec[i][slicer[i]]) for i in range(3)]
         ).sum(axis=0)
-        delta_rsd_k = 1j * self.f_growth_true * y_k_dot_k
+        delta_rsd_k = (
+            np.asarray(1j * self.f_growth_true, dtype=y_k_dot_k.dtype) * y_k_dot_k
+        )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
             f"setting _mock_kaiser_field_k_{field} "
@@ -541,7 +655,7 @@ class MockSimulation(PowerSpectrum):
             )
             delta_k *= fog
             delta_x = np.fft.irfftn(delta_k, s=delta_x.shape, norm="forward")
-        return delta_x
+        return np.asarray(delta_x, dtype=self.real_dtype)
 
     @property
     def mock_amp_1(self):
@@ -586,7 +700,8 @@ class MockSimulation(PowerSpectrum):
         mean_amp = self.mock_amp_1
         if isinstance(mean_amp, str):
             mean_amp = getattr(self, mean_amp)
-        return self._mock_tracer_field_1 * mean_amp
+        amp = np.asarray(mean_amp, dtype=self._mock_tracer_field_1.dtype)
+        return self._mock_tracer_field_1 * amp
 
     @property
     @tagging("cosmo_model", "nu", "mock", "box", "tracer_2", "rsd")
@@ -599,7 +714,8 @@ class MockSimulation(PowerSpectrum):
         mean_amp = self.mock_amp_2
         if isinstance(mean_amp, str):
             mean_amp = getattr(self, mean_amp)
-        return self._mock_tracer_field_2 * mean_amp
+        amp = np.asarray(mean_amp, dtype=self._mock_tracer_field_2.dtype)
+        return self._mock_tracer_field_2 * amp
 
     @property
     @tagging("cosmo_model", "nu", "mock", "box", "tracer_1")
@@ -716,29 +832,32 @@ class MockSimulation(PowerSpectrum):
         # else:
         #    density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i)) + 1
         if density_field is None:
-            density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i)) + 1
+            density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i))
+        density_field = np.array(density_field, copy=True)
+        density_field += np.asarray(1.0, dtype=density_field.dtype)
         num_g = self.tot_num_source_in_box
-        # apply a redshift kernel to the source distribution
-        dndz_prob = self._dndz_renorm(self.box_voxel_redshift)
         density_field[density_field < 0] = 0
-        density_field /= density_field.sum() / num_g
-        density_field *= dndz_prob
-        # taken from powerbox
-        n_per_cell = rng.poisson(density_field)
-        args = self.x_vec
-        X = np.meshgrid(*args, indexing="ij")
-        tracer_positions = np.array([x.flatten() for x in X]).T
-        tracer_positions = tracer_positions.repeat(n_per_cell.flatten(), axis=0)
-        tracer_which_cell = np.arange(density_field.size)
-        tracer_which_cell = np.repeat(tracer_which_cell, n_per_cell.flatten())
-        tracer_positions += (
-            rng.uniform(-0.5, 0.5, size=(np.sum(n_per_cell), len(self.box_ndim)))
-            * self.box_resol[None, :]
-        )
-        if self.flat_sky:
-            tracer_positions -= (
-                np.array(self.flat_sky_padding) * np.array(self.box_resol)
-            )[None, :]
+        norm = density_field.sum()
+        if norm > 0:
+            density_field *= np.asarray(num_g / norm, dtype=density_field.dtype)
+        else:
+            density_field[:] = 0
+        tracer_positions_list = []
+        for z_sel, density_chunk in self._iter_field_los_chunks(density_field):
+            dndz_prob_chunk = self._dndz_renorm(self.box_voxel_redshift[..., z_sel])
+            tracer_positions_i = self._sample_tracer_positions_from_density_chunk(
+                density_chunk=density_chunk,
+                dndz_prob_chunk=dndz_prob_chunk,
+                z_sel=z_sel,
+                rng=rng,
+            )
+            if tracer_positions_i.size > 0:
+                tracer_positions_list.append(tracer_positions_i)
+        if len(tracer_positions_list) == 0:
+            tracer_positions = np.zeros((0, len(self.box_ndim)), dtype=self.real_dtype)
+        else:
+            tracer_positions = np.concatenate(tracer_positions_list, axis=0)
+            tracer_positions = np.asarray(tracer_positions, dtype=self.real_dtype)
         # for some reason I can not get this to work
         # if self.rsd_from_field and self.kaiser_rsd:
         #    box_coord_l = self._box_coord_l
@@ -914,6 +1033,7 @@ class MockSimulation(PowerSpectrum):
             num_pix_x = self.num_pix_x * highres_sim
             num_pix_y = self.num_pix_y * highres_sim
         if self.flat_sky:
+            field_dtype = real_dtype_from_array(field)
             pad = highres_sim
             if highres_sim is None:
                 pad = 1
@@ -924,9 +1044,11 @@ class MockSimulation(PowerSpectrum):
                     self.num_pix_y,
                     pad,
                     self.nu.size,
-                )
+                ),
+                dtype=field_dtype,
             )
-            map_highres += field[:, None, :, None, :]
+            for ch_sel in self._iter_last_axis_batches(field.shape[-1]):
+                map_highres[..., ch_sel] = field[:, None, :, None, ch_sel]
             map_highres = map_highres.reshape(
                 (
                     num_pix_x,
@@ -934,24 +1056,41 @@ class MockSimulation(PowerSpectrum):
                     -1,
                 )
             )
-            map_counts = np.ones_like(map_highres)
+            map_counts = np.ones_like(map_highres, dtype=field_dtype)
         else:
-            map_highres, map_counts = self.grid_field_to_sky_map(
-                field,
-                average=average,
-                mask=False,
-                wproj=wproj_hires,
-                num_pix_x=num_pix_x,
-                num_pix_y=num_pix_y,
-            )
+            map_highres = None
+            map_counts = None
+            for ch_sel, field_chunk in self._iter_field_los_chunks(field):
+                map_i, counts_i = self._project_field_chunk_to_sky_map(
+                    field_chunk,
+                    ch_sel,
+                    average=average,
+                    wproj=wproj_hires,
+                    num_pix_x=num_pix_x,
+                    num_pix_y=num_pix_y,
+                )
+                if map_highres is None:
+                    map_highres = np.zeros_like(map_i)
+                    map_counts = np.zeros_like(counts_i)
+                if average:
+                    map_highres += map_i * counts_i
+                else:
+                    map_highres += map_i
+                map_counts += counts_i
+                del map_i, counts_i
+            if average:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    map_highres = np.nan_to_num(map_highres / map_counts)
         # if highres_sim is None and not beam:
         #    return map_highres
         if beam:
-            beam_image = self.get_beam_image(
-                wproj_hires, num_pix_x, num_pix_y, cache=False
-            )
-            map_highres, _ = weighted_convolution(
-                map_highres, beam_image, (map_counts > 0).astype(float)
+            map_highres = self._apply_weighted_convolution_in_batches(
+                map_highres,
+                map_counts,
+                beam_image=None,
+                wproj=wproj_hires,
+                num_pix_x=num_pix_x,
+                num_pix_y=num_pix_y,
             )
         if highres_sim is None:
             return map_highres
@@ -1268,7 +1407,9 @@ class HIGalaxySimulation(MockSimulation):
             nu_ext = center_to_edges(nu_ext)
         indx_z = find_ch_id(redshift_to_freq(self.z_mock_tracer), nu_ext)
         num_ch_vel = hifluxd_ch.shape[0] // 2
-        hi_map_ext_in_jy = np.zeros((num_pix_x, num_pix_y, len(nu_ext)))
+        hi_map_ext_in_jy = np.zeros(
+            (num_pix_x, num_pix_y, len(nu_ext)), dtype=hifluxd_ch.dtype
+        )
         for i, indx_diff in enumerate(
             np.linspace(-num_ch_vel, num_ch_vel, 2 * num_ch_vel + 1).astype("int")
         ):
@@ -1290,12 +1431,22 @@ class HIGalaxySimulation(MockSimulation):
         ]
         if beam:
             if beam_image is None:
-                beam_image = self.get_beam_image(
-                    wproj, num_pix_x, num_pix_y, cache=False
+                map_counts = np.ones_like(hi_map_in_jy, dtype=hi_map_in_jy.dtype)
+                hi_map_in_jy = self._apply_weighted_convolution_in_batches(
+                    hi_map_in_jy,
+                    map_counts,
+                    beam_image=None,
+                    wproj=wproj,
+                    num_pix_x=num_pix_x,
+                    num_pix_y=num_pix_y,
                 )
-            hi_map_in_jy, _ = weighted_convolution(
-                hi_map_in_jy, beam_image, np.ones_like(hi_map_in_jy)
-            )
+            else:
+                map_counts = np.ones_like(hi_map_in_jy, dtype=hi_map_in_jy.dtype)
+                hi_map_in_jy = self._apply_weighted_convolution_in_batches(
+                    hi_map_in_jy,
+                    map_counts,
+                    beam_image=beam_image,
+                )
         if return_highres:
             return hi_map_in_jy
         spec = Specification(
@@ -1486,18 +1637,21 @@ def generate_gaussian_field(
     delta_x: array
         The generated Gaussian field.
     """
+    ps = np.asarray(power_spectrum)
+    real_dtype = real_dtype_from_array(ps)
     rng = np.random.default_rng(seed)
-    noise_real = rng.normal(0, 1, box_ndim)
+    noise_real = rng.normal(0, 1, box_ndim).astype(real_dtype, copy=False)
     noise_k = np.fft.rfftn(noise_real)
-    ps = power_spectrum.copy()
+    ps = ps.astype(real_dtype, copy=True)
     if ps_has_volume:
-        ps = ps / np.prod(box_len) * np.prod(box_ndim)
+        scale = np.asarray(np.prod(box_ndim) / np.prod(box_len), dtype=real_dtype)
+        ps *= scale
     scaling = np.sqrt(ps)
     delta_k = noise_k * scaling
 
     # Inverse FFT to get real-valued Gaussian field
     delta_x = np.fft.irfftn(delta_k, axes=range(len(box_ndim)), s=box_ndim)
-    return delta_x
+    return delta_x.astype(real_dtype, copy=False)
 
 
 def generate_lognormal_field(
@@ -1529,22 +1683,30 @@ def generate_lognormal_field(
     delta_x: array
         The generated lognormal field.
     """
-    ps = power_spectrum.copy()
+    ps = np.asarray(power_spectrum)
+    real_dtype = real_dtype_from_array(ps)
+    ps = ps.astype(real_dtype, copy=True)
     if ps_has_volume:
-        ps = ps / np.prod(box_len) * np.prod(box_ndim)
+        scale = np.asarray(np.prod(box_ndim) / np.prod(box_len), dtype=real_dtype)
+        ps *= scale
     # Compute correlation function ξ_δ(r) via inverse FFT
-    xi_delta = np.fft.irfftn(ps, axes=(0, 1, 2), s=box_ndim).real
+    xi_delta = np.fft.irfftn(ps, axes=(0, 1, 2), s=box_ndim).real.astype(
+        real_dtype, copy=False
+    )
     # Compute Gaussian correlation function ξ_G(r) = ln(1 + ξ_δ(r))
-    xi_G = np.log(1 + xi_delta + 1e-10)  # Avoid log(0)
+    eps = np.asarray(1e-10, dtype=real_dtype)
+    xi_G = np.log(np.asarray(1.0, dtype=real_dtype) + xi_delta + eps)  # Avoid log(0)
     # Compute Gaussian power spectrum Delta_G(k)
     Delta_G = np.abs(np.fft.rfftn(xi_G))
     delta_x_g = generate_gaussian_field(
         box_ndim, box_len, Delta_G, seed, ps_has_volume=False
     )
     # Apply lognormal transformation
-    sigma_sq = np.mean(Delta_G.ravel()[1:])
-    delta_x = np.exp(delta_x_g - sigma_sq / 2.0) - 1.0
-    return delta_x
+    sigma_sq = np.asarray(np.mean(Delta_G.ravel()[1:]), dtype=real_dtype)
+    half = np.asarray(0.5, dtype=real_dtype)
+    one = np.asarray(1.0, dtype=real_dtype)
+    delta_x = np.exp(delta_x_g - sigma_sq * half) - one
+    return delta_x.astype(real_dtype, copy=False)
 
 
 def generate_colored_noise(x_size, x_len, power_spectrum, seed=None):

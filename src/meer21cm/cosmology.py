@@ -737,8 +737,6 @@ class CosmologyCalculator(Specification):
         """
         Interpolate the input ``self.omega_hi`` at each frequency channel ``self.z_ch`` to a function of redshift.
         """
-        if np.all(self.omega_hi == self.omega_hi[0]):
-            return lambda z: self.omega_hi[0] * np.ones_like(z)
         func = interp1d(
             self.z_ch, self.omega_hi, bounds_error=False, fill_value="extrapolate"
         )
@@ -784,13 +782,16 @@ class CosmologyCalculator(Specification):
 
     @omega_hi.setter
     def omega_hi(self, value):
+        dtype = self.real_dtype
         if isinstance(value, float):
-            result = value * np.ones_like(self.z_ch)
+            result = np.asarray(value, dtype=dtype) * np.ones_like(
+                self.z_ch, dtype=dtype
+            )
         else:
             assert len(value) == len(
                 self.z_ch
             ), "omega_hi must be defined at each frequency channel if an array"
-            result = value
+            result = np.asarray(value, dtype=dtype)
         self._omega_hi_z_mean = None
         self._omega_hi = result
 
@@ -815,12 +816,13 @@ class CosmologyCalculator(Specification):
         cosmo = self.astropy_cosmo_true
         kh = self.cospar_true.karr_in_h
         pk = getattr(self.cospar_true, f"get_matter_power_spectrum_{self.backend}")()
-        karr = kh * cosmo.h
-        pkarr = pk / cosmo.h**3
-        AP_amp = 1 / (self.alpha_iso**3)
+        karr = np.asarray(kh * cosmo.h, dtype=self.real_dtype)
+        pkarr = np.asarray(pk / cosmo.h**3, dtype=self.real_dtype)
+        AP_amp = np.asarray(1 / (self.alpha_iso**3), dtype=self.real_dtype)
+        pk_scaled = np.asarray(pkarr * AP_amp, dtype=self.real_dtype)
         matter_power_func = interp1d(
             karr,
-            pkarr * AP_amp,
+            pk_scaled,
             bounds_error=False,
             fill_value="extrapolate",
         )

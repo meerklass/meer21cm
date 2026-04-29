@@ -842,6 +842,102 @@ def test_grid_gal(test_gal_fits, test_W):
     ps.apply_taper_to_field(2)
 
 
+def test_gridding_batch_number_equivalence(test_gal_fits, test_W):
+    ps_base = PowerSpectrum(
+        gal_file=test_gal_fits,
+        survey="meerklass_2021",
+        band="L",
+    )
+    ps_base.W_HI = (test_W * ps_base.nu[None, None, :]) > 0
+    ps_base.data = ps_base.W_HI.astype(float) * np.random.normal(
+        size=ps_base.W_HI.shape
+    )
+    ps_base.w_HI = ps_base.W_HI.astype(float)
+    common_kwargs = dict(
+        gal_file=test_gal_fits,
+        data=ps_base.data,
+        map_has_sampling=ps_base.W_HI,
+        weights_map_pixel=ps_base.w_HI,
+        init_box_from_map_data=True,
+        include_sky_sampling=[True, True],
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_2=1.0,
+    )
+    ps_single = PowerSpectrum(batch_number=1, **common_kwargs)
+    ps_batch = PowerSpectrum(batch_number=3, **common_kwargs)
+    ps_single.read_gal_cat()
+    ps_batch.read_gal_cat()
+
+    dmap_1, wmap_1, cmap_1 = ps_single.grid_data_to_field()
+    dmap_b, wmap_b, cmap_b = ps_batch.grid_data_to_field()
+    dmap_1_partial, wmap_1_partial, cmap_1_partial = ps_single.grid_data_to_field(
+        partial_sel=np.arange(5)
+    )
+    dmap_b_partial, wmap_b_partial, cmap_b_partial = ps_batch.grid_data_to_field(
+        partial_sel=np.arange(5)
+    )
+    assert np.allclose(np.isnan(dmap_1), np.isnan(dmap_b))
+    assert np.allclose(np.nansum(dmap_1), np.nansum(dmap_b), rtol=1e-3, atol=1e-6)
+    assert np.allclose(wmap_1.sum(), wmap_b.sum(), rtol=1e-6, atol=1e-8)
+    assert np.allclose(cmap_1.sum(), cmap_b.sum(), rtol=1e-6, atol=1e-8)
+    assert np.allclose(
+        np.nansum(dmap_1_partial), np.nansum(dmap_b_partial), rtol=1e-6, atol=1e-8
+    )
+    assert np.allclose(wmap_1_partial.sum(), wmap_b_partial.sum(), rtol=1e-6, atol=1e-8)
+    assert np.allclose(cmap_1_partial.sum(), cmap_b_partial.sum(), rtol=1e-6, atol=1e-8)
+
+    gmap_1, gw_1, gc_1 = ps_single.grid_gal_to_field()
+    gmap_b, gw_b, gc_b = ps_batch.grid_gal_to_field()
+    assert np.allclose(np.nansum(gmap_1), np.nansum(gmap_b), rtol=1e-6, atol=1e-8)
+    assert np.allclose(gw_1.sum(), gw_b.sum(), rtol=1e-6, atol=1e-8)
+    assert np.allclose(gc_1.sum(), gc_b.sum(), rtol=1e-6, atol=1e-8)
+
+
+def test_grid_data_to_field_all_masked_map(test_W):
+    ps = PowerSpectrum(
+        data=(test_W > 0).astype(float),
+        map_has_sampling=(test_W > 0),
+        weights_map_pixel=(test_W > 0).astype(float),
+        init_box_from_map_data=True,
+        include_sky_sampling=[True, True],
+        survey="meerklass_2021",
+        band="L",
+    )
+    ps.get_enclosing_box()
+    ps.W_HI = np.zeros_like(ps.W_HI, dtype=bool)
+    ps.data = np.zeros_like(ps.data)
+    ps.w_HI = np.zeros_like(ps.w_HI)
+    himap_rg, hiweights_rg, hicounts_rg = ps.grid_data_to_field()
+    assert np.allclose(himap_rg, 0.0)
+    assert np.allclose(hiweights_rg, 0.0)
+    assert np.allclose(hicounts_rg, 0.0)
+    assert np.allclose(ps.field_1, 0.0)
+
+
+def test_grid_gal_to_field_zero_galaxy(test_W):
+    ps = PowerSpectrum(
+        data=(test_W > 0).astype(float),
+        map_has_sampling=(test_W > 0),
+        weights_map_pixel=(test_W > 0).astype(float),
+        init_box_from_map_data=True,
+        include_sky_sampling=[True, True],
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_2=1.0,
+    )
+    ps.get_enclosing_box()
+    ps._counts_in_box = np.ones(tuple(ps.box_ndim.tolist()), dtype=ps.real_dtype)
+    ps._ra_gal = np.array([])
+    ps._dec_gal = np.array([])
+    ps._z_gal = np.array([])
+    galmap_rg, galweights_rg, galcounts_rg = ps.grid_gal_to_field()
+    assert np.allclose(galmap_rg, 0.0)
+    assert np.allclose(galweights_rg, 0.0)
+    assert np.allclose(galcounts_rg, 0.0)
+    assert np.allclose(ps.field_2, 0.0)
+
+
 def test_shot_noise_tapering():
     ps = PowerSpectrum(
         nu=[f_21, f_21],
@@ -999,6 +1095,21 @@ def test_average_model_hi_temp():
         ps.model_hi_temp_in_box * ps.counts_in_box
     ).sum() / ps.counts_in_box.sum()
     assert np.allclose(temp_box_avg, ps.average_model_hi_temp, rtol=1e-3)
+
+
+def test_grid_field_to_sky_map_los_sel_shape_validation():
+    ps = PowerSpectrum(
+        include_sky_sampling=[False, False],
+        survey="meerklass_2021",
+        band="L",
+    )
+    ps.get_enclosing_box()
+    los_sel = np.arange(min(3, ps.box_ndim[2]), dtype=int)
+    bad_field = np.zeros((ps.box_ndim[0], ps.box_ndim[1], los_sel.size + 1))
+    with pytest.raises(
+        ValueError, match="field shape .* does not match expected shape"
+    ):
+        ps.grid_field_to_sky_map(bad_field, los_sel=los_sel)
 
 
 def test_update_cosmo():

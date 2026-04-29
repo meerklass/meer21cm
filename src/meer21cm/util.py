@@ -51,6 +51,16 @@ class HiddenPrints:
         sys.stdout = self._original_stdout
 
 
+def real_dtype_from_array(array, default=np.float64):
+    """Return a real floating dtype compatible with an input array."""
+    dtype = np.dtype(getattr(array, "dtype", default))
+    if np.issubdtype(dtype, np.complexfloating):
+        return np.float32 if dtype == np.complex64 else np.float64
+    if np.issubdtype(dtype, np.floating):
+        return dtype
+    return np.dtype(default)
+
+
 def get_nd_slicer(ndim=3):
     """
     Get a list of slice objects that can be used to slice an ndarray.
