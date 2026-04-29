@@ -13,22 +13,42 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      code_changed: ${{ steps.filter.outputs.code }}
+      code_changed: ${{ steps.detect.outputs.code_changed }}
     steps:
     - uses: actions/checkout@v4
-    - uses: dorny/paths-filter@v3
-      id: filter
       with:
-        filters: |
-          code:
-            - 'src/**'
-            - 'tests/**'
-            - 'pyproject.toml'
-            - '.coveragerc'
-            - 'requirements*.txt'
-            - 'setup.py'
-            - 'setup.cfg'
-            - 'MANIFEST.in'
+        fetch-depth: 2
+    - name: Detect code-impacting files in latest commit
+      id: detect
+      run: |
+        if ! git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+          echo "No parent commit available; run tests for safety."
+          echo "code_changed=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        files=$(git diff --name-only HEAD^ HEAD)
+        echo "Files changed in latest commit:"
+        echo "$files"
+
+        code_changed=false
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          case "$f" in
+            src/*|tests/*|pyproject.toml|.coveragerc|setup.py|setup.cfg|MANIFEST.in)
+              code_changed=true
+              break
+              ;;
+            requirements*.txt)
+              code_changed=true
+              break
+              ;;
+          esac
+        done <<EOF
+        $files
+        EOF
+
+        echo "code_changed=$code_changed" >> "$GITHUB_OUTPUT"
 
   build:
     needs: changes
