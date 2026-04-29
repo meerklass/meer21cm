@@ -12,6 +12,7 @@ Features
 Fixes
 +++++
 * remove a stray debug print from `util._ra_range_is_subset_of`
+* clarify that CI change detection checks only the latest commit diff (`HEAD^..HEAD`), so docs-only follow-up commits skip tests
 
 v0.8.0
 ------
