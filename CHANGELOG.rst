@@ -5,13 +5,40 @@ dev
 ------
 Features
 ++++++++
-* add get_shot_noise_galaxy function
-* add jackknife patch split and plot function
-* improve foreground simulation routine
+* optimize PR CI by running test/coverage only when source-impacting files change
+* add Codecov carryforward configuration for flagged test coverage uploads
+* switch CI change detection to latest-commit scope for docs-only follow-up commits
 
 Fixes
 +++++
-* Fixed an issue of model power convolution for auto power with same weights
+* remove a stray debug print from `util._ra_range_is_subset_of`
+* clarify that CI change detection checks only the latest commit diff (`HEAD^..HEAD`), so docs-only follow-up commits skip tests
+* include workflow file changes in CI change detection so workflow edits trigger tests
+
+v0.8.0
+------
+Features
+++++++++
+* add single/double precision option and robust single-precision `mu` bin edge handling
+* add batch processing support in mock generation and gridding routines
+* add auto range setting when reading maps and support flexible column names
+* add Hartlap/Percival correction factors for inference
+* add lazy imports for top-level package classes and add foreground tools/docs
+* add additional validation/filter testing support and transfer-function utility updates
+
+Enhancements
+++++++++++++
+* refactor cosmology and AP-parameter handling in model/matter power workflows
+* improve transfer-function and simulation options, including optional high-resolution simulation inputs
+* improve plotting/validation helper scripts and documentation notebooks
+
+Bugfixes
+++++++++
+* fix `ps_type` propagation to both true and fiducial settings
+* fix weighting, gridding, and ordering edge cases (including NaN handling)
+* fix data-injection behavior when unclean maps are missing and improve mean-centering for `R_mat`
+* fix model/cosmology dependency propagation and related growth-factor calls
+* pin `katbeam` dependency to a known working commit
 
 v0.7.0
 ------

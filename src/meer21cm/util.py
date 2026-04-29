@@ -302,7 +302,6 @@ def _ra_range_is_subset_of(inner_lo, inner_hi, outer_lo, outer_hi, atol=1e-9):
     if np.isclose(L_in, 0.0, atol=atol):
         return np.isclose(L_out, 0.0, atol=atol)
     if L_in >= 360.0 - atol:
-        print("test")
         return np.isclose(L_out, 0.0, atol=atol)
     psi0 = (float(inner_lo) - float(outer_lo)) % 360.0
     if psi0 + L_in > 360.0 + atol:

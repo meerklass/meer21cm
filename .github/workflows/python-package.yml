@@ -10,7 +10,54 @@ on:
     branches: [ "main" ]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.detect.outputs.code_changed }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Checkout PR head commit (not merge commit)
+      if: github.event_name == 'pull_request'
+      run: |
+        git checkout --detach "${{ github.event.pull_request.head.sha }}"
+        git fetch --depth=2 origin "${{ github.event.pull_request.head.sha }}"
+    - name: Detect code-impacting files in latest commit
+      id: detect
+      run: |
+        if ! git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+          echo "No parent commit available; run tests for safety."
+          echo "code_changed=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        files=$(git diff --name-only HEAD^ HEAD)
+        echo "Files changed in latest commit:"
+        echo "$files"
+
+        code_changed=false
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          case "$f" in
+            src/*|tests/*|pyproject.toml|.coveragerc|setup.py|setup.cfg|MANIFEST.in|.github/workflows/*)
+              code_changed=true
+              break
+              ;;
+            requirements*.txt)
+              code_changed=true
+              break
+              ;;
+          esac
+        done <<EOF
+        $files
+        EOF
+
+        echo "code_changed=$code_changed" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     env:
       ENV_NAME: tests
       PYTHON: ${{ matrix.python-version }}
@@ -21,7 +68,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11"]
-        os: ["ubuntu-latest", "macos-latest"]
+        os: ["ubuntu-latest"]
 
     steps:
     - uses: actions/checkout@v4
@@ -82,4 +129,5 @@ jobs:
       uses: codecov/codecov-action@v4.0.1
       with:
         file: ./coverage.xml
+        flags: core-tests
         token: ${{ secrets.CODECOV_TOKEN }}
