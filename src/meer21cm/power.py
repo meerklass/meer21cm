@@ -761,7 +761,11 @@ class ModelPowerSpectrum(CosmologyCalculator):
             return 1.0
         # in the future for asymmetric beam this way
         # of writing may be probelmatic
-        k_perp = self.kmode * np.sqrt(1 - self.mumode**2)
+        # Numerical roundoff (more visible in lower-precision runs) can push
+        # |mu| slightly above 1 and make 1 - mu^2 marginally negative.
+        mu_sq = np.square(self.mumode)
+        one_minus_mu_sq = np.clip(1 - mu_sq, 0.0, None)
+        k_perp = self.kmode * np.sqrt(one_minus_mu_sq)
         sigma_beam_mpc = self.sigma_beam_in_mpc
         B_beam = gaussian_beam_attenuation(k_perp, sigma_beam_mpc)
         return B_beam
@@ -2513,7 +2517,8 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         kpara = self.k_para / self.alpha_parallel
         self.kmode = np.sqrt(kperp[:, :, None] ** 2 + kpara[None, None, :] ** 2)
         with np.errstate(divide="ignore", invalid="ignore"):
-            self.mumode = np.nan_to_num(kpara[None, None, :] / self.kmode)
+            mu = np.nan_to_num(kpara[None, None, :] / self.kmode)
+        self.mumode = np.clip(mu, -1.0, 1.0)
 
     def get_1d_power(
         self,

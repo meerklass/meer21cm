@@ -817,6 +817,14 @@ def test_cache():
     ps.fourier_field_2
 
 
+def test_beam_attenuation_mu_roundoff_guard():
+    ps = PowerSpectrum(sigma_beam_ch=np.ones(2))
+    ps.kmode = np.ones((2, 2, 2))
+    ps.mumode = np.ones((2, 2, 2), dtype=np.float32) * (1 + 1e-6)
+    beam = ps.beam_attenuation()
+    assert np.all(np.isfinite(beam))
+
+
 def test_grid_gal(test_gal_fits, test_W):
     ps = PowerSpectrum(
         gal_file=test_gal_fits,
