@@ -28,7 +28,7 @@ from .util import (
     get_nd_slicer,
     real_dtype_from_array,
 )
-from .power import PowerSpectrum, Specification
+from .power import PowerSpectrum, Specification, power_weights_renorm
 from .telescope import weighted_convolution
 from halomod import TracerHaloModel as THM
 import warnings
@@ -836,7 +836,14 @@ class MockSimulation(PowerSpectrum):
         density_field = np.array(density_field, copy=True)
         density_field += np.asarray(1.0, dtype=density_field.dtype)
         num_g = self.tot_num_source_in_box
+        norm_before = density_field.sum()
+        mask = (density_field > 0).astype(density_field.dtype)
+        mask_renorm = np.sqrt(power_weights_renorm(mask, mask))
         density_field[density_field < 0] = 0
+        # some cheats to renorm the density field
+        density_field_new = density_field ** (mask_renorm)
+        norm = density_field_new.sum()
+        density_field = density_field ** (norm / norm_before)
         norm = density_field.sum()
         if norm > 0:
             density_field *= np.asarray(num_g / norm, dtype=density_field.dtype)
