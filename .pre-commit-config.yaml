@@ -11,3 +11,11 @@ repos:
     rev: 22.10.0
     hooks:
     -   id: black
+-   repo: local
+    hooks:
+    -   id: conventional-commit-msg
+        name: conventional-commit-msg
+        entry: python scripts/check_commit_msg.py
+        language: system
+        pass_filenames: true
+        stages: [commit-msg]
