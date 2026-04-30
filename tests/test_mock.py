@@ -18,6 +18,7 @@ from scipy.interpolate import interp1d
 
 @pytest.mark.parametrize("parallel_plane", [True, False])
 def test_rsd_from_field(parallel_plane):
+    # rsd from field only works at quite large scales
     mock = MockSimulation(
         survey="meerklass_2021",
         band="L",
@@ -27,11 +28,15 @@ def test_rsd_from_field(parallel_plane):
         tracer_bias_2=1.5,
         num_discrete_source=1e7,
         rsd_from_field=True,
+        k1dbins=np.linspace(0.01, 0.2, 21),
         kmax=20,
     )
+    mock.nu = np.linspace(5.8e8, 1e9, 100)
     mock.field_2 = mock.mock_tracer_field_2
-    ratio1 = mock.auto_power_3d_2 / mock.auto_power_tracer_2_model
-    assert np.abs(ratio1.mean() - 1) < 2e-1
+    p1d_mock, keff, _ = mock.get_1d_power(mock.auto_power_3d_2)
+    p1d_model, keff, _ = mock.get_1d_power(mock.auto_power_tracer_2_model)
+    ratio1 = p1d_mock / p1d_model - 1
+    assert np.all(np.abs(ratio1) < 2e-1)
     tracer_positions = mock.mock_tracer_position_in_box
     grid_bins = [center_to_edges(mock.x_vec[i]) for i in range(3)]
     count, _ = np.histogramdd(tracer_positions, bins=grid_bins)
@@ -39,9 +44,11 @@ def test_rsd_from_field(parallel_plane):
     mock.mean_center_2 = True
     mock.unitless_2 = True
     shot_noise = np.prod(mock.box_len) / count.sum()
-    ratio2 = (mock.auto_power_3d_2 - shot_noise) / mock.auto_power_tracer_2_model
+    p1d_mock, keff, _ = mock.get_1d_power(mock.auto_power_3d_2)
+    p1d_model, keff, _ = mock.get_1d_power(mock.auto_power_tracer_2_model)
+    ratio2 = (p1d_mock - shot_noise) / p1d_model - 1
     # curved sky the galaxy mock at small scales is not accurate
-    assert np.abs(ratio2.mean() - 1) < 2e-1
+    assert np.all(np.abs(ratio2) < 2e-1)
     # trigger the warning
     if not parallel_plane:
         with pytest.warns(UserWarning):
