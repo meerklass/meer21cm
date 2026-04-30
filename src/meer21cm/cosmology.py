@@ -396,7 +396,8 @@ class CosmologyCalculator(Specification):
             true_cosmology = fiducial_cosmology
         self.true_cosmology = true_cosmology
         self._matter_power_spectrum_fnc = None
-        self.omega_hi = omega_hi
+        self._omega_hi = omega_hi
+        self._omega_hi_z_mean = None
         self._sound_horizon_drag_true = None
         self._sound_horizon_drag_fiducial = None
         self._alpha_parallel = None
@@ -778,6 +779,8 @@ class CosmologyCalculator(Specification):
         Interpolation will be used to get the HI density at other redshifts.
         If a float is provided, it will be used as the HI density at all redshifts.
         """
+        if isinstance(self._omega_hi, float):
+            return self._omega_hi * np.ones_like(self.z_ch)
         return self._omega_hi
 
     @omega_hi.setter
