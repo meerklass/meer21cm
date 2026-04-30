@@ -333,3 +333,9 @@ def test_cosmo_shortcut():
     coscal.true_cosmology = "Planck15"
     with pytest.raises(ValueError):
         coscal.cosmo = "Planck18"
+
+
+def test_omega_hi_initialization():
+    coscal = CosmologyCalculator()
+    assert coscal._omega_hi == 5e-4
+    assert np.allclose(coscal.omega_hi, 5e-4 * np.ones_like(coscal.z_ch))
