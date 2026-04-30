@@ -15,7 +15,8 @@ You should always use Git for making changes to the code. To enforce a unified c
 - stage the changes (GUI or `git add files_you_changed`). If you are using CLI and get lost, try `git status` to see what's going on.
 - run `pre-commit`, or just `git commit "message you want to insert"`, or commit from GUI. `pre-commit` will run checks and files will be changed to conform to the *Black* code style if needed.
 - If changes have been made, stage these changes and run `git commit -m "message you want to insert"` again.
-- push to remote by running `git push -u origin new_branch_name`. If you have already pushed it before then simply `git push`.
+- The commit messages **must follow** [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Otherwise it will be stopped by the pre-commit routine.
+- Push to remote by running `git push -u origin new_branch_name`. If you have already pushed it before then simply `git push`.
 - Go to the github repo and create a pull request. **MAKE SURE** you ask for a review and have it approved with all tests passed. Branch protection rules may not be in place and in no circumstance should you merge into main without asking.
 - After pull request is approved and merged, delete the branch on github.
 - In your local repo, switch to main and then run `git pull`. Delete your local repo if you want.
@@ -64,6 +65,5 @@ make html
 ## Recommended good practice
 These are some practices that are standard in development. They are not enforced (and admittedly I don't follow them all the time), but you should be aware of them.
 
-- Write clear commit messages using [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
 - Provide a synopsis of your commits in the `CHANGELOG`
-- Follow [semantic versioning](https://semver.org/) and update the version number of the code appropriately (this will probably be enforced later)
+- Follow [semantic versioning](https://semver.org/) and update the version number of the code appropriately (this will be enforced later after release of v1)
