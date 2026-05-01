@@ -37,7 +37,7 @@ pytest --cov-config=.coveragerc --cov=meer21cm tests/ --cov-report term --cov-re
 ```
 This will generate a folder `coverage.html` (do not commit it, leave it untracked). You can open the html files inside to see the coverage.
 
-When you push, Github Actions have been set up so the tests will be checked and a coverage report will also be generated on codecov (see [here](https://app.codecov.io/gh/zhaotingchen/meer21cm/pull/130) for an example).You should always first check locally that the tests are good before pushing to a PR to trigger the tests on Github.
+When you push, Github Actions have been set up so the tests will be checked and a coverage report will also be generated on codecov (see [here](https://app.codecov.io/gh/meerklass/meer21cm/pull/130) for an example).You should always first check locally that the tests are good before pushing to a PR to trigger the tests on Github.
 
 ## Documentation
 When you write new functions and classes, they should be properly documented with docstrings. You can check how they will look in the documentation website by creating the website locally. In the `meer21cm` directory:

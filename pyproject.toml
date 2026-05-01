@@ -32,8 +32,8 @@ dependencies = [
 
 
 [project.urls]
-Homepage = "https://github.com/zhaotingchen/meer21cm"
-Issues = "https://github.com/zhaotingchen/meer21cm/issues"
+Homepage = "https://github.com/meerklass/meer21cm"
+Issues = "https://github.com/meerklass/meer21cm/issues"
 
 [project.optional-dependencies]
 test = [

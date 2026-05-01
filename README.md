@@ -1,5 +1,5 @@
 # **meer21cm**
-[![codecov](https://codecov.io/gh/zhaotingchen/meer21cm/graph/badge.svg?token=BEE45774LQ)](https://codecov.io/gh/zhaotingchen/meer21cm)
+[![codecov](https://codecov.io/gh/meerklass/meer21cm/graph/badge.svg?token=BEE45774LQ)](https://codecov.io/gh/meerklass/meer21cm)
 [![docs](https://app.readthedocs.org/projects/meer21cm/badge/?version=latest)](https://meer21cm.readthedocs.io/en/latest)
 
 `meer21cm` deals with single dish 21cm intensity mapping using MeerKAT.
@@ -12,7 +12,7 @@ The detailed documentation is available at https://meer21cm.readthedocs.io
 ## Installation
 Clone this repo:
 ```
-git clone https://github.com/zhaotingchen/meer21cm.git
+git clone https://github.com/meerklass/meer21cm.git
 ```
 
 And run
