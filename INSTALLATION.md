@@ -52,7 +52,7 @@ Again, if you are using HPC, most likely there are hdf5 module available, and yo
 ## 3. Install `meer21cm`
 Finally, clone the repo for `meer21cm`
 ```
-git clone git@github.com:zhaotingchen/meer21cm.git
+git clone git@github.com:meerklass/meer21cm.git
 ```
 
 Go to the directory
@@ -98,7 +98,7 @@ whereas a static installation will be in the `site-packages` directory.
 If you are on ilifu, the installation has been tested so you can follow the exact steps listed here.
 
 ```
-git clone https://github.com/zhaotingchen/meer21cm
+git clone https://github.com/meerklass/meer21cm
 module load anaconda3
 conda create -n meer21cm python=3.10
 conda activate meer21cm
