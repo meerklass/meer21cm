@@ -10,7 +10,6 @@ import numpy as np
 from astropy.io import fits
 from .util import (
     check_unit_equiv,
-    get_wcs_coor,
     freq_to_redshift,
     f_21,
     center_to_edges,
@@ -34,6 +33,7 @@ from astropy.wcs.utils import proj_plane_pixel_area
 from itertools import chain
 from . import telescope
 from .telescope import *
+from .skymap import WcsSkyMap
 import meer21cm
 import logging
 import numbers
@@ -196,6 +196,7 @@ class Specification:
         auto_set_radecnu_bounds=True,
         precision=True,
         batch_number=1,
+        skymap=None,
         **kwparams,
     ):
         self.survey = survey
@@ -258,14 +259,18 @@ class Specification:
         if wproj is None:
             wproj = create_wcs(0.0, 0.0, [num_pix_x, num_pix_y], 1.0)
 
-        self.wproj = wproj
-        self.num_pix_x = num_pix_x
-        self.num_pix_y = num_pix_y
+        if skymap is None:
+            skymap = WcsSkyMap(wproj=wproj, num_pix_x=num_pix_x, num_pix_y=num_pix_y)
+        if skymap.format != "wcs":
+            raise ValueError(
+                "This refactor stage currently supports WCS sky maps only."
+            )
+        self.skymap = skymap
         self.sigma_beam_ch = sigma_beam_ch
         self.beam_unit = beam_unit
         if map_has_sampling is None:
             map_has_sampling = np.ones(
-                (num_pix_x, num_pix_y, len(self.nu)), dtype="bool"
+                self.skymap.map_shape_template + (len(self.nu),), dtype="bool"
             )
             map_has_sampling[0] = False
             map_has_sampling[-1] = False
@@ -274,9 +279,6 @@ class Specification:
         self.map_has_sampling = map_has_sampling
         self.map_unit = map_unit
         self.map_unit_type
-        xx, yy = np.meshgrid(np.arange(num_pix_x), np.arange(num_pix_y), indexing="ij")
-        # the coordinates of each pixel in the map
-        self._ra_map, self._dec_map = get_wcs_coor(wproj, xx, yy)
         self.__dict__.update(kwparams)
         self.filter_map_los = filter_map_los
         self.soft_filter_los = soft_filter_los
@@ -312,6 +314,14 @@ class Specification:
         self.freq_column = freq_column
         self.wcs_column = wcs_column
         self.auto_set_radecnu_bounds = auto_set_radecnu_bounds
+
+    def _set_wcs_skymap(self, wproj, num_pix_x, num_pix_y):
+        """Reset the WCS skymap backend while preserving WCS-only behavior."""
+        self.skymap = WcsSkyMap(
+            wproj=wproj,
+            num_pix_x=num_pix_x,
+            num_pix_y=num_pix_y,
+        )
 
     def set_radecnu_bounds_from_map(self):
         """
@@ -388,6 +398,21 @@ class Specification:
     def batch_number(self):
         """Number of sequential batches used by gridding routines."""
         return self._batch_number
+
+    @property
+    def wproj(self):
+        """The WCS projection object for the map geometry."""
+        return self.skymap.wproj
+
+    @property
+    def num_pix_x(self):
+        """The number of pixels along the first map axis."""
+        return self.skymap.num_pix_x
+
+    @property
+    def num_pix_y(self):
+        """The number of pixels along the second map axis."""
+        return self.skymap.num_pix_y
 
     @property
     def beam_type(self):
@@ -529,14 +554,14 @@ class Specification:
         """
         angular area of the map pixel in deg^2
         """
-        return proj_plane_pixel_area(self.wproj)
+        return self.skymap.pixel_area
 
     @property
     def pix_resol(self):
         """
         angular resolution of the map pixel in deg
         """
-        return np.sqrt(self.pixel_area)
+        return self.skymap.pix_resol
 
     @property
     def data(self):
@@ -578,14 +603,14 @@ class Specification:
         """
         The right ascension of each pixel in the map.
         """
-        return self._ra_map
+        return self.skymap.ra_map
 
     @property
     def dec_map(self):
         """
         The declination of each pixel in the map.
         """
-        return self._dec_map
+        return self.skymap.dec_map
 
     @property
     def weights_map_pixel(self):
@@ -687,10 +712,10 @@ class Specification:
             self.data,
             self.counts,
             self.map_has_sampling,
-            self._ra_map,
-            self._dec_map,
+            _ra_map,
+            _dec_map,
             self.nu,
-            self.wproj,
+            wproj,
         ) = read_pickle(
             self.pickle_file,
             nu_min=self.nu_min,
@@ -701,7 +726,11 @@ class Specification:
             freq_column=self.freq_column,
             wcs_column=self.wcs_column,
         )
-        self.num_pix_x, self.num_pix_y = self._ra_map.shape
+        self._set_wcs_skymap(
+            wproj=wproj,
+            num_pix_x=_ra_map.shape[0],
+            num_pix_y=_ra_map.shape[1],
+        )
         if self.filter_map_los:
             print("filtering map los")
             (self.data, self.map_has_sampling, _, self.counts,) = filter_incomplete_los(
@@ -740,10 +769,10 @@ class Specification:
             self.data,
             self.counts,
             self.map_has_sampling,
-            self._ra_map,
-            self._dec_map,
+            _ra_map,
+            _dec_map,
             self.nu,
-            self.wproj,
+            wproj,
         ) = read_map(
             self.map_file,
             counts_file=self.counts_file,
@@ -752,7 +781,11 @@ class Specification:
             los_axis=self.los_axis,
             band=self.band,
         )
-        self.num_pix_x, self.num_pix_y = self._ra_map.shape
+        self._set_wcs_skymap(
+            wproj=wproj,
+            num_pix_x=_ra_map.shape[0],
+            num_pix_y=_ra_map.shape[1],
+        )
         if self.filter_map_los:
             (self.data, self.map_has_sampling, _, self.counts,) = filter_incomplete_los(
                 self.data,
@@ -777,14 +810,11 @@ class Specification:
         The map data and counts outside the range will be set to zero.
         The map_has_sampling and weights_map_pixel will be set to False outside the range.
         """
-        ra_range = np.array(self.ra_range)
-        dec_range = np.array(self.dec_range)
         logger.debug(
-            f"flagging map and weights outside ra_range: {ra_range}, dec_range: {dec_range}"
+            "flagging map and weights outside "
+            f"ra_range: {self.ra_range}, dec_range: {self.dec_range}"
         )
-        ra_sel = angle_in_range(self.ra_map, ra_range[0], ra_range[1])
-        dec_sel = (self.dec_map > dec_range[0]) * (self.dec_map < dec_range[1])
-        map_sel = (ra_sel * dec_sel)[:, :, None]
+        map_sel = self.skymap.trim_selector(self.ra_range, self.dec_range)[:, :, None]
         self.data = self.data * map_sel
         self.counts = self.counts * map_sel
         self.map_has_sampling = self.map_has_sampling * map_sel

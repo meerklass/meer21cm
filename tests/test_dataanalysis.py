@@ -4,7 +4,7 @@ import numpy as np
 from astropy import units, constants
 import pytest
 from astropy.wcs.utils import proj_plane_pixel_area
-from meer21cm.util import freq_to_redshift, center_to_edges, f_21, pca_clean
+from meer21cm.util import freq_to_redshift, center_to_edges, f_21, pca_clean, create_wcs
 from meer21cm.telescope import dish_beam_sigma
 
 
@@ -62,6 +62,22 @@ def test_batch_number_init_and_validation():
         spec.batch_number = 2
 
 
+def test_wcs_geometry_is_init_only(test_wproj):
+    spec = Specification(wproj=test_wproj, num_pix_x=5, num_pix_y=5)
+    assert spec.wproj is test_wproj
+    assert spec.num_pix_x == 5
+    assert spec.num_pix_y == 5
+    for name, new_value in (
+        ("num_pix_x", 11),
+        ("num_pix_y", 13),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(spec, name, new_value)
+    wproj_alt = create_wcs(10.0, 20.0, [5, 5], 1.0)
+    with pytest.raises(AttributeError):
+        spec.wproj = wproj_alt
+
+
 def test_unit_conversion():
     spec = Specification(map_unit=units.mK)
     assert spec.map_unit_type == "T"
@@ -112,8 +128,13 @@ def test_read_fits(test_fits):
     # set map file
     sp.map_file = test_fits
     # set wrong dimensions, see if they get updated correctly
-    sp.num_pix_x = 1
-    sp.num_pix_y = 1
+    sp = Specification(
+        nu_min=-np.inf,
+        nu_max=np.inf,
+        num_pix_x=1,
+        num_pix_y=1,
+    )
+    sp.map_file = test_fits
     sp.read_from_fits()
     assert np.isfinite(sp.nu_min) and np.isfinite(sp.nu_max)
     assert sp.nu_min == pytest.approx(float(np.min(sp.nu)))
