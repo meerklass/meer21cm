@@ -52,7 +52,21 @@ class HiddenPrints:
 
 
 def real_dtype_from_array(array, default=np.float64):
-    """Return a real floating dtype compatible with an input array."""
+    """
+    Return a real floating dtype compatible with an input array.
+
+    Parameters
+    ----------
+    array: np.ndarray
+        The input array.
+    default: np.dtype, default np.float64.
+        The default dtype to return if the input array is not complex or floating.
+
+    Returns
+    -------
+    dtype: np.dtype.
+        The real floating dtype compatible with the input array.
+    """
     dtype = np.dtype(getattr(array, "dtype", default))
     if np.issubdtype(dtype, np.complexfloating):
         return np.float32 if dtype == np.complex64 else np.float64
