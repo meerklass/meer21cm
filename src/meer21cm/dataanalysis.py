@@ -33,7 +33,7 @@ from astropy.wcs.utils import proj_plane_pixel_area
 from itertools import chain
 from . import telescope
 from .telescope import *
-from .skymap import WcsSkyMap
+from .skymap import HealpixSkyMap, WcsSkyMap
 import meer21cm
 import logging
 import numbers
@@ -76,9 +76,16 @@ class Specification:
     wproj: :py:class:`astropy.wcs.WCS`, default None
         The WCS object for the map.
     num_pix_x: int, default None
-        The number of pixels in the first axis of the map data.
+        The number of pixels in the first axis of the map data (WCS only).
     num_pix_y: int, default None
-        The number of pixels in the second axis of the map data.
+        The number of pixels in the second axis of the map data (WCS only).
+    hp_nside: int, default None
+        HEALPix :math:`N_{side}`. Implies sparse ``(n_pix, n_chan)`` layout via
+        :class:`HealpixSkyMap`. Incompatible with predefined ``survey``/``band`` maps.
+        Mutually exclusive with passing ``skymap``.
+    healpix_pixel_id: array-like, default None
+        Optional explicit sparse pixel indices at ``hp_nside`` (RING, ``nest=False``).
+        If omitted, pixels are derived from ``ra_range`` and ``dec_range``.
     map_has_sampling: np.ndarray, default None
         A binary window for whether a pixel has been sampled.
     sigma_beam_ch: np.ndarray, default None
@@ -157,6 +164,9 @@ class Specification:
     batch_number: int, default 1
         Number of sequential batches used by various routines.
         A value of 1 means no batching.
+    skymap: :class:`~meer21cm.skymap.SkyMap`, default None
+        Injected angular geometry (:class:`~meer21cm.skymap.WcsSkyMap` or
+        :class:`~meer21cm.skymap.HealpixSkyMap`). Mutually exclusive with ``hp_nside``.
     """
 
     def __init__(
@@ -197,6 +207,8 @@ class Specification:
         precision=True,
         batch_number=1,
         skymap=None,
+        hp_nside=None,
+        healpix_pixel_id=None,
         **kwparams,
     ):
         self.survey = survey
@@ -214,6 +226,11 @@ class Specification:
             num_pix_x = default_num_pix_x[spec_key]
             num_pix_y = default_num_pix_y[spec_key]
             wproj = default_wproj[spec_key]
+        if spec_key in default_nu.keys() and hp_nside is not None:
+            raise ValueError(
+                "Predefined survey/band grids are WCS-only; omit hp_nside when using "
+                "survey=... and band=..., or use a non-default survey/band key."
+            )
         self.dependency_dict = find_property_with_tags(self)
         funcs = list(chain.from_iterable(list(self.dependency_dict.values())))
         for func_i in np.unique(np.array(funcs)):
@@ -252,30 +269,54 @@ class Specification:
             self.nu = nu
         self.nu_min = nu_min
         self.nu_max = nu_max
-        if num_pix_x is None:
-            num_pix_x = 3
-        if num_pix_y is None:
-            num_pix_y = 3
-        if wproj is None:
-            wproj = create_wcs(0.0, 0.0, [num_pix_x, num_pix_y], 1.0)
+        self.ra_range = ra_range
+        self.dec_range = dec_range
 
-        if skymap is None:
-            skymap = WcsSkyMap(wproj=wproj, num_pix_x=num_pix_x, num_pix_y=num_pix_y)
-        if skymap.format != "wcs":
+        if hp_nside is not None and skymap is not None:
+            raise ValueError("pass only one of skymap or hp_nside.")
+        if skymap is not None and healpix_pixel_id is not None:
             raise ValueError(
-                "This refactor stage currently supports WCS sky maps only."
+                "healpix_pixel_id is invalid when passing skymap; set pixel_id on "
+                "HealpixSkyMap instead."
             )
-        self.skymap = skymap
+        if healpix_pixel_id is not None and hp_nside is None and skymap is None:
+            raise ValueError(
+                "healpix_pixel_id requires hp_nside or pass skymap=HealpixSkyMap(...)."
+            )
+        if hp_nside is not None:
+            self.skymap = HealpixSkyMap(
+                hp_nside,
+                pixel_id=None
+                if healpix_pixel_id is None
+                else np.asarray(healpix_pixel_id, dtype=np.int64),
+                ra_range=self.ra_range if healpix_pixel_id is None else None,
+                dec_range=self.dec_range if healpix_pixel_id is None else None,
+            )
+        elif skymap is not None:
+            self.skymap = skymap
+        else:
+            if num_pix_x is None:
+                num_pix_x = 3
+            if num_pix_y is None:
+                num_pix_y = 3
+            if wproj is None:
+                wproj = create_wcs(0.0, 0.0, [num_pix_x, num_pix_y], 1.0)
+            self.skymap = WcsSkyMap(
+                wproj=wproj,
+                num_pix_x=num_pix_x,
+                num_pix_y=num_pix_y,
+            )
         self.sigma_beam_ch = sigma_beam_ch
         self.beam_unit = beam_unit
         if map_has_sampling is None:
             map_has_sampling = np.ones(
                 self.skymap.map_shape_template + (len(self.nu),), dtype="bool"
             )
-            map_has_sampling[0] = False
-            map_has_sampling[-1] = False
-            map_has_sampling[:, 0] = False
-            map_has_sampling[:, -1] = False
+            if self.skymap.format == "wcs":
+                map_has_sampling[0] = False
+                map_has_sampling[-1] = False
+                map_has_sampling[:, 0] = False
+                map_has_sampling[:, -1] = False
         self.map_has_sampling = map_has_sampling
         self.map_unit = map_unit
         self.map_unit_type
@@ -285,8 +326,6 @@ class Specification:
         self.filter_los_threshold = filter_los_threshold
         self.gal_file = gal_file
         self.weighting = weighting
-        self.ra_range = ra_range
-        self.dec_range = dec_range
         self._sigma_beam_ch_in_mpc = None
         if data is None:
             data = np.zeros(self.map_has_sampling.shape, dtype=self.real_dtype)
@@ -295,10 +334,11 @@ class Specification:
             weights_map_pixel = np.ones(
                 self.map_has_sampling.shape, dtype=self.real_dtype
             )
-            weights_map_pixel[0] = 0.0
-            weights_map_pixel[-1] = 0.0
-            weights_map_pixel[:, 0] = 0.0
-            weights_map_pixel[:, -1] = 0.0
+            if self.skymap.format == "wcs":
+                weights_map_pixel[0] = 0.0
+                weights_map_pixel[-1] = 0.0
+                weights_map_pixel[:, 0] = 0.0
+                weights_map_pixel[:, -1] = 0.0
         self.weights_map_pixel = weights_map_pixel
         if counts is None:
             counts = np.ones(self.map_has_sampling.shape, dtype=self.real_dtype)
@@ -402,17 +442,37 @@ class Specification:
     @property
     def wproj(self):
         """The WCS projection object for the map geometry."""
+        if self.skymap.format != "wcs":
+            raise AttributeError("wproj is only defined for WCS sky maps.")
         return self.skymap.wproj
 
     @property
     def num_pix_x(self):
         """The number of pixels along the first map axis."""
+        if self.skymap.format != "wcs":
+            raise AttributeError("num_pix_x is only defined for WCS sky maps.")
         return self.skymap.num_pix_x
 
     @property
     def num_pix_y(self):
         """The number of pixels along the second map axis."""
+        if self.skymap.format != "wcs":
+            raise AttributeError("num_pix_y is only defined for WCS sky maps.")
         return self.skymap.num_pix_y
+
+    @property
+    def hp_nside(self):
+        """HEALPix :math:`N_{side}` for HEALPix-backed specifications."""
+        if self.skymap.format != "healpix":
+            raise AttributeError("hp_nside is only defined for HEALPix sky maps.")
+        return self.skymap.hp_nside
+
+    @property
+    def pixel_id(self):
+        """Sparse HEALPix pixel indices (RING, ``nest=False``)."""
+        if self.skymap.format != "healpix":
+            raise AttributeError("pixel_id is only defined for HEALPix sky maps.")
+        return self.skymap.pixel_id
 
     @property
     def beam_type(self):
@@ -814,7 +874,15 @@ class Specification:
             "flagging map and weights outside "
             f"ra_range: {self.ra_range}, dec_range: {self.dec_range}"
         )
-        map_sel = self.skymap.trim_selector(self.ra_range, self.dec_range)[:, :, None]
+        trim = np.asarray(
+            self.skymap.trim_selector(self.ra_range, self.dec_range), dtype=float
+        )
+        if trim.shape != self.skymap.map_shape_template:
+            raise ValueError(
+                "trim_selector shape mismatch with map_shape_template: "
+                f"{trim.shape} vs {self.skymap.map_shape_template}."
+            )
+        map_sel = trim.reshape(trim.shape + (1,) * (self.data.ndim - trim.ndim))
         self.data = self.data * map_sel
         self.counts = self.counts * map_sel
         self.map_has_sampling = self.map_has_sampling * map_sel
@@ -895,6 +963,11 @@ class Specification:
             f"invoking {inspect.currentframe().f_code.co_name} to get the beam image"
         )
         logger.info(f"beam_type: {self.beam_type}, sigma_beam_ch: {self.sigma_beam_ch}")
+        if self.skymap.format != "wcs":
+            raise NotImplementedError(
+                "Beam projection onto HEALPix is not implemented; use WCS grids or "
+                "disable beam workflows until telescope HEALPix support lands."
+            )
         if wproj is None:
             wproj = self.wproj
         if num_pix_x is None:
@@ -990,7 +1063,12 @@ class Specification:
         """
         Returns the index of the frequency channel with the maximum sampling on the sky map.
         """
-        return np.argmax(self.map_has_sampling.sum(axis=(0, 1)))
+        nd = self.map_has_sampling.ndim
+        la = self.los_axis
+        if la < 0:
+            la += nd
+        axes = tuple(i for i in range(nd) if i != la)
+        return np.argmax(self.map_has_sampling.sum(axis=axes))
 
     def get_weights_none_to_one(self, attr_name):
         """

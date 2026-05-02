@@ -6,6 +6,8 @@ import pytest
 from astropy.wcs.utils import proj_plane_pixel_area
 from meer21cm.util import freq_to_redshift, center_to_edges, f_21, pca_clean, create_wcs
 from meer21cm.telescope import dish_beam_sigma
+from meer21cm.skymap import HealpixSkyMap
+import healpy as hp
 
 
 def test_nu_range():
@@ -76,6 +78,89 @@ def test_wcs_geometry_is_init_only(test_wproj):
     wproj_alt = create_wcs(10.0, 20.0, [5, 5], 1.0)
     with pytest.raises(AttributeError):
         spec.wproj = wproj_alt
+
+
+def test_healpix_spec_hp_nside_and_pixel_id():
+    spec = Specification(hp_nside=128, ra_range=(40, 50), dec_range=(0, 5))
+    assert spec.skymap.format == "healpix"
+    assert spec.hp_nside == 128
+    assert spec.pixel_id.size > 0
+    assert np.all(spec.pixel_id >= 0)
+    assert np.all(spec.pixel_id < hp.nside2npix(spec.hp_nside))
+    nu_n = len(spec.nu)
+    assert spec.data.shape == (spec.pixel_id.size, nu_n)
+    ra, dec = hp.pix2ang(spec.hp_nside, spec.pixel_id, lonlat=True)
+    assert np.all(ra > 40) and np.all(ra < 50)
+    assert np.all(dec > 0) and np.all(dec < 5)
+
+
+def test_healpix_skymap_via_ctor():
+    geom = HealpixSkyMap(2, pixel_id=np.array([0, 13], dtype=np.int64))
+    spec = Specification(skymap=geom)
+    assert spec.hp_nside == 2
+    assert np.array_equal(spec.pixel_id, geom.pixel_id)
+
+
+def test_healpix_spec_rejects_predictable_survey_with_hp():
+    with pytest.raises(ValueError, match="WCS-only"):
+        Specification(survey="meerklass_2021", band="L", hp_nside=32)
+
+
+def test_healpix_spec_mutually_exclusive_skymap_and_hp():
+    g = HealpixSkyMap(1, pixel_id=np.array([0], dtype=np.int64))
+    with pytest.raises(ValueError, match="only one of skymap or hp_nside"):
+        Specification(skymap=g, hp_nside=1)
+
+
+def test_wcs_spec_has_no_hp_nside_or_pixel_id(test_wproj):
+    spec = Specification(wproj=test_wproj, num_pix_x=4, num_pix_y=4)
+    with pytest.raises(AttributeError):
+        _ = spec.hp_nside
+    with pytest.raises(AttributeError):
+        _ = spec.pixel_id
+
+
+def test_healpix_spec_has_no_wproj(test_wproj):
+    spec = Specification(hp_nside=8, ra_range=(0, 10), dec_range=(-5, 5))
+    with pytest.raises(AttributeError):
+        _ = spec.wproj
+
+
+def test_predefined_spec_maximum_sampling_channel_axis():
+    spec = Specification(survey="meerklass_2021", band="L")
+    spec.map_has_sampling = np.zeros_like(spec.map_has_sampling)
+    spec.map_has_sampling[:, :, 1] = True
+    assert spec.maximum_sampling_channel == np.argmax(
+        spec.map_has_sampling.sum(axis=(0, 1))
+    )
+    spec = Specification(hp_nside=32, ra_range=(0, 10), dec_range=(-5, 5))
+    spec.map_has_sampling = np.zeros_like(spec.map_has_sampling)
+    spec.map_has_sampling[:, 1] = True
+    assert spec.maximum_sampling_channel == np.argmax(
+        spec.map_has_sampling.sum(axis=(0))
+    )
+
+
+def test_healpix_pixel_area_square_degrees():
+    """HEALPix pixel_area must use sq deg like WCS (cdelt product), not healpy steradians."""
+    nside = 256
+    geom = HealpixSkyMap(nside, pixel_id=np.array([0], dtype=np.int64))
+    expected = float(hp.nside2pixarea(nside, degrees=True))
+    assert geom.pixel_area == expected
+    assert geom.pix_resol == pytest.approx(np.sqrt(expected))
+
+
+def test_healpix_get_beam_image_not_implemented():
+    nu = np.linspace(1.2e9, 1.21e9, 3)
+    spec = Specification(
+        hp_nside=1,
+        ra_range=(0, 10),
+        dec_range=(-5, 5),
+        nu=nu,
+        sigma_beam_ch=np.full(len(nu), 0.01, dtype=float),
+    )
+    with pytest.raises(NotImplementedError):
+        spec.get_beam_image()
 
 
 def test_unit_conversion():
