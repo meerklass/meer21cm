@@ -233,6 +233,20 @@ def test_propagate_mock_field_average_false_chunk_merge():
     assert out.shape == (mock.num_pix_x, mock.num_pix_y, mock.nu.size)
 
 
+def test_propagate_mock_field_wcs_highres_deprecated():
+    mock = MockSimulation(
+        survey="meerklass_2021",
+        band="L",
+        tracer_bias_1=1.0,
+        highres_sim=2,
+    )
+    mock.get_enclosing_box()
+    field = np.ones(mock.box_ndim, dtype=mock.real_dtype)
+    with pytest.warns(DeprecationWarning, match="highres_sim is deprecated"):
+        out = mock.propagate_mock_field_to_data(field, beam=False)
+    assert out.shape == (mock.num_pix_x, mock.num_pix_y, mock.nu.size)
+
+
 def test_hi_mass_to_flux():
     raminMK, ramaxMK = 334, 357
     decminMK, decmaxMK = -35, -26.5

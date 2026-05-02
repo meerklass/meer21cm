@@ -141,8 +141,8 @@ def test_poisson_field_map_grid():
 
 # num_p hasn't worked yet
 # @pytest.mark.parametrize("num_p", [(1),])
-@pytest.mark.parametrize("highres,beam", [(1, True), (None, False)])
-def test_mock_field_map_grid(highres, beam):
+@pytest.mark.parametrize("beam", [True, False])
+def test_mock_field_map_grid(beam):
     """
     Generate a mock HI temp field, project it to sky map,
     grid it onto regular grids, and test input/output matching.
@@ -173,7 +173,6 @@ def test_mock_field_map_grid(highres, beam):
         # make sure kmax is higher than your simulation resolution
         kmax=10.0,
         box_buffkick=40,
-        highres_sim=highres,
     )
     if beam:
         D_dish = 13.5

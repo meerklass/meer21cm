@@ -51,10 +51,9 @@ class MockSimulation(PowerSpectrum):
     discrete_base_field: int, default 2
         The tracer (1 or 2) field to sample the discrete tracer positions.
     highres_sim: int, default None
-        If None, the mock field will be directly gridded to the sky map following the pixel resolution.
-        If an integer is provided, the mock field will be gridded to a high resolution sky map,
-        with the resolution specified by this integer times the pixel resolution, and then
-        down-sampled to the pixel resolution.
+        For WCS maps, this factor is **deprecated** in :meth:`propagate_mock_field_to_data`
+        (a warning is issued and native resolution is used). It still controls the optional
+        high-resolution path in :meth:`HIGalaxySimulation.propagate_hi_profile_to_map`.
     parallel_plane: bool, default True
         Whether to simulate the mock field in the parallel-plane limit (i.e. k_z = k_parallel).
         Only used if ``rsd_from_field`` is True, otherwise parallel-plane is hard-coded to True.
@@ -282,10 +281,10 @@ class MockSimulation(PowerSpectrum):
     @property
     def highres_sim(self):
         """
-        If not None, the mock field will first be gridded to a high resolution
-        sky map, convolved with the beam and then gridded to the resolution
-        specified by ``self.wproj``. The ratio of the angular resolution between
-        the high-res map and the target map is specified by this ``highres_sim``.
+        Optional integer upsampling factor for :meth:`HIGalaxySimulation.propagate_hi_profile_to_map`.
+
+        For WCS, :meth:`propagate_mock_field_to_data` ignores this value and emits
+        a ``DeprecationWarning`` when it is not ``None``.
         """
         return self._highres_sim
 
@@ -1003,6 +1002,65 @@ class MockSimulation(PowerSpectrum):
             f"setting ra_gal, dec_gal, z_gal with trim={trim}"
         )
 
+    def _propagate_mock_field_to_data_wcs(self, field, beam=True, average=True):
+        """
+        Project a box mock field onto the native WCS map grid (optionally beam-smooth).
+        """
+        if self.sigma_beam_ch is None:
+            beam = False
+        wproj = self.wproj
+        num_pix_x = self.num_pix_x
+        num_pix_y = self.num_pix_y
+        if self.flat_sky:
+            field_dtype = real_dtype_from_array(field)
+            map_out = np.zeros(
+                (num_pix_x, num_pix_y, self.nu.size),
+                dtype=field_dtype,
+            )
+            for ch_sel, field_chunk in self._iter_field_los_chunks(field):
+                map_out[..., ch_sel] = field_chunk
+            map_counts = np.ones_like(map_out, dtype=field_dtype)
+        else:
+            map_out = None
+            map_counts = None
+            for ch_sel, field_chunk in self._iter_field_los_chunks(field):
+                map_i, counts_i = self._project_field_chunk_to_sky_map(
+                    field_chunk,
+                    ch_sel,
+                    average=average,
+                    wproj=wproj,
+                    num_pix_x=num_pix_x,
+                    num_pix_y=num_pix_y,
+                )
+                if map_out is None:
+                    map_out = np.zeros_like(map_i)
+                    map_counts = np.zeros_like(counts_i)
+                if average:
+                    map_out += map_i * counts_i
+                else:
+                    map_out += map_i
+                map_counts += counts_i
+                del map_i, counts_i
+            if average:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    map_out = np.nan_to_num(map_out / map_counts)
+        if beam:
+            map_out = self._apply_weighted_convolution_in_batches(
+                map_out,
+                map_counts,
+                beam_image=None,
+                wproj=wproj,
+                num_pix_x=num_pix_x,
+                num_pix_y=num_pix_y,
+            )
+        return map_out
+
+    def _propagate_mock_field_to_data_healpix(self, field, beam=True, average=True):
+        """Placeholder until HEALPix mock field propagation is implemented."""
+        raise NotImplementedError(
+            "propagate_mock_field_to_data for HEALPix sky maps is not implemented yet."
+        )
+
     def propagate_mock_field_to_data(
         self, field, beam=True, highres_sim=None, average=True
     ):
@@ -1016,107 +1074,35 @@ class MockSimulation(PowerSpectrum):
         beam: bool, default True
             Whether to convolve the beam model to the sky map.
         highres_sim: int, default None
-            The high resolution simulation factor.
-            If None, the high resolution simulation factor will be set to ``self.highres_sim``.
+            **Deprecated for WCS.** If this argument or ``self.highres_sim`` is not
+            ``None`` while the sky map uses WCS, a ``DeprecationWarning`` is emitted
+            and the factor is ignored; gridding always uses the native map resolution.
         average: bool, default True
             If True, then the map pixel value will be the average of the rectangular box values (i.e. the mock field is in temperature units).
             If False, then the map pixel value will be the sum of the rectangular box values (i.e. the mock field is in flux density units).
 
         Returns
         -------
-        map_highres: np.ndarray
+        np.ndarray
             The output sky map cube.
         """
-        if highres_sim is None:
-            highres_sim = self.highres_sim
-        if self.sigma_beam_ch is None:
-            beam = False
-        if highres_sim is None:
-            wproj_hires = self.wproj
-            num_pix_x = self.num_pix_x
-            num_pix_y = self.num_pix_y
-        else:
-            wproj_hires = create_udres_wproj(self.wproj, highres_sim)
-            num_pix_x = self.num_pix_x * highres_sim
-            num_pix_y = self.num_pix_y * highres_sim
-        if self.flat_sky:
-            field_dtype = real_dtype_from_array(field)
-            pad = highres_sim
-            if highres_sim is None:
-                pad = 1
-            map_highres = np.zeros(
-                (
-                    self.num_pix_x,
-                    pad,
-                    self.num_pix_y,
-                    pad,
-                    self.nu.size,
-                ),
-                dtype=field_dtype,
-            )
-            for ch_sel in self._iter_last_axis_batches(field.shape[-1]):
-                map_highres[..., ch_sel] = field[:, None, :, None, ch_sel]
-            map_highres = map_highres.reshape(
-                (
-                    num_pix_x,
-                    num_pix_y,
-                    -1,
+        fmt = self.skymap.format
+        if fmt == "wcs":
+            resolved = highres_sim if highres_sim is not None else self.highres_sim
+            if resolved is not None:
+                warnings.warn(
+                    "highres_sim is deprecated for WCS sky maps and is ignored in "
+                    "propagate_mock_field_to_data; use native-resolution gridding.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
+            return self._propagate_mock_field_to_data_wcs(
+                field, beam=beam, average=average
             )
-            map_counts = np.ones_like(map_highres, dtype=field_dtype)
-        else:
-            map_highres = None
-            map_counts = None
-            for ch_sel, field_chunk in self._iter_field_los_chunks(field):
-                map_i, counts_i = self._project_field_chunk_to_sky_map(
-                    field_chunk,
-                    ch_sel,
-                    average=average,
-                    wproj=wproj_hires,
-                    num_pix_x=num_pix_x,
-                    num_pix_y=num_pix_y,
-                )
-                if map_highres is None:
-                    map_highres = np.zeros_like(map_i)
-                    map_counts = np.zeros_like(counts_i)
-                if average:
-                    map_highres += map_i * counts_i
-                else:
-                    map_highres += map_i
-                map_counts += counts_i
-                del map_i, counts_i
-            if average:
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    map_highres = np.nan_to_num(map_highres / map_counts)
-        # if highres_sim is None and not beam:
-        #    return map_highres
-        if beam:
-            map_highres = self._apply_weighted_convolution_in_batches(
-                map_highres,
-                map_counts,
-                beam_image=None,
-                wproj=wproj_hires,
-                num_pix_x=num_pix_x,
-                num_pix_y=num_pix_y,
+        if fmt == "healpix":
+            return self._propagate_mock_field_to_data_healpix(
+                field, beam=beam, average=average
             )
-        if highres_sim is None:
-            return map_highres
-        spec = Specification(
-            wproj=wproj_hires,
-            num_pix_x=num_pix_x,
-            num_pix_y=num_pix_y,
-        )
-        ra_map = spec.ra_map
-        dec_map = spec.dec_map
-        map_highres = sample_map_from_highres(
-            map_highres,
-            ra_map,
-            dec_map,
-            self.wproj,
-            self.num_pix_x,
-            self.num_pix_y,
-        )
-        return map_highres
 
 
 class HIGalaxySimulation(MockSimulation):
