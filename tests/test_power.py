@@ -1172,3 +1172,32 @@ def test_manual_box():
     ps._box_len = np.array([100, 100, 100])
     ps._box_ndim = np.array([10, 10, 10])
     assert np.allclose(ps.box_voxel_redshift, ps.z)
+
+
+@pytest.mark.parametrize("average", [True, False])
+def test_grid_field_to_sky_map_healpix(average):
+    z_min = 0.4
+    z_max = 1.1
+    nu_min = redshift_to_freq(z_max)
+    nu_max = redshift_to_freq(z_min)
+    nu_arr = np.linspace(nu_min, nu_max, 100)
+    mock = PowerSpectrum(
+        nu=nu_arr,
+        hp_nside=128,
+        ra_range=(200, 220),
+        dec_range=(-5, 15),
+        downres_factor_radial=1 / 3,
+        downres_factor_transverse=1 / 3,
+    )
+    mock.get_enclosing_box()
+    mock.data, counts = mock.grid_field_to_sky_map(
+        np.random.normal(0, 1, mock.box_ndim),
+        average=average,
+        mask=True,
+    )
+    if average:
+        test_arr = mock.data * np.sqrt(counts)
+    else:
+        test_arr = mock.data / np.sqrt(counts)
+    assert np.abs(np.std(test_arr) - 1) < 1e-2
+    assert np.abs(np.mean(test_arr**2) - 1) < 1e-2

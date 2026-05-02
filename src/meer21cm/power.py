@@ -23,6 +23,7 @@ from .util import (
     radec_to_indx,
     redshift_to_freq,
     freq_to_redshift,
+    find_ch_id,
     get_nd_slicer,
     omega_hi_to_average_temp,
     legendre_polynomial_with_factor,
@@ -3323,7 +3324,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         pos_ra, pos_dec = hp.vec2ang(pos_arr / pos_comov_dist[:, None], lonlat=True)
         return pos_ra, pos_dec, pos_z, pos_comov_dist
 
-    def grid_field_to_sky_map(
+    def _grid_field_to_sky_map_wcs(
         self,
         field,
         average=True,
@@ -3334,43 +3335,7 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         los_sel=None,
     ):
         """
-        Grid a field in the rectangular box onto the sky.
-
-        Parameters
-        ----------
-        field: array.
-            The field in the box to be gridded.
-
-        average: bool, default True.
-            Whether the field grids are averaged or summed into sky pixels.
-
-        mask: bool, default True.
-            If True, the sky map is then masked by the survey selection function.
-
-        wproj: :class:`astropy.wcs.WCS` object, default None.
-            The wcs object for the output sky map. Default uses the stored ``self.wproj``.
-
-        num_pix_x: int, default None.
-            The number of pixels along the first axis for the sky map. Defulat uses the stored ``self.num_pix_x``.
-
-        num_pix_y: int, default None.
-            The number of pixels along the seconds axis for the sky map. Defulat uses the stored ``self.num_pix_y``.
-
-        los_sel: array-like, default None.
-            Optional selector of line-of-sight (last-axis) indices represented by ``field``.
-            If None, ``field`` is assumed to contain all LOS slices with shape
-            ``self.box_ndim``. If provided, ``field`` must have shape
-            ``(self.box_ndim[0], self.box_ndim[1], len(los_sel))`` and the projected
-            output still uses the full LOS map axis (``self.nu.size``), so multiple
-            chunked calls can be merged by accumulating mass/count outputs.
-
-        Returns
-        -------
-        map_bin: array.
-            The output sky map.
-        count_bin: array.
-            The number of grids in each sky map pixel.
-
+        Grid a box field onto the WCS map cube (raster ``(num_pix_x, num_pix_y, n_ch)``).
         """
         if wproj is None:
             wproj = self.wproj
@@ -3419,6 +3384,150 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
         if mask:
             map_bin *= self.W_HI
         return map_bin, count_bin
+
+    def _grid_field_to_sky_map_healpix(
+        self,
+        field,
+        average=True,
+        mask=True,
+        los_sel=None,
+    ):
+        """
+        Grid a box field onto the sparse HEALPix map ``(len(pixel_id), n_ch)``.
+
+        Voxel centres are assigned to HEALPix pixels at ``self.hp_nside`` and to
+        frequency channels via :func:`~meer21cm.util.find_ch_id`. Only voxels whose
+        pixel lies in ``self.pixel_id`` contribute.
+        """
+        los_sel = (
+            np.arange(self.box_ndim[2], dtype=int)
+            if los_sel is None
+            else np.asarray(los_sel, dtype=int)
+        )
+        expected_shape = (self.box_ndim[0], self.box_ndim[1], los_sel.size)
+        if field.shape != expected_shape:
+            raise ValueError(
+                f"field shape {field.shape} does not match expected shape "
+                f"{expected_shape} for los_sel size {los_sel.size}"
+            )
+        nside = int(self.hp_nside)
+        pixel_id = np.asarray(self.pixel_id, dtype=np.int64)
+        n_out = pixel_id.size
+        n_ch = int(self.nu.size)
+        order = np.argsort(pixel_id, kind="mergesort")
+        pix_sorted = pixel_id[order]
+
+        x_vec = self.x_vec[0]
+        y_vec = self.x_vec[1]
+        z_vec = self.x_vec[2][los_sel]
+        nx = x_vec.size
+        ny = y_vec.size
+        nz = z_vec.size
+        nxyz = nx * ny * nz
+        pos_xyz = np.empty((nxyz, 3), dtype=self.real_dtype)
+        pos_xyz[:, 0] = np.repeat(x_vec, ny * nz)
+        pos_xyz[:, 1] = np.tile(np.repeat(y_vec, nz), nx)
+        pos_xyz[:, 2] = np.tile(z_vec, nx * ny)
+        pos_ra, pos_dec, pos_z, _ = self.ra_dec_z_for_coord_in_box(pos_xyz)
+        hpix = hp.ang2pix(nside, pos_ra, pos_dec, lonlat=True).astype(np.int64)
+        pos_nu = np.asarray(redshift_to_freq(pos_z), dtype=np.float64)
+        ch_idx = find_ch_id(pos_nu, self.nu)
+        valid_ch = (ch_idx >= 0) & (ch_idx < n_ch)
+        hpix = hpix[valid_ch]
+        ch_idx = ch_idx[valid_ch]
+        mass = np.asarray(field, dtype=self.real_dtype).ravel()[valid_ch]
+
+        row_s = np.searchsorted(pix_sorted, hpix)
+        # Do not index pix_sorted[row_s] when row_s == n_out (past end of searchsorted).
+        in_bounds = row_s < n_out
+        in_survey = np.zeros(hpix.shape, dtype=bool)
+        in_survey[in_bounds] = pix_sorted[row_s[in_bounds]] == hpix[in_bounds]
+        row = order[row_s[in_survey]]
+        ch_idx = ch_idx[in_survey]
+        mass = mass[in_survey]
+
+        map_sum = np.zeros((n_out, n_ch), dtype=self.real_dtype)
+        cnt = np.zeros((n_out, n_ch), dtype=self.real_dtype)
+        np.add.at(map_sum, (row, ch_idx), mass)
+        np.add.at(cnt, (row, ch_idx), 1.0)
+        if average:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                map_bin = np.where(cnt > 0, map_sum / cnt, 0.0)
+        else:
+            map_bin = map_sum
+        count_bin = cnt
+        if mask:
+            map_bin *= self.W_HI
+        return map_bin, count_bin
+
+    def grid_field_to_sky_map(
+        self,
+        field,
+        average=True,
+        mask=True,
+        wproj=None,
+        num_pix_x=None,
+        num_pix_y=None,
+        los_sel=None,
+    ):
+        """
+        Grid a field in the rectangular box onto the sky.
+
+        Parameters
+        ----------
+        field: array.
+            The field in the box to be gridded.
+
+        average: bool, default True.
+            Whether the field grids are averaged or summed into sky pixels.
+
+        mask: bool, default True.
+            If True, the sky map is then masked by the survey selection function.
+
+        wproj: :class:`astropy.wcs.WCS` object, default None.
+            **WCS only.** The WCS for the output sky map. Default uses ``self.wproj``.
+
+        num_pix_x: int, default None.
+            **WCS only.** Number of pixels along the first map axis. Default ``self.num_pix_x``.
+
+        num_pix_y: int, default None.
+            **WCS only.** Number of pixels along the second map axis. Default ``self.num_pix_y``.
+
+        los_sel: array-like, default None.
+            Optional selector of line-of-sight (last-axis) indices represented by ``field``.
+            If None, ``field`` is assumed to contain all LOS slices with shape
+            ``self.box_ndim``. If provided, ``field`` must have shape
+            ``(self.box_ndim[0], self.box_ndim[1], len(los_sel))`` and the projected
+            output still uses the full LOS map axis (``self.nu.size``), so multiple
+            chunked calls can be merged by accumulating mass/count outputs.
+
+        Returns
+        -------
+        map_bin: array.
+            The output sky map (WCS ``(nx, ny, n_ch)`` or HEALPix ``(n_pix, n_ch)``).
+        count_bin: array.
+            Per-cell accumulation used for averaging (WCS) or voxel counts (HEALPix).
+
+        """
+        fmt = self.skymap.format
+        if fmt == "wcs":
+            return self._grid_field_to_sky_map_wcs(
+                field,
+                average=average,
+                mask=mask,
+                wproj=wproj,
+                num_pix_x=num_pix_x,
+                num_pix_y=num_pix_y,
+                los_sel=los_sel,
+            )
+        if fmt == "healpix":
+            return self._grid_field_to_sky_map_healpix(
+                field,
+                average=average,
+                mask=mask,
+                los_sel=los_sel,
+            )
+        raise ValueError(f"Unsupported skymap format {fmt!r}.")
 
     def gen_random_poisson_galaxy(self, sel=None, num_g_rand=None, seed=None):
         """
