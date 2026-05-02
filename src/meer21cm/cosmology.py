@@ -957,8 +957,9 @@ class CosmologyCalculator(Specification):
             i = self.maximum_sampling_channel
         nu_ext = center_to_edges(self.nu)
         z_ext = freq_to_redshift(nu_ext)
+        w_plane = np.asarray(self.W_HI[..., i], dtype=float)
         volume = (
-            (self.W_HI[:, :, i].sum() * self.pixel_area * (np.pi / 180) ** 2)
+            (float(np.sum(w_plane)) * float(self.pixel_area) * (np.pi / 180) ** 2)
             / 3
             * (
                 cosmo.comoving_distance(z_ext.max()) ** 3
