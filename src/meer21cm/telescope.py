@@ -302,6 +302,227 @@ def isotropic_beam_profile(
     return beam_image
 
 
+def gaussian_beam_window(sigma_rad, lmax):
+    r"""
+    Closed-form Gaussian beam window function in spherical-harmonic space.
+
+    .. math::
+
+        B_\ell = \exp\left(-\frac{\ell(\ell+1)\sigma^2}{2}\right),
+
+    where :math:`\sigma` is the Gaussian beam dispersion in radians.
+
+    Parameters
+    ----------
+    sigma_rad : float
+        Gaussian beam dispersion in radians.
+    lmax : int
+        Maximum multipole; the returned array has length ``lmax + 1``.
+
+    Returns
+    -------
+    b_ell : ndarray of shape ``(lmax + 1,)``
+    """
+    lmax_i = int(lmax)
+    ell = np.arange(lmax_i + 1, dtype=np.float64)
+    sigma = float(sigma_rad)
+    return np.exp(-0.5 * ell * (ell + 1.0) * sigma**2)
+
+
+def isotropic_beam_window(beam_func, sigma, lmax, theta_grid=None):
+    r"""
+    Numerical beam window function for an isotropic beam via ``healpy.sphtfunc.beam2bl``.
+
+    The beam profile ``beam_func(theta)`` is sampled on a fine ``theta`` grid
+    covering :math:`[0, \theta_{\rm max}]` with :math:`\theta_{\rm max} \approx 8\sigma`
+    (truncated at :math:`\pi`), and the resulting :math:`B(\theta)` is converted
+    to :math:`B_\ell` with ``hp.sphtfunc.beam2bl``.
+
+    Parameters
+    ----------
+    beam_func : callable
+        Maps ``theta`` (radians or the ``ang_unit`` chosen by the caller's beam
+        factory) to beam amplitude. Must accept vector inputs.
+    sigma : float
+        Beam dispersion in the same angular units as ``beam_func`` expects.
+        Used to pick the default ``theta_grid`` when none is provided.
+    lmax : int
+        Maximum multipole.
+    theta_grid : ndarray, optional
+        Explicit ``theta`` sample points (same units as expected by
+        ``beam_func``). Must start at 0 and be monotonically increasing.
+
+    Returns
+    -------
+    b_ell : ndarray of shape ``(lmax + 1,)``
+    """
+    lmax_i = int(lmax)
+    if theta_grid is None:
+        theta_max = min(8.0 * float(sigma), np.pi)
+        theta_grid = np.linspace(0.0, theta_max, 1024)
+    theta_grid = np.asarray(theta_grid, dtype=np.float64)
+    if theta_grid[0] != 0:
+        raise ValueError("theta_grid must start at 0.")
+    profile = np.asarray(beam_func(theta_grid), dtype=np.float64)
+    return hp.sphtfunc.beam2bl(profile, theta_grid, lmax_i)
+
+
+def weighted_smoothing_healpix(
+    data_pix,
+    weights_pix,
+    beam_window_ch,
+    hp_nside,
+    pixel_id,
+    kernel_renorm=True,
+    nside_out=None,
+    pixel_id_out=None,
+):
+    r"""
+    Weighted HEALPix smoothing, mirroring :func:`weighted_convolution` semantics.
+
+    For each channel :math:`c` with beam window :math:`B^{(c)}_\ell`, this
+    returns
+
+    .. math::
+
+        \tilde s^{(c)} = \frac{\mathcal{S}[s^{(c)} w^{(c)} \, B^{(c)}_\ell]}
+                               {\mathcal{S}[w^{(c)} \, B^{(c)}_\ell]},\qquad
+        \tilde w^{(c)} = \frac{\bigl(\mathcal{S}[w^{(c)} B^{(c)}_\ell]\bigr)^2}
+                               {\mathcal{S}[w^{(c)} (B^{(c)}_\ell)^2]},
+
+    where :math:`\mathcal{S}` denotes harmonic-space smoothing via
+    ``hp.smoothing(..., beam_window=B_\ell)`` on a full-sphere scratch buffer
+    (allocated per channel, not kept).
+
+    Parameters
+    ----------
+    data_pix : (n_pix, n_ch) ndarray
+    weights_pix : (n_pix, n_ch) ndarray
+    beam_window_ch : (n_ch, lmax+1) ndarray or (lmax+1,) ndarray
+        Per-channel beam window. A 1D array is broadcast over all channels.
+    hp_nside : int
+        HEALPix :math:`N_{\rm side}` that ``pixel_id`` refers to.
+    pixel_id : ndarray of int
+        HEALPix indices at ``hp_nside``, matching rows of ``data_pix`` /
+        ``weights_pix``, used to paint the high-resolution sphere before smoothing.
+    pixel_id_out : ndarray of int, optional
+        If ``nside_out`` is below ``hp_nside``, indices at ``nside_out`` where outputs
+        are sampled (survey footprint). Required in that case. When no downgrade,
+        defaults to ``pixel_id``.
+    kernel_renorm : bool, default True
+        Kept for API symmetry with :func:`weighted_convolution`. ``B_\ell`` is
+        already normalised by ``hp.smoothing`` (``B_0 = 1`` for Gaussian
+        windows), so this flag is informational only.
+    nside_out : int, optional
+        If set to a HEALPix :math:`N_{\\rm side}` strictly less than ``hp_nside``,
+        harmonic smoothing is carried out at ``hp_nside`` on full spheres, maps are
+        ``hp.ud_grade`` down to ``nside_out``, then values are sampled at
+        ``pixel_id_out``.
+
+    Returns
+    -------
+    conv_data_pix : (n_pix_out, n_ch) ndarray
+    conv_weights_pix : (n_pix_out, n_ch) ndarray
+    """
+    del kernel_renorm
+    nside_i = int(hp_nside)
+    if nside_out is None:
+        nside_o = nside_i
+    else:
+        nside_o = int(nside_out)
+        if nside_o >= nside_i:
+            raise ValueError("nside_out must be strictly less than hp_nside.")
+        if nside_i % nside_o != 0:
+            raise ValueError(
+                f"hp_nside={nside_i} must be divisible by nside_out={nside_o} "
+                "(standard HEALPix downgrade)."
+            )
+    npix_full = hp.nside2npix(nside_i)
+    pid = np.asarray(pixel_id, dtype=np.int64).ravel()
+    data_pix = np.asarray(data_pix)
+    weights_pix = np.asarray(weights_pix)
+    if data_pix.ndim != 2 or weights_pix.ndim != 2:
+        raise ValueError(
+            "data_pix and weights_pix must be 2D arrays of shape (n_pix, n_ch); "
+            f"got {data_pix.shape} and {weights_pix.shape}."
+        )
+    if data_pix.shape != weights_pix.shape:
+        raise ValueError(
+            f"data/weights shape mismatch: {data_pix.shape} vs {weights_pix.shape}."
+        )
+    n_pix, n_ch = data_pix.shape
+    if n_pix != pid.size:
+        raise ValueError(f"pixel_id length {pid.size} does not match n_pix={n_pix}.")
+    if nside_o == nside_i:
+        pid_out = pid
+    else:
+        if pixel_id_out is None:
+            raise ValueError(
+                "pixel_id_out is required when nside_out is less than hp_nside."
+            )
+        pid_out = np.asarray(pixel_id_out, dtype=np.int64).ravel()
+    n_pix_out = int(pid_out.size)
+    bwin = np.asarray(beam_window_ch, dtype=np.float64)
+    if bwin.ndim == 1:
+        bwin = np.broadcast_to(bwin, (n_ch, bwin.size))
+    elif bwin.ndim == 2:
+        if bwin.shape[0] != n_ch:
+            raise ValueError(
+                f"beam_window_ch first axis must equal n_ch={n_ch}; got {bwin.shape[0]}."
+            )
+    else:
+        raise ValueError("beam_window_ch must be 1D or 2D.")
+    real_dtype = np.result_type(data_pix.dtype, weights_pix.dtype, np.float64)
+    conv_data = np.zeros((n_pix_out, n_ch), dtype=real_dtype)
+    conv_weights = np.zeros((n_pix_out, n_ch), dtype=real_dtype)
+    for ci in range(n_ch):
+        s = np.asarray(data_pix[:, ci], dtype=np.float64)
+        w = np.asarray(weights_pix[:, ci], dtype=np.float64)
+        b_ell = np.asarray(bwin[ci], dtype=np.float64)
+        b_ell_sq = b_ell**2
+        sw_full = np.zeros(npix_full, dtype=np.float64)
+        w_full = np.zeros(npix_full, dtype=np.float64)
+        np.add.at(sw_full, pid, s * w)
+        np.add.at(w_full, pid, w)
+        smoothed_sw = hp.smoothing(
+            sw_full,
+            beam_window=b_ell,
+            iter=0,
+            pol=False,
+            use_weights=False,
+        )
+        smoothed_w = hp.smoothing(
+            w_full,
+            beam_window=b_ell,
+            iter=0,
+            pol=False,
+            use_weights=False,
+        )
+        smoothed_w_sq = hp.smoothing(
+            w_full,
+            beam_window=b_ell_sq,
+            iter=0,
+            pol=False,
+            use_weights=False,
+        )
+        if nside_o != nside_i:
+            smoothed_sw = hp.ud_grade(smoothed_sw, nside_o, order_in="RING")
+            smoothed_w = hp.ud_grade(smoothed_w, nside_o, order_in="RING")
+            smoothed_w_sq = hp.ud_grade(smoothed_w_sq, nside_o, order_in="RING")
+        denom = smoothed_w[pid_out]
+        num = smoothed_sw[pid_out]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cdata = np.where(np.abs(denom) > 0, num / denom, 0.0)
+        denom_sq = smoothed_w_sq[pid_out]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cvar = np.where(np.abs(denom_sq) > 0, denom_sq / denom**2, np.inf)
+            cvar = np.where(denom != 0, cvar, np.inf)
+        cw = np.where(np.isfinite(cvar) & (cvar > 0), 1.0 / cvar, 0.0)
+        conv_data[:, ci] = cdata
+        conv_weights[:, ci] = cw
+    return conv_data, conv_weights
+
+
 def dish_beam_sigma(dish_diameter, nu, gamma=1.0, ang_unit=units.deg):
     r"""
     Calculate the beam size of a dish telescope assuming

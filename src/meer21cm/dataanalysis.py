@@ -347,6 +347,7 @@ class Specification:
         self.beam_type = None
         self.beam_model = beam_model
         self._beam_image = None
+        self._beam_window_ch = None
         self._z_as_func_of_comov_dist = None
         self.z_interp_max = z_interp_max
         self.data_column = data_column
@@ -439,6 +440,30 @@ class Specification:
         """Number of sequential batches used by gridding routines."""
         return self._batch_number
 
+    def _iter_last_axis_batches(self, axis_size):
+        """
+        Split ``axis_size`` into ``batch_number`` index ranges along one axis.
+
+        Used for chunked channel-wise convolution / smoothing etc. Always returns
+        at least one non-empty batch so ``batch_number=1`` matches the unified
+        code path used for ``batch_number>1``.
+        """
+        n = int(axis_size)
+        all_indx = np.arange(n, dtype=int)
+        return [
+            sel for sel in np.array_split(all_indx, self.batch_number) if sel.size > 0
+        ]
+
+    def _iter_field_los_chunks(self, arr):
+        """
+        Yield ``(los_sel, arr[..., los_sel])`` along the last axis.
+
+        Works for box fields ``(nx, ny, n_z)``, WCS map cubes ``(nx, ny, n_ch)``,
+        and HEALPix cubes ``(n_pix, n_ch)``.
+        """
+        for sel in self._iter_last_axis_batches(arr.shape[-1]):
+            yield sel, arr[..., sel]
+
     @property
     def wproj(self):
         """The WCS projection object for the map geometry."""
@@ -502,6 +527,7 @@ class Specification:
             raise ValueError(f"{value} is not a beam model")
         self._beam_model = value
         self.beam_type = getattr(telescope, value + "_beam").tags[0]
+        self._beam_window_ch = None
         if "beam_dep_attr" in dir(self):
             self.clean_cache(self.beam_dep_attr)
 
@@ -533,6 +559,7 @@ class Specification:
         elif value is not None:
             value = np.asarray(value, dtype=self.real_dtype)
         self._sigma_beam_ch = value
+        self._beam_window_ch = None
         if "beam_dep_attr" in dir(self):
             self.clean_cache(self.beam_dep_attr)
 
@@ -965,8 +992,8 @@ class Specification:
         logger.info(f"beam_type: {self.beam_type}, sigma_beam_ch: {self.sigma_beam_ch}")
         if self.skymap.format != "wcs":
             raise NotImplementedError(
-                "Beam projection onto HEALPix is not implemented; use WCS grids or "
-                "disable beam workflows until telescope HEALPix support lands."
+                "get_beam_image is implemented for WCS maps only; on HEALPix use "
+                "get_beam_window_ch for harmonic beam windows."
             )
         if wproj is None:
             wproj = self.wproj
@@ -1017,37 +1044,201 @@ class Specification:
             self._beam_image = beam_image
         return beam_image
 
-    def convolve_data(self, kernel, data=None, weights=None, assign_to_self=True):
+    @property
+    @tagging("beam", "nu")
+    def beam_window_ch(self):
         """
-        convolve data with an input kernel, and
-        update the corresponding weights.
+        Per-channel spherical-harmonic beam window :math:`B_\\ell` for HEALPix
+        ``hp.smoothing`` workflows. Populated lazily via :meth:`get_beam_window_ch`.
+        """
+        if self._beam_window_ch is None:
+            self.get_beam_window_ch()
+        return self._beam_window_ch
+
+    def get_beam_window_ch(
+        self,
+        ch_sel=None,
+        cache=True,
+        lmax=None,
+        hp_nside=None,
+    ):
+        """
+        Build per-channel harmonic beam windows for HEALPix smoothing.
 
         Parameters
         ----------
-        kernel: np.ndarray
-            The kernel to convolve the data with.
-        data: np.ndarray, default None
-            The data to convolve. Default uses `self.data`.
-        weights: np.ndarray, default None
-            The weights to convolve the data with. Default uses `self.w_HI`.
-        assign_to_self: bool, default True
-            Whether to assign the convolved data and weights to `self.data` and `self.w_HI`.
-            If True, the convolved data and weights will be assigned to `self.data` and `self.w_HI`.
+        ch_sel : array-like of int, optional
+            Channel indices. If omitted, uses all ``len(self.nu)`` channels.
+        cache : bool, default True
+            Cache the full-channel result in ``_beam_window_ch`` when ``ch_sel``
+            spans all channels.
+        lmax : int, optional
+            Maximum multipole (inclusive). Defaults to ``min(3 * hp_nside - 1, 8192)``.
+        hp_nside : int, optional
+            HEALPix :math:`N_{\\rm side}` used to set the default ``lmax``. Defaults
+            to ``self.hp_nside``.
 
         Returns
         -------
-        data: np.ndarray
-            The convolved data.
-        weights: np.ndarray
-            The convolved weights.
+        ndarray of shape ``(len(ch_sel), lmax + 1)``
+            Beam window rows :math:`B_\\ell` per selected channel.
         """
-        logger.info(
-            f"invoking {inspect.currentframe().f_code.co_name} to convolve map data with kernel: {kernel}"
-        )
+        if self.sigma_beam_ch is None:
+            logger.info(
+                f"sigma_beam_ch is None, returning None for {inspect.currentframe().f_code.co_name}"
+            )
+            return None
+        if self.skymap.format != "healpix":
+            raise ValueError(
+                "get_beam_window_ch is only defined for healpix skymaps; "
+                "use get_beam_image on WCS."
+            )
+        if self.beam_type == "anisotropic":
+            raise NotImplementedError(
+                "HEALPix harmonic beam smoothing does not support anisotropic "
+                "(kat) beams."
+            )
+        if hp_nside is None:
+            hp_nside = int(self.hp_nside)
+        else:
+            hp_nside = int(hp_nside)
+        if lmax is None:
+            lmax = int(min(3 * hp_nside - 1, 8192))
+        else:
+            lmax = int(lmax)
+
+        if ch_sel is None:
+            ch_sel = np.arange(len(self.nu), dtype=int)
+            use_full_channels = True
+        else:
+            ch_sel = np.asarray(ch_sel, dtype=int)
+            use_full_channels = False
+
+        if (
+            use_full_channels
+            and cache
+            and self._beam_window_ch is not None
+            and self._beam_window_ch.shape == (len(self.nu), lmax + 1)
+        ):
+            return self._beam_window_ch
+
+        beam_model = getattr(telescope, self.beam_model + "_beam")
+        out = np.zeros((ch_sel.size, lmax + 1), dtype=np.float64)
+        for i_out, i_ch in enumerate(ch_sel):
+            sigma = self.sigma_beam_ch[i_ch]
+            sigma_rad = (sigma * self.beam_unit).to(units.rad).value
+            if self.beam_model == "gaussian":
+                out[i_out] = telescope.gaussian_beam_window(sigma_rad, lmax)
+            else:
+                beam_func = beam_model(sigma)
+                out[i_out] = telescope.isotropic_beam_window(
+                    beam_func, float(sigma_rad), lmax
+                )
+        if cache and use_full_channels:
+            self._beam_window_ch = out
+        return out
+
+    def _convolve_data_healpix_harmonic(self, data, weights):
+        """
+        HEALPix: weighted harmonic-space smoothing using :func:`weighted_smoothing_healpix`
+        and :meth:`get_beam_window_ch`.
+        """
+        data = np.asarray(data)
+        weights = np.asarray(weights)
+        if data.shape != weights.shape:
+            raise ValueError(
+                f"data shape {data.shape} does not match weights shape {weights.shape}."
+            )
+        pix_id = np.asarray(self.pixel_id, dtype=np.int64)
+        nside = int(self.hp_nside)
+        if data.ndim != 2:
+            raise ValueError(
+                "HEALPix map cubes must have shape (n_pix, n_ch); "
+                f"got {data.shape}. Use self.data ordering for the LOS axis."
+            )
+        if data.shape[0] != pix_id.size:
+            raise ValueError(
+                f"data axis 0 ({data.shape[0]}) must equal len(self.pixel_id) ({pix_id.size})."
+            )
+        fdtype = np.result_type(real_dtype_from_array(data), self.real_dtype)
+        conv_data = np.zeros_like(data, dtype=fdtype)
+        conv_weights = np.zeros_like(weights, dtype=fdtype)
+        for ch_sel, sl_d in self._iter_field_los_chunks(data):
+            beam_w = self.get_beam_window_ch(ch_sel=ch_sel, cache=False, hp_nside=nside)
+            sl_d = np.asarray(sl_d, dtype=fdtype)
+            sl_w = np.asarray(weights[..., ch_sel], dtype=fdtype)
+            cd, cw = telescope.weighted_smoothing_healpix(
+                sl_d,
+                sl_w,
+                beam_w,
+                nside,
+                pix_id,
+            )
+            conv_data[:, ch_sel] = cd
+            conv_weights[:, ch_sel] = cw
+        return conv_data, conv_weights
+
+    def convolve_data(self, kernel=None, data=None, weights=None, assign_to_self=True):
+        """
+        Convolve map data.
+
+        **WCS** maps use raster-space :func:`~meer21cm.telescope.weighted_convolution`
+        with a beam image kernel (e.g. from :meth:`beam_image`).
+
+        **HEALPix** maps ignore raster ``kernel`` and use harmonic
+        :func:`~meer21cm.telescope.weighted_smoothing_healpix` with per-channel beam
+        windows from :meth:`get_beam_window_ch` — pass ``kernel=None``.
+
+        Parameters
+        ----------
+        kernel : np.ndarray or None
+            Raster beam cube ``(..., nx, ny, n_ch)`` aligned with LOS on ``wcs``.
+            Ignored when ``kernel is None`` on HEALPix (then harmonic smoothing is applied).
+            On WCS maps, passing ``kernel=None`` raises ``ValueError`` (provide e.g.
+            ``self.beam_image``).
+        data : np.ndarray, default None
+            Map to convolve; default ``self.data``.
+        weights : np.ndarray, default None
+            Per-pixel weights (e.g. ``self.w_HI``); required semantics match ``data``.
+        assign_to_self : bool, default True
+            Assign results to ``self.data`` and ``self.w_HI``.
+
+        Returns
+        -------
+        data : np.ndarray
+        weights : np.ndarray
+        """
         if data is None:
             data = self.data
         if weights is None:
             weights = self.w_HI
+
+        if self.skymap.format == "healpix":
+            if kernel is not None:
+                raise ValueError(
+                    "HEALPix backend does not use a raster ``kernel``. "
+                    "Pass ``kernel=None`` to convolve with the harmonic beam windows "
+                    "from ``sigma_beam_ch`` / ``beam_model`` (see ``get_beam_window_ch``)."
+                )
+            logger.info(
+                f"invoking {inspect.currentframe().f_code.co_name} "
+                "(healpix harmonic weighted smoothing)"
+            )
+            conv_d, conv_w = self._convolve_data_healpix_harmonic(data, weights)
+            if assign_to_self:
+                self.data = conv_d
+                self.w_HI = conv_w
+            return conv_d, conv_w
+
+        if kernel is None:
+            raise ValueError(
+                "WCS ``convolve_data`` requires ``kernel`` (e.g. ``self.beam_image``)."
+            )
+
+        logger.info(
+            f"invoking {inspect.currentframe().f_code.co_name} "
+            f"with raster kernel shaped {np.shape(kernel)}"
+        )
         data, weights = telescope.weighted_convolution(
             data,
             kernel,

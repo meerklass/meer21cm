@@ -4,7 +4,13 @@ import numpy as np
 from astropy import units, constants
 import pytest
 from astropy.wcs.utils import proj_plane_pixel_area
-from meer21cm.util import freq_to_redshift, center_to_edges, f_21, pca_clean, create_wcs
+from meer21cm.util import (
+    center_to_edges,
+    f_21,
+    pca_clean,
+    create_wcs,
+    get_ang_between_coord,
+)
 from meer21cm.telescope import dish_beam_sigma
 from meer21cm.skymap import HealpixSkyMap
 import healpy as hp
@@ -161,6 +167,43 @@ def test_healpix_get_beam_image_not_implemented():
     )
     with pytest.raises(NotImplementedError):
         spec.get_beam_image()
+
+
+def test_healpix_get_beam_window_ch_gaussian():
+    nu = np.linspace(975e6, 1025e6, 5)
+    lmax_expect = min(3 * 4 - 1, 8192)
+    spec = Specification(
+        hp_nside=4,
+        ra_range=(40.0, 50.0),
+        dec_range=(0.0, 5.0),
+        nu=nu,
+        sigma_beam_ch=dish_beam_sigma(13.5, nu),
+    )
+    bw = spec.get_beam_window_ch(cache=False)
+    assert bw.shape == (len(nu), lmax_expect + 1)
+    assert np.all(np.isfinite(bw))
+
+
+def test_wcs_get_beam_window_ch_raises():
+    sp = Specification(survey="meerklass_2021", band="L")
+    sp.sigma_beam_ch = dish_beam_sigma(13.5, sp.nu)
+    with pytest.raises(ValueError, match="healpix"):
+        sp.get_beam_window_ch(cache=False)
+
+
+def test_healpix_kat_beam_window_notimplemented():
+    nu = np.linspace(1.15e9, 1.2e9, 3)
+    spec = Specification(
+        hp_nside=2,
+        ra_range=(0.0, 10.0),
+        dec_range=(-5.0, 5.0),
+        nu=nu,
+        beam_model="kat",
+        sigma_beam_ch=np.full(len(nu), 1.0 / 60.0, dtype=float),
+    )
+    assert spec.beam_type == "anisotropic"
+    with pytest.raises(NotImplementedError):
+        spec.get_beam_window_ch(cache=False)
 
 
 def test_unit_conversion():
@@ -326,7 +369,7 @@ def test_get_beam_image_returns_cached_duplicate_call():
     assert b_cached is sp._beam_image
 
 
-def test_convolve_data():
+def test_convolve_data_wcs():
     sp = Specification(
         survey="meerklass_2021",
         band="L",
@@ -343,6 +386,69 @@ def test_convolve_data():
     # test renorm
     sum_test = sp.data.sum(axis=(0, 1))
     assert np.allclose(sum_test, np.ones_like(sp.nu))
+
+    with pytest.raises(ValueError, match="requires ``kernel``"):
+        sp.convolve_data(kernel=None)
+
+
+@pytest.mark.parametrize("beam_model", ["gaussian", "cos"])
+def test_convolve_data_healpix(beam_model):
+    sigma_beam_ch = 0.4
+    spec = Specification(
+        hp_nside=128,
+        ra_range=(190, 230),
+        dec_range=(-5, 15),
+        sigma_beam_ch=sigma_beam_ch,
+        beam_model=beam_model,
+    )
+    spec.data[1850] = 1.0
+    data_conv, _ = spec.convolve_data(assign_to_self=False)
+    # test renorm
+    sum_test = data_conv.sum(axis=(0))[0]
+    assert np.abs(sum_test - 1) < 1e-2
+    if beam_model == "gaussian":
+        pixel_sort = np.argsort(data_conv[..., 0])[::-1]
+        ra1, dec1 = hp.pix2ang(spec.hp_nside, spec.pixel_id[pixel_sort[0]], lonlat=True)
+        ra2, dec2 = hp.pix2ang(spec.hp_nside, spec.pixel_id[pixel_sort[1]], lonlat=True)
+        ang_dist = get_ang_between_coord(
+            np.atleast_1d(ra1),
+            np.atleast_1d(dec1),
+            np.atleast_1d(ra2),
+            np.atleast_1d(dec2),
+        )
+        theo_beam = np.exp(-(ang_dist**2) / 2 / sigma_beam_ch**2)
+        data_max2 = data_conv[pixel_sort[1], 0]
+        data_max = data_conv[pixel_sort[0], 0]
+        assert np.abs((data_max2 / data_max - theo_beam) / theo_beam) < 0.1
+
+
+def test_convolve_data_healpix_harmonic():
+    """Harmonic smoothing path: ``convolve_data(None)``, no raster kernel."""
+    nu = np.linspace(975e6, 1025e6, 6)
+    geom = HealpixSkyMap(8, ra_range=(350.0, 355.0), dec_range=(-32.0, -28.0))
+    sp = Specification(
+        skymap=geom,
+        nu=nu,
+        sigma_beam_ch=dish_beam_sigma(13.5, nu),
+        ra_range=(350.0, 355.0),
+        dec_range=(-32.0, -28.0),
+    )
+    assert sp.pixel_id.size > 0
+    mid = np.zeros_like(sp.data, dtype=float)
+    mid[mid.shape[0] // 2, :] = 1.0
+    sp.data = mid
+    sp.w_HI = sp.W_HI.astype(float)
+
+    before = mid.sum(axis=0)
+    out_data, out_w = sp.convolve_data(None)
+    assert out_data.shape == sp.data.shape == (sp.pixel_id.size, len(sp.nu))
+    assert np.all(np.isfinite(out_data))
+    assert np.all(np.isfinite(out_w))
+    after = out_data.sum(axis=0)
+    assert np.allclose(after, before, rtol=0.03)
+
+    with pytest.raises(ValueError, match="kernel"):
+        sp.convolve_data(np.ones((sp.pixel_id.size, len(sp.nu))))
 
 
 def test_update_beam_type():

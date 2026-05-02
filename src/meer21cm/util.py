@@ -694,14 +694,18 @@ def get_ang_between_coord(ra1, dec1, ra2, dec2, unit="deg"):
             The angle in the specified unit.
 
     """
+    ra1 = np.atleast_1d(ra1)
+    dec1 = np.atleast_1d(dec1)
+    ra2 = np.atleast_1d(ra2)
+    dec2 = np.atleast_1d(dec2)
     vec1 = hp.ang2vec(ra1, dec1, lonlat=True)
     vec2 = hp.ang2vec(ra2, dec2, lonlat=True)
     # extremely rarely, due to precision errors vec1*vec2 can be bigger than 1
     # triggering a nan in arccos
     v1v2cross = (vec1 * vec2).sum(axis=-1)
     v1v2cross[v1v2cross > 1] = 1
-    result = (np.arccos(v1v2cross) * units.rad).to(unit).value
-    return result.T
+    result = ((np.arccos(v1v2cross) * units.rad).to(unit).value).T
+    return result
 
 
 def get_default_args(func):
