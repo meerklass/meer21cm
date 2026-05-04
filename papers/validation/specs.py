@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d
 from meer21cm.telescope import dish_beam_sigma
 from meer21cm import MockSimulation
 import scipy.signal.windows as windows
+from meer21cm.power import bin_3d_to_cy, bin_3d_to_1d
 
 num_pix_x = 120
 num_pix_y = 40
@@ -173,3 +174,93 @@ def get_mock(seed):
     )
     mock.taper_func = getattr(windows, window_name)
     return mock
+
+
+def bin_power_cy(
+    power_3d,
+    k_perp,
+    k_para,
+    kperpbins,
+    kparabins,
+    kweights=None,
+):
+    pcy_arr = bin_3d_to_cy(
+        power_3d,
+        k_perp,
+        kperpbins,
+        vectorize=True,
+        weights=kweights,
+    )
+    pcy_arr = bin_3d_to_cy(
+        np.nan_to_num(pcy_arr),
+        np.abs(k_para),
+        kparabins,
+        vectorize=True,
+        weights=(1 - np.isnan(pcy_arr))[0].astype("float"),
+    )
+    return pcy_arr
+
+
+def bin_power_1d(
+    power_3d,
+    k_mode,
+    k1dbins,
+    kweights,
+    num_split=None,
+):
+    if num_split is None:
+        p1d, keff, nmodes = bin_3d_to_1d(
+            power_3d,
+            k_mode,
+            k1dbins,
+            vectorize=True,
+            weights=kweights,
+        )
+    else:
+        p1d = []
+        power_3d_arr = np.array_split(power_3d, num_split)
+        for i in range(num_split):
+            pdata1darr_i, keff, nmodes = bin_3d_to_1d(
+                power_3d_arr[i],
+                k_mode,
+                k1dbins,
+                vectorize=True,
+                weights=kweights,
+            )
+            p1d.append(pdata1darr_i)
+        p1d = np.concatenate(p1d)
+    return p1d, keff, nmodes
+
+
+def get_cy(
+    p3d,
+    karr,
+    weights=None,
+):
+    kperp, kpara, kmode, kvec = karr
+    if len(p3d.shape) == 3:
+        p3d = p3d.copy()[None]
+    results = bin_power_cy(
+        p3d.mean(0)[None],
+        kperp,
+        kpara,
+        kperpbins,
+        kparabins,
+        kweights=weights,
+    )
+    return results[0]
+
+
+def get_1d(p3d, karr, weights=None, num_split=None):
+    kperp, kpara, kmode, kvec = karr
+    if len(p3d.shape) == 3:
+        p3d = p3d.copy()[None]
+        num_split = None
+    p1d, k1d, _ = bin_power_1d(
+        p3d,
+        kmode,
+        k1dbins,
+        weights,
+        num_split=num_split,
+    )
+    return p1d, k1d

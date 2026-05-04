@@ -10,6 +10,16 @@ from meer21cm.power import bin_3d_to_cy, bin_3d_to_1d
 import scipy.signal.windows as windows
 
 
+def get_k_modes():
+    mock = get_mock(0)
+    mock.get_enclosing_box()
+    kperp_1 = mock.k_perp.copy()
+    kpara_1 = mock.k_para.copy()
+    kmode_1 = mock.k_mode.copy()
+    kvec_1 = mock.k_vec.copy()
+    return kperp_1, kpara_1, kmode_1, kvec_1
+
+
 def get_3d_power(
     seed,
 ):
@@ -52,7 +62,7 @@ def main():
     pgmod3d_arr = []
     pcross3d_arr = []
     pcrossmod3d_arr = []
-    with Pool(32) as p:
+    with Pool(16) as p:
         for pdata3d, phimod3d, pg3d, pgmod3d, pcross3d, pcrossmod3d in p.map(
             get_3d_power, range(512)
         ):
