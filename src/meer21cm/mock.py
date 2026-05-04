@@ -264,7 +264,11 @@ class MockSimulation(PowerSpectrum):
             nu_ext = center_to_edges(self.nu)
             z_ext = freq_to_redshift(nu_ext)
             volume_per_channel = (
-                (self.W_HI[:, :, 0].sum() * self.pixel_area * (np.pi / 180) ** 2)
+                (
+                    self.W_HI[..., self.maximum_sampling_channel].sum()
+                    * self.pixel_area
+                    * (np.pi / 180) ** 2
+                )
                 / 3
                 * (
                     self.astropy_cosmo_true.comoving_distance(z_ext[:-1]) ** 3
