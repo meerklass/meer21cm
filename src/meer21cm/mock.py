@@ -1056,10 +1056,42 @@ class MockSimulation(PowerSpectrum):
         return map_out
 
     def _propagate_mock_field_to_data_healpix(self, field, beam=True, average=True):
-        """Placeholder until HEALPix mock field propagation is implemented."""
-        raise NotImplementedError(
-            "propagate_mock_field_to_data for HEALPix sky maps is not implemented yet."
-        )
+        """
+        Project a box mock field onto the sparse HEALPix map (optional harmonic beam smoothing).
+
+        Gridding uses :meth:`~meer21cm.power.PowerSpectrum.grid_field_to_sky_map` on LOS
+        chunks; sums and voxel counts are merged like the curved-sky WCS path. Beam
+        convolution uses :meth:`~meer21cm.dataanalysis.Specification.convolve_data`
+        with ``kernel=None`` (harmonic smoothing).
+        """
+        if self.sigma_beam_ch is None:
+            beam = False
+        map_out = None
+        map_counts = None
+        for ch_sel, field_chunk in self._iter_field_los_chunks(field):
+            map_i, counts_i = self.grid_field_to_sky_map(
+                field_chunk,
+                average=False,
+                mask=False,
+                los_sel=ch_sel,
+            )
+            if map_out is None:
+                map_out = np.zeros_like(map_i)
+                map_counts = np.zeros_like(counts_i)
+            map_out += map_i
+            map_counts += counts_i
+        if average:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                map_out = np.nan_to_num(map_out / map_counts)
+        if beam:
+            wt = (map_counts > 0).astype(self.real_dtype)
+            map_out, _ = self.convolve_data(
+                kernel=None,
+                data=map_out,
+                weights=wt,
+                assign_to_self=False,
+            )
+        return map_out
 
     def propagate_mock_field_to_data(
         self, field, beam=True, highres_sim=None, average=True
