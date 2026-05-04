@@ -754,33 +754,62 @@ def get_wcs_coor(wcs, xx, yy, ang_unit="deg"):
     return ra, dec
 
 
+def _map_los_matrix_form(x, los_axis):
+    """
+    Move the LOS (spectral) axis to index 0 and reshape to ``(n_ch, n_pix)``.
+
+    Works for 2D HEALPix cubes and 3D WCS cubes. Returns ``restore(f2)`` to map a
+    2D array of the same ``(n_ch, n_pix)`` layout back to the original axis order.
+    """
+    x = np.asarray(x)
+    ndim = x.ndim
+    if ndim not in (2, 3):
+        raise ValueError("expected a 2D or 3D map array")
+    la = los_axis + ndim if los_axis < 0 else los_axis
+    if not (0 <= la < ndim):
+        raise ValueError(f"los_axis {los_axis} is out of range for ndim={ndim}")
+    moved = np.moveaxis(x, la, 0)
+    n_ch = moved.shape[0]
+    flat = moved.reshape(n_ch, -1)
+    spatial_shape = moved.shape[1:]
+
+    def restore(f2):
+        back = np.reshape(f2, (n_ch,) + spatial_shape)
+        return np.moveaxis(back, 0, la)
+
+    return flat, n_ch, restore
+
+
 def mean_center_signal(signal, weights=None, los_axis=-1):
     """
-    Mean-center the signal. Assume the first axis is the LOS axis.
+    Mean-center the signal along the LOS (spectral) axis.
+
+    Supports 3D WCS ``(nx, ny, n_ch)`` and 2D HEALPix ``(n_pix, n_ch)`` layouts;
+    ``los_axis`` picks which axis is frequency (default ``-1``).
+
+    Parameters
+    ----------
+        signal: array.
+            The input signal
+        weights: array.
+            The weights of each element in the signal.
+        los_axis: int, default -1.
+            Index of the spectral axis (``-1`` is the last axis; e.g. ``(n_pix, n_ch)``).
+
+    Returns
+    -------
+        centered_signal: array.
+            The mean-centered signal.
     """
-    assert len(signal.shape) == 3, "map must be 3D."
-    if los_axis < 0:
-        # change -1 to 2
-        los_axis = 3 + los_axis
-    # make sure los is the fist axis
-    axes = [0, 1, 2]
-    axes.remove(los_axis)
-    axes = [
-        los_axis,
-    ] + axes
-    # transpose map data
-    signal = np.transpose(signal, axes=axes)
-    nz, nx, ny = signal.shape
-    signal = signal.reshape((nz, -1))
+    flat, _, restore = _map_los_matrix_form(signal, los_axis)
     if weights is not None:
-        weights = np.transpose(weights, axes=axes)
-        weights = weights.reshape((nz, -1))
+        wflat, _, _ = _map_los_matrix_form(weights, los_axis)
     else:
-        weights = np.ones_like(signal)
-    signal = signal - np.sum(signal * weights, 1)[:, None] / np.sum(weights, 1)[:, None]
-    signal = signal.reshape((nz, nx, ny))
-    signal = np.transpose(signal, axes=np.argsort(axes))
-    return signal
+        wflat = np.ones_like(flat)
+    flat = flat - np.sum(flat * wflat, 1, keepdims=True) / np.sum(
+        wflat, 1, keepdims=True
+    )
+    return restore(flat)
 
 
 def weighted_covariance(signal, weights, renorm=True):
@@ -824,7 +853,8 @@ def pca_clean(
     covariance=None,
 ):
     r"""
-    Performs PCA cleaning of the map data. If ``mean_center`` is set to ``True``,
+    Performs PCA cleaning of map data (3D WCS cube or 2D HEALPix ``(n_pix, n_ch)``).
+    If ``mean_center`` is set to ``True``,
     then the input signal is first mean-centered so that
 
     .. math::
@@ -859,7 +889,8 @@ def pca_clean(
     Parameters
     ----------
         signal: array
-            The input signal to be cleaned.
+            Map cube: either 3D WCS ``(nx, ny, n_ch)`` or 2D HEALPix ``(n_pix, n_ch)``
+            with the spectral axis given by ``los_axis`` (default last axis for both).
         N_fg: int.
             Number of modes to be removed.
         weights: array, default None
@@ -870,7 +901,7 @@ def pca_clean(
         mean_center: bool, default False
             Whether to mean-center the input data vector
         los_axis: int, default -1.
-            Which axis is the line-of-sight, i.e. spectral axis.
+            Index of the spectral axis (``-1`` is the last axis; e.g. ``(n_pix, n_ch)``).
         return_A: bool, default False.
             Whether to return the mixing matrix A.
         mean_center_weights: array, default None.
@@ -907,41 +938,11 @@ def pca_clean(
             signal = mean_center_signal(signal, weights, los_axis)
         else:
             signal = mean_center_signal(signal, mean_center_weights, los_axis)
-    assert len(signal.shape) == 3, "map must be 3D."
-    if los_axis < 0:
-        # change -1 to 2
-        los_axis = 3 + los_axis
-    # make sure los is the fist axis
-    axes = [0, 1, 2]
-    axes.remove(los_axis)
-    axes = [
-        los_axis,
-    ] + axes
-    # transpose map data
-    signal = np.transpose(signal, axes=axes)
-    nz, nx, ny = signal.shape
-    signal = signal.reshape((nz, -1))
+    signal, nz, reshape_back = _map_los_matrix_form(signal, los_axis)
     if weights is not None:
-        weights = np.transpose(weights, axes=axes)
-        weights = weights.reshape((nz, -1))
+        weights, _, _ = _map_los_matrix_form(weights, los_axis)
     else:
         weights = np.ones_like(signal)
-
-    if mean_center_weights is not None:
-        mean_center_weights = np.transpose(mean_center_weights, axes=axes)
-        mean_center_weights = mean_center_weights.reshape((nz, -1))
-    # if mean_center:
-    #    if mean_center_weights is None:
-    #        signal = (
-    #            signal
-    #            - np.sum(signal * weights, 1)[:, None] / np.sum(weights, 1)[:, None]
-    #        )
-    #    else:
-    #        signal = (
-    #            signal
-    #            - np.sum(signal * mean_center_weights, 1)[:, None]
-    #            / np.sum(mean_center_weights, 1)[:, None]
-    #        )
     ### Covariance calculation:
     if covariance is None:
         covariance = weighted_covariance(signal, weights)
@@ -968,8 +969,7 @@ def pca_clean(
     if nan_flag:
         R_pca = np.nan_to_num(R_pca)
     residual = R_pca @ signal
-    residual = np.reshape(residual, (nz, nx, ny))
-    residual = np.transpose(residual, axes=np.argsort(axes))
+    residual = reshape_back(residual)
     if return_A:
         return residual, A
     return residual
