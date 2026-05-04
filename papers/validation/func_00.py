@@ -7,7 +7,6 @@ from scipy.interpolate import interp1d
 from meer21cm.power import get_shot_noise_galaxy
 from multiprocessing import Pool
 from meer21cm.power import bin_3d_to_cy, bin_3d_to_1d
-import scipy.signal.windows as windows
 
 
 def get_k_modes():

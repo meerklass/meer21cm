@@ -67,6 +67,9 @@ sim_upres_radial = 1 / 2
 ps_downres_transverse = 3
 ps_downres_radial = 6
 
+# number of foregrounds removed
+N_fg = 5
+
 
 def plot_cy_power(xbins, ybins, pdatacy, pmodcy, vmin_ratio, vmax_ratio):
     arr = np.array(
