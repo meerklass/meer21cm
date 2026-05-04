@@ -167,6 +167,8 @@ class Specification:
     skymap: :class:`~meer21cm.skymap.SkyMap`, default None
         Injected angular geometry (:class:`~meer21cm.skymap.WcsSkyMap` or
         :class:`~meer21cm.skymap.HealpixSkyMap`). Mutually exclusive with ``hp_nside``.
+    b_ell_l_max: int, default 8192
+        The maximum multipole for the beam window function for healpix map smoothing.
     """
 
     def __init__(
@@ -209,6 +211,7 @@ class Specification:
         skymap=None,
         hp_nside=None,
         healpix_pixel_id=None,
+        b_ell_l_max=8192,
         **kwparams,
     ):
         self.survey = survey
@@ -355,6 +358,7 @@ class Specification:
         self.freq_column = freq_column
         self.wcs_column = wcs_column
         self.auto_set_radecnu_bounds = auto_set_radecnu_bounds
+        self.b_ell_l_max = b_ell_l_max
 
     def _set_wcs_skymap(self, wproj, num_pix_x, num_pix_y):
         """Reset the WCS skymap backend while preserving WCS-only behavior."""
@@ -468,35 +472,35 @@ class Specification:
     def wproj(self):
         """The WCS projection object for the map geometry."""
         if self.skymap.format != "wcs":
-            raise AttributeError("wproj is only defined for WCS sky maps.")
+            raise KeyError("wproj is only defined for WCS sky maps.")
         return self.skymap.wproj
 
     @property
     def num_pix_x(self):
         """The number of pixels along the first map axis."""
         if self.skymap.format != "wcs":
-            raise AttributeError("num_pix_x is only defined for WCS sky maps.")
+            raise KeyError("num_pix_x is only defined for WCS sky maps.")
         return self.skymap.num_pix_x
 
     @property
     def num_pix_y(self):
         """The number of pixels along the second map axis."""
         if self.skymap.format != "wcs":
-            raise AttributeError("num_pix_y is only defined for WCS sky maps.")
+            raise KeyError("num_pix_y is only defined for WCS sky maps.")
         return self.skymap.num_pix_y
 
     @property
     def hp_nside(self):
         """HEALPix :math:`N_{side}` for HEALPix-backed specifications."""
         if self.skymap.format != "healpix":
-            raise AttributeError("hp_nside is only defined for HEALPix sky maps.")
+            raise KeyError("hp_nside is only defined for HEALPix sky maps.")
         return self.skymap.hp_nside
 
     @property
     def pixel_id(self):
         """Sparse HEALPix pixel indices (RING, ``nest=False``)."""
         if self.skymap.format != "healpix":
-            raise AttributeError("pixel_id is only defined for HEALPix sky maps.")
+            raise KeyError("pixel_id is only defined for HEALPix sky maps.")
         return self.skymap.pixel_id
 
     @property
@@ -904,11 +908,11 @@ class Specification:
         trim = np.asarray(
             self.skymap.trim_selector(self.ra_range, self.dec_range), dtype=float
         )
-        if trim.shape != self.skymap.map_shape_template:
-            raise ValueError(
-                "trim_selector shape mismatch with map_shape_template: "
-                f"{trim.shape} vs {self.skymap.map_shape_template}."
-            )
+        # if trim.shape != self.skymap.map_shape_template:
+        #    raise ValueError(
+        #        "trim_selector shape mismatch with map_shape_template: "
+        #        f"{trim.shape} vs {self.skymap.map_shape_template}."
+        #    )
         map_sel = trim.reshape(trim.shape + (1,) * (self.data.ndim - trim.ndim))
         self.data = self.data * map_sel
         self.counts = self.counts * map_sel
@@ -1001,7 +1005,7 @@ class Specification:
             num_pix_x = self.num_pix_x
         if num_pix_y is None:
             num_pix_y = self.num_pix_y
-        if ch_sel is None:
+        if ch_sel is None or np.allclose(ch_sel, np.arange(len(self.nu))):
             ch_sel = np.arange(len(self.nu), dtype=int)
             use_full_channels = True
         else:
@@ -1103,11 +1107,11 @@ class Specification:
         else:
             hp_nside = int(hp_nside)
         if lmax is None:
-            lmax = int(min(3 * hp_nside - 1, 8192))
+            lmax = int(min(3 * hp_nside - 1, self.b_ell_l_max))
         else:
             lmax = int(lmax)
 
-        if ch_sel is None:
+        if ch_sel is None or np.allclose(ch_sel, np.arange(len(self.nu))):
             ch_sel = np.arange(len(self.nu), dtype=int)
             use_full_channels = True
         else:

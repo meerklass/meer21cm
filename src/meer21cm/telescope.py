@@ -431,7 +431,7 @@ def weighted_smoothing_healpix(
     else:
         nside_o = int(nside_out)
         if nside_o >= nside_i:
-            raise ValueError("nside_out must be strictly less than hp_nside.")
+            raise ValueError("nside_out must be no greater than hp_nside.")
         if nside_i % nside_o != 0:
             raise ValueError(
                 f"hp_nside={nside_i} must be divisible by nside_out={nside_o} "

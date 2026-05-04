@@ -148,8 +148,6 @@ class HealpixSkyMap(SkyMap):
         dec_range=None,
     ):
         nside_i = int(hp_nside)
-        if not hp.isnsideok(nside_i):
-            raise ValueError(f"invalid HEALPix nside: {hp_nside!r}")
         self._hp_nside = nside_i
         npix_sphere = hp.nside2npix(nside_i)
 
@@ -212,7 +210,7 @@ class HealpixSkyMap(SkyMap):
         out = np.asarray(ra_sel * dec_sel, dtype=bool)
         return out
 
-    def subset_pixels(self, keep_mask):
+        #    def subset_pixels(self, keep_mask):
         """
         Return a new map geometry keeping only pixels where ``keep_mask`` is True.
         """

@@ -259,7 +259,9 @@ def plot_map_wcs(
         map_in[map_in < vmin] = vmin
     if ZeroCentre == True:
         divnorm = colors.TwoSlopeNorm(
-            vmin=np.min(map_in), vcenter=0, vmax=np.max(map_in)
+            vmin=np.nanmin(map_in) if vmin is None else vmin,
+            vcenter=0,
+            vmax=np.nanmax(map_in) if vmax is None else vmax,
         )
         cmap = copy.copy(matplotlib.cm.get_cmap("seismic"))
         cmap.set_bad(color="grey")
@@ -326,14 +328,14 @@ def plot_map_healpix(
     Parameters
     ----------
     map_plot : ndarray
-        Length ``n_pix``, or ``(n_pix, n_chan)`` / ``(nx, ny, n_chan)``. Multiple channels are
-        averaged along the line-of-sight (last axis), like :func:`plot_map_wcs`.
+        Length ``n_pix`` or ``(n_pix, n_chan)``. If 2D, channels are averaged along
+        the last axis before plotting.
     pixel_id : ndarray
         HEALPix indices (RING, ``nest=False``), same length as the flattened map.
     hp_nside : int
         :math:`N_{side}` of the map.
     W : ndarray, optional
-        Sampling weights; same shape rules as ``map_plot``.
+        Sampling weights; same shape as ``map_plot``.
     ra_range : tuple of float, optional
         ``(ra_min, ra_max)`` in degrees for ``lonra`` (full sphere allowed). Default: from data.
     dec_range : tuple of float, optional
@@ -372,25 +374,15 @@ def plot_map_healpix(
     map_in = np.asarray(map_plot, dtype=float).copy()
     if W is not None:
         W = np.asarray(W, dtype=float).copy()
-    # Same intent as plot_map_wcs: average over frequency / LOS on the last axis.
-    # HEALPix cubes are typically (n_pix, n_chan); WCS uses (nx, ny, n_chan).
-    if map_in.ndim == 3:
+    # HEALPix map is sparse over pixels: allow (n_pix,) or (n_pix, n_chan).
+    if map_in.ndim == 2:
         map_in = np.mean(map_in, axis=-1)
         if W is not None:
             W = np.mean(W, axis=-1)
-    elif map_in.ndim == 2:
-        if map_in.shape[-1] > 1:
-            map_in = np.mean(map_in, axis=-1)
-            if W is not None:
-                W = np.mean(W, axis=-1)
-        else:
-            map_in = map_in[:, 0]
-            if W is not None:
-                W = W[:, 0]
-    if map_in.ndim != 1:
+    elif map_in.ndim != 1:
         raise ValueError(
-            "HEALPix plot expects a 1D map or a cube with LOS/frequency on the last "
-            f"axis (after averaging); got shape {map_plot.shape}."
+            "HEALPix plot expects map_plot shape (n_pix,) or (n_pix, n_chan); "
+            f"got {map_plot.shape}."
         )
     pid = np.asarray(pixel_id, dtype=np.int64).ravel()
     if map_in.size != pid.size:

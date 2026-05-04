@@ -14,6 +14,7 @@ from meer21cm.util import (
 from meer21cm.telescope import dish_beam_sigma
 from meer21cm.skymap import HealpixSkyMap
 import healpy as hp
+from meer21cm.telescope import weighted_smoothing_healpix
 
 
 def test_nu_range():
@@ -120,15 +121,15 @@ def test_healpix_spec_mutually_exclusive_skymap_and_hp():
 
 def test_wcs_spec_has_no_hp_nside_or_pixel_id(test_wproj):
     spec = Specification(wproj=test_wproj, num_pix_x=4, num_pix_y=4)
-    with pytest.raises(AttributeError):
+    with pytest.raises(KeyError):
         _ = spec.hp_nside
-    with pytest.raises(AttributeError):
+    with pytest.raises(KeyError):
         _ = spec.pixel_id
 
 
-def test_healpix_spec_has_no_wproj(test_wproj):
+def test_healpix_spec_has_no_wproj():
     spec = Specification(hp_nside=8, ra_range=(0, 10), dec_range=(-5, 5))
-    with pytest.raises(AttributeError):
+    with pytest.raises(KeyError):
         _ = spec.wproj
 
 
@@ -422,6 +423,26 @@ def test_convolve_data_healpix(beam_model):
         assert np.abs((data_max2 / data_max - theo_beam) / theo_beam) < 0.1
 
 
+def test_beam_convolve_input_sigma():
+    sigma_beam_ch = 0.4
+    spec = Specification(
+        hp_nside=128,
+        ra_range=(190, 230),
+        dec_range=(-5, 15),
+        sigma_beam_ch=sigma_beam_ch,
+    )
+    beam_window_ch = spec.get_beam_window_ch(cache=False)[0]
+    weighted_smoothing_healpix(
+        spec.data,
+        spec.w_HI,
+        beam_window_ch,
+        spec.hp_nside,
+        spec.pixel_id,
+        nside_out=64,
+        pixel_id_out=np.array([0, 13], dtype=np.int64),
+    )
+
+
 def test_convolve_data_healpix_harmonic():
     """Harmonic smoothing path: ``convolve_data(None)``, no raster kernel."""
     nu = np.linspace(975e6, 1025e6, 6)
@@ -539,3 +560,83 @@ def test_check_is_map_noiselike_using_pca():
         noise_var,
         rtol=1e-1,
     )
+
+
+def test_init_skymap():
+    skymap = HealpixSkyMap(128, pixel_id=np.array([0, 13], dtype=np.int64))
+    pixel_id = np.array([0, 1])
+    with pytest.raises(
+        ValueError,
+        match="healpix_pixel_id is invalid when passing skymap; set pixel_id on HealpixSkyMap instead.",
+    ):
+        Specification(skymap=skymap, healpix_pixel_id=pixel_id)
+    with pytest.raises(
+        ValueError,
+        match="healpix_pixel_id requires hp_nside or pass skymap=HealpixSkyMap(...).",
+    ):
+        Specification(healpix_pixel_id=pixel_id)
+    with pytest.raises(KeyError, match="num_pix_x is only defined for WCS sky maps."):
+        sp = Specification(hp_nside=128, num_pix_x=100)
+        sp.num_pix_x
+    with pytest.raises(KeyError, match="num_pix_y is only defined for WCS sky maps."):
+        sp = Specification(hp_nside=128, num_pix_y=100)
+        sp.num_pix_y
+    with pytest.raises(
+        KeyError, match="hp_nside is only defined for HEALPix sky maps."
+    ):
+        sp = Specification(num_pix_x=100, num_pix_y=100)
+        sp.hp_nside
+    with pytest.raises(
+        KeyError, match="pixel_id is only defined for HEALPix sky maps."
+    ):
+        sp = Specification(num_pix_x=100, num_pix_y=100)
+        sp.pixel_id
+
+
+def test_get_beam_window_ch():
+    sp = Specification(hp_nside=32, ra_range=(40, 50), dec_range=(0, 5))
+    assert sp.get_beam_window_ch() is None
+    sp.sigma_beam_ch = 0.5
+    bw = sp.get_beam_window_ch(lmax=100)
+    sp.get_beam_window_ch(cache=True)
+    previous_beam = sp.beam_window_ch
+    # hack a wrong beam window
+    sp._beam_window_ch = np.zeros_like(previous_beam)
+    assert not np.allclose(sp.get_beam_window_ch(cache=True), previous_beam)
+    sp = Specification(
+        hp_nside=32, ra_range=(40, 50), dec_range=(0, 5), sigma_beam_ch=0.5
+    )
+    with pytest.raises(
+        ValueError, match="data shape .* does not match weights shape .*"
+    ):
+        sp._convolve_data_healpix_harmonic(
+            [0],
+            [0, 1],
+        )
+    with pytest.raises(
+        ValueError,
+        match=r"HEALPix map cubes must have shape \(n_pix, n_ch\); got .*. Use self.data ordering for the LOS axis",
+    ):
+        sp._convolve_data_healpix_harmonic(
+            [0, 1],
+            [0, 1],
+        )
+    with pytest.raises(
+        ValueError, match=r"data axis 0 .* must equal len\(self.pixel_id\) .*."
+    ):
+        sp._convolve_data_healpix_harmonic(
+            [[0, 1]],
+            [[0, 1]],
+        )
+
+
+def test_partial_beam_ch():
+    sp = Specification(
+        hp_nside=32, ra_range=(40, 50), dec_range=(0, 5), sigma_beam_ch=0.5
+    )
+    bw = sp.beam_window_ch[0]
+    bw2 = sp.get_beam_window_ch(cache=False, ch_sel=[0])
+    sp = Specification(band="L", survey="meerklass_2021", sigma_beam_ch=0.5)
+    bw3 = sp.beam_image[:, :, 0]
+    bw4 = sp.get_beam_image(cache=False, ch_sel=[0])[:, :, 0]
+    assert np.allclose(bw3, bw4)

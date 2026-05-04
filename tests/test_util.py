@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from astropy.cosmology import Planck18, WMAP1
 from meer21cm.util import *
-from meer21cm.util import _ra_range_is_subset_of
+from meer21cm.util import _ra_range_is_subset_of, _map_los_matrix_form
 import sys
 from scipy.special import erf
 from halomod import TracerHaloModel
@@ -481,3 +481,10 @@ def test_convert_hpmap_in_jy_to_temp():
     # just test invoke
     hpmap = np.zeros(hp.nside2npix(128))
     convert_hpmap_in_jy_to_temp(hpmap, 1e8)
+
+
+def test_map_los_array_shape():
+    test_arr = np.ones((4, 5))
+    los_axis = -3  # wrong axis
+    with pytest.raises(ValueError, match="los_axis .* out of range"):
+        _map_los_matrix_form(test_arr, los_axis)

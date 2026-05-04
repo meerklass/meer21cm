@@ -3527,7 +3527,6 @@ class PowerSpectrum(FieldPowerSpectrum, ModelPowerSpectrum):
                 mask=mask,
                 los_sel=los_sel,
             )
-        raise ValueError(f"Unsupported skymap format {fmt!r}.")
 
     def gen_random_poisson_galaxy(self, sel=None, num_g_rand=None, seed=None):
         """

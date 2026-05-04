@@ -1201,3 +1201,10 @@ def test_grid_field_to_sky_map_healpix(average):
         test_arr = mock.data / np.sqrt(counts)
     assert np.abs(np.std(test_arr) - 1) < 1e-2
     assert np.abs(np.mean(test_arr**2) - 1) < 1e-2
+    # test raise shape error
+    if average:
+        bad_field = np.zeros((mock.box_ndim[0], mock.box_ndim[1], mock.box_ndim[2] + 1))
+        with pytest.raises(
+            ValueError, match="field shape .* does not match expected shape"
+        ):
+            mock.grid_field_to_sky_map(bad_field)
