@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 from meer21cm.plot import plot_map
 from meer21cm.util import create_wcs, redshift_to_freq
 from astropy.cosmology import Planck18
+from scipy.interpolate import interp1d
+from meer21cm.telescope import dish_beam_sigma
+from meer21cm import MockSimulation
+import scipy.signal.windows as windows
 
 num_pix_x = 120
 num_pix_y = 40
@@ -33,7 +37,7 @@ dndz_data = np.load("LRGELG_dndz.npz")
 z_bin = dndz_data["z_bin"]
 z_count = dndz_data["z_count"]
 z_cen = (z_bin[:-1] + z_bin[1:]) / 2
-dV_arr = Planck18.differential_comoving_volume(z_cen)
+dV_arr = Planck18.differential_comoving_volume(z_cen).value
 
 # LRG3, DESI DR1
 # n_gal = 859824 / 5 / 1e9 #Mpc-3
@@ -43,6 +47,24 @@ n_gal = 771875 / 4 / 1e9  # Mpc-3
 k1dbins = np.linspace(0.003, 0.2, 25)[1:]
 kperpbins = np.linspace(0, 0.048, 17)[2:]
 kparabins = np.linspace(0, 0.5, 51)
+window_name = "blackmanharris"
+
+z_func = interp1d(
+    z_cen, z_count / dV_arr, kind="linear", bounds_error=False, fill_value=0
+)
+sigma_beam_ch = dish_beam_sigma(13.5, nu_arr)
+
+hi_bias = 1.0
+gal_bias = 1.0
+sigma_v_hi = 100
+sigma_v_gal = 100
+omega_hi = 5e-4
+
+grid_scheme = "cic"
+sim_upres_transverse = 1 / 2
+sim_upres_radial = 1 / 2
+ps_downres_transverse = 3
+ps_downres_radial = 6
 
 
 def plot_cy_power(xbins, ybins, pdatacy, pmodcy, vmin_ratio, vmax_ratio):
@@ -110,10 +132,7 @@ def plot_1d_power(
         label="mock",
     )
     axes[0].plot(keff, pmodd * keff, label="model", ls="--")
-    axes[0].set_ylim(
-        np.nanmin(pmodd * keff) * 0.7, 
-        np.nanmax(pmodd * keff) * 1.2
-    )
+    axes[0].set_ylim(np.nanmin(pmodd * keff) * 0.7, np.nanmax(pmodd * keff) * 1.2)
     axes[0].legend()
     axes[1].errorbar(
         keff,
@@ -132,3 +151,25 @@ def plot_1d_power(
     axes[1].set_ylim(ratio_min, ratio_max)
     axes[1].legend()
     return fig
+
+
+def get_mock(seed):
+    mock = MockSimulation(
+        wproj=wcs,
+        num_pix_x=num_pix_x,
+        num_pix_y=num_pix_y,
+        ra_range=ra_range,
+        dec_range=dec_range,
+        nu=nu_arr,
+        discrete_source_dndz=z_func,
+        seed=seed,
+        tracer_bias_2=gal_bias,
+        tracer_bias_1=hi_bias,
+        mean_amp_1="average_hi_temp",
+        omega_hi=omega_hi,
+        # sigma_beam_ch=sigma_beam_ch,
+        sigma_v_1=sigma_v_hi,
+        sigma_v_2=sigma_v_gal,
+    )
+    mock.taper_func = getattr(windows, window_name)
+    return mock

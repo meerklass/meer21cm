@@ -13,32 +13,12 @@ import scipy.signal.windows as windows
 def get_3d_power(
     seed,
 ):
-    # z_count is in redshift bins, convert to Mpc-3 unit
-    z_func = interp1d(
-        z_cen, z_count / dV_arr, kind="linear", bounds_error=False, fill_value=0
-    )
-    mock = MockSimulation(
-        wproj=wcs,
-        num_pix_x=num_pix_x,
-        num_pix_y=num_pix_y,
-        ra_range=ra_range,
-        dec_range=dec_range,
-        nu=nu_arr,
-        discrete_source_dndz=z_func,
-        seed=seed,
-        tracer_bias_2=1.0,
-        tracer_bias_1=1.0,
-        mean_amp_1="average_hi_temp",
-        omega_hi=5e-4,
-        sigma_v_1=100,
-        sigma_v_2=100,
-    )
+    mock = get_mock(seed)
     num_gal = int(mock.survey_volume * n_gal)
     mock.num_discrete_source = num_gal
     mock.get_enclosing_box()
     mock.field_1 = mock.mock_tracer_field_1
     mock.weights_1 = np.ones_like(mock.field_1)
-    mock.taper_func = windows.tukey
     mock.apply_taper_to_field(1, axis=[0, 1, 2])
     pdata3d = mock.auto_power_3d_1
     phimod3d = mock.auto_power_tracer_1_model
