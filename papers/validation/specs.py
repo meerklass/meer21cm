@@ -61,7 +61,7 @@ sigma_v_hi = 100
 sigma_v_gal = 100
 omega_hi = 5e-4
 
-grid_scheme = "cic"
+grid_scheme = "tsc"
 sim_upres_transverse = 1 / 2
 sim_upres_radial = 1 / 2
 ps_downres_transverse = 3
@@ -69,6 +69,9 @@ ps_downres_radial = 6
 
 # number of foregrounds removed
 N_fg = 5
+
+# reduce memory and slightly increase runtime
+num_batch = 3
 
 
 def plot_cy_power(xbins, ybins, pdatacy, pmodcy, vmin_ratio, vmax_ratio):
@@ -174,6 +177,7 @@ def get_mock(seed):
         # sigma_beam_ch=sigma_beam_ch,
         sigma_v_1=sigma_v_hi,
         sigma_v_2=sigma_v_gal,
+        num_batch=num_batch,
     )
     mock.taper_func = getattr(windows, window_name)
     return mock

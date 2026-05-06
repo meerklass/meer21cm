@@ -26,6 +26,7 @@ fg_map = np.load("fg_map.npy")
 
 def get_3d_power(seed):
     mock = get_mock(seed)
+    mock.sigma_beam_ch = sigma_beam_ch
     num_gal = int(mock.survey_volume * n_gal)
     mock.num_discrete_source = num_gal
     # remove buffer for a bigger simulation box
@@ -59,7 +60,7 @@ def get_3d_power(seed):
     mock.include_beam = [True, False]
     mock.field_2 = galmap_rg
     mock.weights_field_2 = dndz_box
-    mock.weights_grid_2 = ((dndz_box * mock.counts_in_box) > 0).astype("float")
+    mock.weights_grid_2 = ((dndz_box > 0) * mock.counts_in_box).astype("float")
     mock.apply_taper_to_field(2, axis=[0, 1, 2])
     shot_noise = get_shot_noise_galaxy(
         galmap_rg,
@@ -110,7 +111,7 @@ def get_3d_power(seed):
     mock.apply_taper_to_field(1, axis=[0, 1, 2])
     mock.field_2 = galmap_rg
     mock.weights_field_2 = dndz_box
-    mock.weights_grid_2 = ((dndz_box * mock.counts_in_box) > 0).astype("float")  # test2
+    mock.weights_grid_2 = ((dndz_box > 0) * mock.counts_in_box).astype("float")
     mock.apply_taper_to_field(2, axis=[0, 1, 2])
     phiclean3d = mock.auto_power_3d_1
     pxclean3d = mock.cross_power_3d
@@ -131,5 +132,6 @@ def get_3d_power(seed):
 
 if __name__ == "__main__":
     # run the simulations
-    with Pool(10) as p:
+    with Pool(8) as p:
         p.map(get_3d_power, range(512))
+    # get_3d_power(0)
