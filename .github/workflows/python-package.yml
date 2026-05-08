@@ -20,20 +20,32 @@ jobs:
         fetch-depth: 0
     - name: Checkout PR head commit (not merge commit)
       if: github.event_name == 'pull_request'
-      run: |
-        git checkout --detach "${{ github.event.pull_request.head.sha }}"
-        git fetch --depth=2 origin "${{ github.event.pull_request.head.sha }}"
-    - name: Detect code-impacting files in latest commit
+      run: git checkout --detach "${{ github.event.pull_request.head.sha }}"
+    - name: Detect code-impacting files since last test coverage check
       id: detect
       run: |
-        if ! git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-          echo "No parent commit available; run tests for safety."
-          echo "code_changed=true" >> "$GITHUB_OUTPUT"
-          exit 0
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          # PR: diff all commits in the PR against the base branch
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          echo "PR event: checking all changes since base commit $BASE_SHA"
+          files=$(git diff --name-only "$BASE_SHA" HEAD)
+        else
+          # Push to main: diff all commits in the push
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.event.after }}"
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            echo "Push event: checking changes from $BEFORE to $AFTER"
+            files=$(git diff --name-only "$BEFORE" "$AFTER")
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            files=$(git diff --name-only HEAD^ HEAD)
+          else
+            echo "No parent commit available; run tests for safety."
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
         fi
 
-        files=$(git diff --name-only HEAD^ HEAD)
-        echo "Files changed in latest commit:"
+        echo "Files changed:"
         echo "$files"
 
         code_changed=false

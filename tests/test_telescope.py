@@ -5,6 +5,7 @@ from astropy.cosmology import Planck18
 from meer21cm.util import f_21
 from meer21cm import Specification
 from astropy.wcs.utils import proj_plane_pixel_area
+import pytest
 
 
 def test_cos_beam():
@@ -98,3 +99,75 @@ def test_galaxy_temperature():
     assert np.allclose(tgal, np.zeros_like(tgal))
     tgal = galaxy_temperature(nu, sp_indx=-1)
     assert np.allclose(tgal, 25 * (408 * 1e6 / nu))
+
+
+def test_healpix_beam_window():
+    with pytest.raises(ValueError, match="theta_grid must start at 0."):
+        isotropic_beam_window(
+            gaussian_beam(1), 1, 100, theta_grid=np.linspace(1, 100, 100)
+        )
+    with pytest.raises(ValueError, match="nside_out must be no greater than hp_nside."):
+        weighted_smoothing_healpix(None, None, None, 128, None, nside_out=256)
+    with pytest.raises(
+        ValueError,
+        match=r"hp_nside=.* must be divisible by nside_out=.* \(standard HEALPix downgrade\).",
+    ):
+        weighted_smoothing_healpix(None, None, None, 128, None, nside_out=60)
+    with pytest.raises(
+        ValueError,
+        match=r"data_pix and weights_pix must be 2D arrays of shape \(n_pix, n_ch\); got .* and .*.",
+    ):
+        weighted_smoothing_healpix(
+            [0, 1],
+            [0, 1],
+            None,
+            128,
+            [0, 1],
+        )
+    with pytest.raises(ValueError, match=r"data/weights shape mismatch: .* vs .*."):
+        weighted_smoothing_healpix(
+            [[0, 1]],
+            [[0, 1, 2]],
+            None,
+            128,
+            [0, 1],
+        )
+    with pytest.raises(
+        ValueError, match=r"pixel_id length .* does not match n_pix=.*."
+    ):
+        weighted_smoothing_healpix(
+            [[0, 1]],
+            [[0, 1]],
+            None,
+            128,
+            [0, 1, 2],
+        )
+    with pytest.raises(
+        ValueError,
+        match="pixel_id_out is required when nside_out is less than hp_nside.",
+    ):
+        weighted_smoothing_healpix(
+            [[0], [1]], [[0], [1]], None, 128, [0, 1], nside_out=64
+        )
+    with pytest.raises(ValueError, match="beam_window_ch must be 1D or 2D."):
+        weighted_smoothing_healpix(
+            [[0], [1]],
+            [[0], [1]],
+            np.ones((1, 1, 1)),
+            128,
+            [0, 1],
+            nside_out=64,
+            pixel_id_out=[0, 1],
+        )
+    with pytest.raises(
+        ValueError, match=r"beam_window_ch first axis must equal n_ch=.*; got .*."
+    ):
+        weighted_smoothing_healpix(
+            [[0], [1]],
+            [[0], [1]],
+            np.ones((2, 100)),
+            128,
+            [0, 1],
+            nside_out=64,
+            pixel_id_out=[0, 1],
+        )

@@ -10,7 +10,6 @@ import numpy as np
 from astropy.io import fits
 from .util import (
     check_unit_equiv,
-    get_wcs_coor,
     freq_to_redshift,
     f_21,
     center_to_edges,
@@ -34,6 +33,7 @@ from astropy.wcs.utils import proj_plane_pixel_area
 from itertools import chain
 from . import telescope
 from .telescope import *
+from .skymap import HealpixSkyMap, WcsSkyMap
 import meer21cm
 import logging
 import numbers
@@ -76,9 +76,16 @@ class Specification:
     wproj: :py:class:`astropy.wcs.WCS`, default None
         The WCS object for the map.
     num_pix_x: int, default None
-        The number of pixels in the first axis of the map data.
+        The number of pixels in the first axis of the map data (WCS only).
     num_pix_y: int, default None
-        The number of pixels in the second axis of the map data.
+        The number of pixels in the second axis of the map data (WCS only).
+    hp_nside: int, default None
+        HEALPix :math:`N_{side}`. Implies sparse ``(n_pix, n_chan)`` layout via
+        :class:`HealpixSkyMap`. Incompatible with predefined ``survey``/``band`` maps.
+        Mutually exclusive with passing ``skymap``.
+    healpix_pixel_id: array-like, default None
+        Optional explicit sparse pixel indices at ``hp_nside`` (RING, ``nest=False``).
+        If omitted, pixels are derived from ``ra_range`` and ``dec_range``.
     map_has_sampling: np.ndarray, default None
         A binary window for whether a pixel has been sampled.
     sigma_beam_ch: np.ndarray, default None
@@ -157,6 +164,11 @@ class Specification:
     batch_number: int, default 1
         Number of sequential batches used by various routines.
         A value of 1 means no batching.
+    skymap: :class:`~meer21cm.skymap.SkyMap`, default None
+        Injected angular geometry (:class:`~meer21cm.skymap.WcsSkyMap` or
+        :class:`~meer21cm.skymap.HealpixSkyMap`). Mutually exclusive with ``hp_nside``.
+    b_ell_l_max: int, default 8192
+        The maximum multipole for the beam window function for healpix map smoothing.
     """
 
     def __init__(
@@ -196,6 +208,10 @@ class Specification:
         auto_set_radecnu_bounds=True,
         precision=True,
         batch_number=1,
+        skymap=None,
+        hp_nside=None,
+        healpix_pixel_id=None,
+        b_ell_l_max=8192,
         **kwparams,
     ):
         self.survey = survey
@@ -213,6 +229,11 @@ class Specification:
             num_pix_x = default_num_pix_x[spec_key]
             num_pix_y = default_num_pix_y[spec_key]
             wproj = default_wproj[spec_key]
+        if spec_key in default_nu.keys() and hp_nside is not None:
+            raise ValueError(
+                "Predefined survey/band grids are WCS-only; omit hp_nside when using "
+                "survey=... and band=..., or use a non-default survey/band key."
+            )
         self.dependency_dict = find_property_with_tags(self)
         funcs = list(chain.from_iterable(list(self.dependency_dict.values())))
         for func_i in np.unique(np.array(funcs)):
@@ -251,40 +272,63 @@ class Specification:
             self.nu = nu
         self.nu_min = nu_min
         self.nu_max = nu_max
-        if num_pix_x is None:
-            num_pix_x = 3
-        if num_pix_y is None:
-            num_pix_y = 3
-        if wproj is None:
-            wproj = create_wcs(0.0, 0.0, [num_pix_x, num_pix_y], 1.0)
+        self.ra_range = ra_range
+        self.dec_range = dec_range
 
-        self.wproj = wproj
-        self.num_pix_x = num_pix_x
-        self.num_pix_y = num_pix_y
+        if hp_nside is not None and skymap is not None:
+            raise ValueError("pass only one of skymap or hp_nside.")
+        if skymap is not None and healpix_pixel_id is not None:
+            raise ValueError(
+                "healpix_pixel_id is invalid when passing skymap; set pixel_id on "
+                "HealpixSkyMap instead."
+            )
+        if healpix_pixel_id is not None and hp_nside is None and skymap is None:
+            raise ValueError(
+                "healpix_pixel_id requires hp_nside or pass skymap=HealpixSkyMap(...)."
+            )
+        if hp_nside is not None:
+            self.skymap = HealpixSkyMap(
+                hp_nside,
+                pixel_id=None
+                if healpix_pixel_id is None
+                else np.asarray(healpix_pixel_id, dtype=np.int64),
+                ra_range=self.ra_range if healpix_pixel_id is None else None,
+                dec_range=self.dec_range if healpix_pixel_id is None else None,
+            )
+        elif skymap is not None:
+            self.skymap = skymap
+        else:
+            if num_pix_x is None:
+                num_pix_x = 3
+            if num_pix_y is None:
+                num_pix_y = 3
+            if wproj is None:
+                wproj = create_wcs(0.0, 0.0, [num_pix_x, num_pix_y], 1.0)
+            self.skymap = WcsSkyMap(
+                wproj=wproj,
+                num_pix_x=num_pix_x,
+                num_pix_y=num_pix_y,
+            )
         self.sigma_beam_ch = sigma_beam_ch
         self.beam_unit = beam_unit
         if map_has_sampling is None:
             map_has_sampling = np.ones(
-                (num_pix_x, num_pix_y, len(self.nu)), dtype="bool"
+                self.skymap.map_shape_template + (len(self.nu),), dtype="bool"
             )
-            map_has_sampling[0] = False
-            map_has_sampling[-1] = False
-            map_has_sampling[:, 0] = False
-            map_has_sampling[:, -1] = False
+            if self.skymap.format == "wcs":
+                map_has_sampling[0] = False
+                map_has_sampling[-1] = False
+                map_has_sampling[:, 0] = False
+                map_has_sampling[:, -1] = False
         self.map_has_sampling = map_has_sampling
         self.map_unit = map_unit
         self.map_unit_type
-        xx, yy = np.meshgrid(np.arange(num_pix_x), np.arange(num_pix_y), indexing="ij")
-        # the coordinates of each pixel in the map
-        self._ra_map, self._dec_map = get_wcs_coor(wproj, xx, yy)
         self.__dict__.update(kwparams)
         self.filter_map_los = filter_map_los
         self.soft_filter_los = soft_filter_los
         self.filter_los_threshold = filter_los_threshold
         self.gal_file = gal_file
         self.weighting = weighting
-        self.ra_range = ra_range
-        self.dec_range = dec_range
         self._sigma_beam_ch_in_mpc = None
         if data is None:
             data = np.zeros(self.map_has_sampling.shape, dtype=self.real_dtype)
@@ -293,10 +337,11 @@ class Specification:
             weights_map_pixel = np.ones(
                 self.map_has_sampling.shape, dtype=self.real_dtype
             )
-            weights_map_pixel[0] = 0.0
-            weights_map_pixel[-1] = 0.0
-            weights_map_pixel[:, 0] = 0.0
-            weights_map_pixel[:, -1] = 0.0
+            if self.skymap.format == "wcs":
+                weights_map_pixel[0] = 0.0
+                weights_map_pixel[-1] = 0.0
+                weights_map_pixel[:, 0] = 0.0
+                weights_map_pixel[:, -1] = 0.0
         self.weights_map_pixel = weights_map_pixel
         if counts is None:
             counts = np.ones(self.map_has_sampling.shape, dtype=self.real_dtype)
@@ -305,6 +350,7 @@ class Specification:
         self.beam_type = None
         self.beam_model = beam_model
         self._beam_image = None
+        self._beam_window_ch = None
         self._z_as_func_of_comov_dist = None
         self.z_interp_max = z_interp_max
         self.data_column = data_column
@@ -312,6 +358,15 @@ class Specification:
         self.freq_column = freq_column
         self.wcs_column = wcs_column
         self.auto_set_radecnu_bounds = auto_set_radecnu_bounds
+        self.b_ell_l_max = b_ell_l_max
+
+    def _set_wcs_skymap(self, wproj, num_pix_x, num_pix_y):
+        """Reset the WCS skymap backend while preserving WCS-only behavior."""
+        self.skymap = WcsSkyMap(
+            wproj=wproj,
+            num_pix_x=num_pix_x,
+            num_pix_y=num_pix_y,
+        )
 
     def set_radecnu_bounds_from_map(self):
         """
@@ -389,6 +444,65 @@ class Specification:
         """Number of sequential batches used by gridding routines."""
         return self._batch_number
 
+    def _iter_last_axis_batches(self, axis_size):
+        """
+        Split ``axis_size`` into ``batch_number`` index ranges along one axis.
+
+        Used for chunked channel-wise convolution / smoothing etc. Always returns
+        at least one non-empty batch so ``batch_number=1`` matches the unified
+        code path used for ``batch_number>1``.
+        """
+        n = int(axis_size)
+        all_indx = np.arange(n, dtype=int)
+        return [
+            sel for sel in np.array_split(all_indx, self.batch_number) if sel.size > 0
+        ]
+
+    def _iter_field_los_chunks(self, arr):
+        """
+        Yield ``(los_sel, arr[..., los_sel])`` along the last axis.
+
+        Works for box fields ``(nx, ny, n_z)``, WCS map cubes ``(nx, ny, n_ch)``,
+        and HEALPix cubes ``(n_pix, n_ch)``.
+        """
+        for sel in self._iter_last_axis_batches(arr.shape[-1]):
+            yield sel, arr[..., sel]
+
+    @property
+    def wproj(self):
+        """The WCS projection object for the map geometry."""
+        if self.skymap.format != "wcs":
+            raise KeyError("wproj is only defined for WCS sky maps.")
+        return self.skymap.wproj
+
+    @property
+    def num_pix_x(self):
+        """The number of pixels along the first map axis."""
+        if self.skymap.format != "wcs":
+            raise KeyError("num_pix_x is only defined for WCS sky maps.")
+        return self.skymap.num_pix_x
+
+    @property
+    def num_pix_y(self):
+        """The number of pixels along the second map axis."""
+        if self.skymap.format != "wcs":
+            raise KeyError("num_pix_y is only defined for WCS sky maps.")
+        return self.skymap.num_pix_y
+
+    @property
+    def hp_nside(self):
+        """HEALPix :math:`N_{side}` for HEALPix-backed specifications."""
+        if self.skymap.format != "healpix":
+            raise KeyError("hp_nside is only defined for HEALPix sky maps.")
+        return self.skymap.hp_nside
+
+    @property
+    def pixel_id(self):
+        """Sparse HEALPix pixel indices (RING, ``nest=False``)."""
+        if self.skymap.format != "healpix":
+            raise KeyError("pixel_id is only defined for HEALPix sky maps.")
+        return self.skymap.pixel_id
+
     @property
     def beam_type(self):
         """
@@ -417,6 +531,7 @@ class Specification:
             raise ValueError(f"{value} is not a beam model")
         self._beam_model = value
         self.beam_type = getattr(telescope, value + "_beam").tags[0]
+        self._beam_window_ch = None
         if "beam_dep_attr" in dir(self):
             self.clean_cache(self.beam_dep_attr)
 
@@ -448,6 +563,7 @@ class Specification:
         elif value is not None:
             value = np.asarray(value, dtype=self.real_dtype)
         self._sigma_beam_ch = value
+        self._beam_window_ch = None
         if "beam_dep_attr" in dir(self):
             self.clean_cache(self.beam_dep_attr)
 
@@ -529,14 +645,14 @@ class Specification:
         """
         angular area of the map pixel in deg^2
         """
-        return proj_plane_pixel_area(self.wproj)
+        return self.skymap.pixel_area
 
     @property
     def pix_resol(self):
         """
         angular resolution of the map pixel in deg
         """
-        return np.sqrt(self.pixel_area)
+        return self.skymap.pix_resol
 
     @property
     def data(self):
@@ -578,14 +694,14 @@ class Specification:
         """
         The right ascension of each pixel in the map.
         """
-        return self._ra_map
+        return self.skymap.ra_map
 
     @property
     def dec_map(self):
         """
         The declination of each pixel in the map.
         """
-        return self._dec_map
+        return self.skymap.dec_map
 
     @property
     def weights_map_pixel(self):
@@ -687,10 +803,10 @@ class Specification:
             self.data,
             self.counts,
             self.map_has_sampling,
-            self._ra_map,
-            self._dec_map,
+            _ra_map,
+            _dec_map,
             self.nu,
-            self.wproj,
+            wproj,
         ) = read_pickle(
             self.pickle_file,
             nu_min=self.nu_min,
@@ -701,7 +817,11 @@ class Specification:
             freq_column=self.freq_column,
             wcs_column=self.wcs_column,
         )
-        self.num_pix_x, self.num_pix_y = self._ra_map.shape
+        self._set_wcs_skymap(
+            wproj=wproj,
+            num_pix_x=_ra_map.shape[0],
+            num_pix_y=_ra_map.shape[1],
+        )
         if self.filter_map_los:
             print("filtering map los")
             (self.data, self.map_has_sampling, _, self.counts,) = filter_incomplete_los(
@@ -740,10 +860,10 @@ class Specification:
             self.data,
             self.counts,
             self.map_has_sampling,
-            self._ra_map,
-            self._dec_map,
+            _ra_map,
+            _dec_map,
             self.nu,
-            self.wproj,
+            wproj,
         ) = read_map(
             self.map_file,
             counts_file=self.counts_file,
@@ -752,7 +872,11 @@ class Specification:
             los_axis=self.los_axis,
             band=self.band,
         )
-        self.num_pix_x, self.num_pix_y = self._ra_map.shape
+        self._set_wcs_skymap(
+            wproj=wproj,
+            num_pix_x=_ra_map.shape[0],
+            num_pix_y=_ra_map.shape[1],
+        )
         if self.filter_map_los:
             (self.data, self.map_has_sampling, _, self.counts,) = filter_incomplete_los(
                 self.data,
@@ -777,14 +901,19 @@ class Specification:
         The map data and counts outside the range will be set to zero.
         The map_has_sampling and weights_map_pixel will be set to False outside the range.
         """
-        ra_range = np.array(self.ra_range)
-        dec_range = np.array(self.dec_range)
         logger.debug(
-            f"flagging map and weights outside ra_range: {ra_range}, dec_range: {dec_range}"
+            "flagging map and weights outside "
+            f"ra_range: {self.ra_range}, dec_range: {self.dec_range}"
         )
-        ra_sel = angle_in_range(self.ra_map, ra_range[0], ra_range[1])
-        dec_sel = (self.dec_map > dec_range[0]) * (self.dec_map < dec_range[1])
-        map_sel = (ra_sel * dec_sel)[:, :, None]
+        trim = np.asarray(
+            self.skymap.trim_selector(self.ra_range, self.dec_range), dtype=float
+        )
+        # if trim.shape != self.skymap.map_shape_template:
+        #    raise ValueError(
+        #        "trim_selector shape mismatch with map_shape_template: "
+        #        f"{trim.shape} vs {self.skymap.map_shape_template}."
+        #    )
+        map_sel = trim.reshape(trim.shape + (1,) * (self.data.ndim - trim.ndim))
         self.data = self.data * map_sel
         self.counts = self.counts * map_sel
         self.map_has_sampling = self.map_has_sampling * map_sel
@@ -865,13 +994,18 @@ class Specification:
             f"invoking {inspect.currentframe().f_code.co_name} to get the beam image"
         )
         logger.info(f"beam_type: {self.beam_type}, sigma_beam_ch: {self.sigma_beam_ch}")
+        if self.skymap.format != "wcs":
+            raise NotImplementedError(
+                "get_beam_image is implemented for WCS maps only; on HEALPix use "
+                "get_beam_window_ch for harmonic beam windows."
+            )
         if wproj is None:
             wproj = self.wproj
         if num_pix_x is None:
             num_pix_x = self.num_pix_x
         if num_pix_y is None:
             num_pix_y = self.num_pix_y
-        if ch_sel is None:
+        if ch_sel is None or np.allclose(ch_sel, np.arange(len(self.nu))):
             ch_sel = np.arange(len(self.nu), dtype=int)
             use_full_channels = True
         else:
@@ -914,37 +1048,201 @@ class Specification:
             self._beam_image = beam_image
         return beam_image
 
-    def convolve_data(self, kernel, data=None, weights=None, assign_to_self=True):
+    @property
+    @tagging("beam", "nu")
+    def beam_window_ch(self):
         """
-        convolve data with an input kernel, and
-        update the corresponding weights.
+        Per-channel spherical-harmonic beam window :math:`B_\\ell` for HEALPix
+        ``hp.smoothing`` workflows. Populated lazily via :meth:`get_beam_window_ch`.
+        """
+        if self._beam_window_ch is None:
+            self.get_beam_window_ch()
+        return self._beam_window_ch
+
+    def get_beam_window_ch(
+        self,
+        ch_sel=None,
+        cache=True,
+        lmax=None,
+        hp_nside=None,
+    ):
+        """
+        Build per-channel harmonic beam windows for HEALPix smoothing.
 
         Parameters
         ----------
-        kernel: np.ndarray
-            The kernel to convolve the data with.
-        data: np.ndarray, default None
-            The data to convolve. Default uses `self.data`.
-        weights: np.ndarray, default None
-            The weights to convolve the data with. Default uses `self.w_HI`.
-        assign_to_self: bool, default True
-            Whether to assign the convolved data and weights to `self.data` and `self.w_HI`.
-            If True, the convolved data and weights will be assigned to `self.data` and `self.w_HI`.
+        ch_sel : array-like of int, optional
+            Channel indices. If omitted, uses all ``len(self.nu)`` channels.
+        cache : bool, default True
+            Cache the full-channel result in ``_beam_window_ch`` when ``ch_sel``
+            spans all channels.
+        lmax : int, optional
+            Maximum multipole (inclusive). Defaults to ``min(3 * hp_nside - 1, 8192)``.
+        hp_nside : int, optional
+            HEALPix :math:`N_{\\rm side}` used to set the default ``lmax``. Defaults
+            to ``self.hp_nside``.
 
         Returns
         -------
-        data: np.ndarray
-            The convolved data.
-        weights: np.ndarray
-            The convolved weights.
+        ndarray of shape ``(len(ch_sel), lmax + 1)``
+            Beam window rows :math:`B_\\ell` per selected channel.
         """
-        logger.info(
-            f"invoking {inspect.currentframe().f_code.co_name} to convolve map data with kernel: {kernel}"
-        )
+        if self.sigma_beam_ch is None:
+            logger.info(
+                f"sigma_beam_ch is None, returning None for {inspect.currentframe().f_code.co_name}"
+            )
+            return None
+        if self.skymap.format != "healpix":
+            raise ValueError(
+                "get_beam_window_ch is only defined for healpix skymaps; "
+                "use get_beam_image on WCS."
+            )
+        if self.beam_type == "anisotropic":
+            raise NotImplementedError(
+                "HEALPix harmonic beam smoothing does not support anisotropic "
+                "(kat) beams."
+            )
+        if hp_nside is None:
+            hp_nside = int(self.hp_nside)
+        else:
+            hp_nside = int(hp_nside)
+        if lmax is None:
+            lmax = int(min(3 * hp_nside - 1, self.b_ell_l_max))
+        else:
+            lmax = int(lmax)
+
+        if ch_sel is None or np.allclose(ch_sel, np.arange(len(self.nu))):
+            ch_sel = np.arange(len(self.nu), dtype=int)
+            use_full_channels = True
+        else:
+            ch_sel = np.asarray(ch_sel, dtype=int)
+            use_full_channels = False
+
+        if (
+            use_full_channels
+            and cache
+            and self._beam_window_ch is not None
+            and self._beam_window_ch.shape == (len(self.nu), lmax + 1)
+        ):
+            return self._beam_window_ch
+
+        beam_model = getattr(telescope, self.beam_model + "_beam")
+        out = np.zeros((ch_sel.size, lmax + 1), dtype=np.float64)
+        for i_out, i_ch in enumerate(ch_sel):
+            sigma = self.sigma_beam_ch[i_ch]
+            sigma_rad = (sigma * self.beam_unit).to(units.rad).value
+            if self.beam_model == "gaussian":
+                out[i_out] = telescope.gaussian_beam_window(sigma_rad, lmax)
+            else:
+                beam_func = beam_model(sigma)
+                out[i_out] = telescope.isotropic_beam_window(
+                    beam_func, float(sigma_rad), lmax
+                )
+        if cache and use_full_channels:
+            self._beam_window_ch = out
+        return out
+
+    def _convolve_data_healpix_harmonic(self, data, weights):
+        """
+        HEALPix: weighted harmonic-space smoothing using :func:`weighted_smoothing_healpix`
+        and :meth:`get_beam_window_ch`.
+        """
+        data = np.asarray(data)
+        weights = np.asarray(weights)
+        if data.shape != weights.shape:
+            raise ValueError(
+                f"data shape {data.shape} does not match weights shape {weights.shape}."
+            )
+        pix_id = np.asarray(self.pixel_id, dtype=np.int64)
+        nside = int(self.hp_nside)
+        if data.ndim != 2:
+            raise ValueError(
+                "HEALPix map cubes must have shape (n_pix, n_ch); "
+                f"got {data.shape}. Use self.data ordering for the LOS axis."
+            )
+        if data.shape[0] != pix_id.size:
+            raise ValueError(
+                f"data axis 0 ({data.shape[0]}) must equal len(self.pixel_id) ({pix_id.size})."
+            )
+        fdtype = np.result_type(real_dtype_from_array(data), self.real_dtype)
+        conv_data = np.zeros_like(data, dtype=fdtype)
+        conv_weights = np.zeros_like(weights, dtype=fdtype)
+        for ch_sel, sl_d in self._iter_field_los_chunks(data):
+            beam_w = self.get_beam_window_ch(ch_sel=ch_sel, cache=False, hp_nside=nside)
+            sl_d = np.asarray(sl_d, dtype=fdtype)
+            sl_w = np.asarray(weights[..., ch_sel], dtype=fdtype)
+            cd, cw = telescope.weighted_smoothing_healpix(
+                sl_d,
+                sl_w,
+                beam_w,
+                nside,
+                pix_id,
+            )
+            conv_data[:, ch_sel] = cd
+            conv_weights[:, ch_sel] = cw
+        return conv_data, conv_weights
+
+    def convolve_data(self, kernel=None, data=None, weights=None, assign_to_self=True):
+        """
+        Convolve map data.
+
+        **WCS** maps use raster-space :func:`~meer21cm.telescope.weighted_convolution`
+        with a beam image kernel (e.g. from :meth:`beam_image`).
+
+        **HEALPix** maps ignore raster ``kernel`` and use harmonic
+        :func:`~meer21cm.telescope.weighted_smoothing_healpix` with per-channel beam
+        windows from :meth:`get_beam_window_ch` — pass ``kernel=None``.
+
+        Parameters
+        ----------
+        kernel : np.ndarray or None
+            Raster beam cube ``(..., nx, ny, n_ch)`` aligned with LOS on ``wcs``.
+            Ignored when ``kernel is None`` on HEALPix (then harmonic smoothing is applied).
+            On WCS maps, passing ``kernel=None`` raises ``ValueError`` (provide e.g.
+            ``self.beam_image``).
+        data : np.ndarray, default None
+            Map to convolve; default ``self.data``.
+        weights : np.ndarray, default None
+            Per-pixel weights (e.g. ``self.w_HI``); required semantics match ``data``.
+        assign_to_self : bool, default True
+            Assign results to ``self.data`` and ``self.w_HI``.
+
+        Returns
+        -------
+        data : np.ndarray
+        weights : np.ndarray
+        """
         if data is None:
             data = self.data
         if weights is None:
             weights = self.w_HI
+
+        if self.skymap.format == "healpix":
+            if kernel is not None:
+                raise ValueError(
+                    "HEALPix backend does not use a raster ``kernel``. "
+                    "Pass ``kernel=None`` to convolve with the harmonic beam windows "
+                    "from ``sigma_beam_ch`` / ``beam_model`` (see ``get_beam_window_ch``)."
+                )
+            logger.info(
+                f"invoking {inspect.currentframe().f_code.co_name} "
+                "(healpix harmonic weighted smoothing)"
+            )
+            conv_d, conv_w = self._convolve_data_healpix_harmonic(data, weights)
+            if assign_to_self:
+                self.data = conv_d
+                self.w_HI = conv_w
+            return conv_d, conv_w
+
+        if kernel is None:
+            raise ValueError(
+                "WCS ``convolve_data`` requires ``kernel`` (e.g. ``self.beam_image``)."
+            )
+
+        logger.info(
+            f"invoking {inspect.currentframe().f_code.co_name} "
+            f"with raster kernel shaped {np.shape(kernel)}"
+        )
         data, weights = telescope.weighted_convolution(
             data,
             kernel,
@@ -960,7 +1258,12 @@ class Specification:
         """
         Returns the index of the frequency channel with the maximum sampling on the sky map.
         """
-        return np.argmax(self.map_has_sampling.sum(axis=(0, 1)))
+        nd = self.map_has_sampling.ndim
+        la = self.los_axis
+        if la < 0:
+            la += nd
+        axes = tuple(i for i in range(nd) if i != la)
+        return np.argmax(self.map_has_sampling.sum(axis=axes))
 
     def get_weights_none_to_one(self, attr_name):
         """
@@ -1154,3 +1457,30 @@ class Specification:
         res_var = np.array(res_var)
         noise_var = np.array(noise_var) * sigma_N**2
         return res_var, noise_var
+
+    def generate_full_healpix_map(self, data=None, fill_value=np.nan):
+        """
+        Generate a full healpix map from the data.
+        Pixels not included in the data will be filled with the `fill_value` (default is `np.nan`).
+
+        Parameters
+        ----------
+        data: array, default None.
+            The data to be included in the full healpix map.
+            If None, the class attribute ``self.data`` will be used.
+        fill_value: float, default np.nan.
+            The value to fill the pixels not included in the data.
+
+        Returns
+        -------
+        full_healpix_map: array.
+            The full healpix map.
+        """
+        if self.skymap.format != "healpix":
+            raise ValueError("Skymap format must be healpix, got " + self.skymap.format)
+        if data is None:
+            data = self.data
+        num_ch = data.shape[-1]
+        full_healpix_map = np.zeros((hp.nside2npix(self.hp_nside), num_ch)) + fill_value
+        full_healpix_map[self.pixel_id] = data
+        return full_healpix_map
