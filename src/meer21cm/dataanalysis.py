@@ -1457,3 +1457,30 @@ class Specification:
         res_var = np.array(res_var)
         noise_var = np.array(noise_var) * sigma_N**2
         return res_var, noise_var
+
+    def generate_full_healpix_map(self, data=None, fill_value=np.nan):
+        """
+        Generate a full healpix map from the data.
+        Pixels not included in the data will be filled with the `fill_value` (default is `np.nan`).
+
+        Parameters
+        ----------
+        data: array, default None.
+            The data to be included in the full healpix map.
+            If None, the class attribute ``self.data`` will be used.
+        fill_value: float, default np.nan.
+            The value to fill the pixels not included in the data.
+
+        Returns
+        -------
+        full_healpix_map: array.
+            The full healpix map.
+        """
+        if self.skymap.format != "healpix":
+            raise ValueError("Skymap format must be healpix, got " + self.skymap.format)
+        if data is None:
+            data = self.data
+        num_ch = data.shape[-1]
+        full_healpix_map = np.zeros((hp.nside2npix(self.hp_nside), num_ch)) + fill_value
+        full_healpix_map[self.pixel_id] = data
+        return full_healpix_map
