@@ -62,8 +62,8 @@ sigma_v_gal = 100
 omega_hi = 5e-4
 
 grid_scheme = "tsc"
-sim_upres_transverse = 1 / 2
-sim_upres_radial = 1 / 2
+sim_upres_transverse = 1 / 3
+sim_upres_radial = 1 / 3
 ps_downres_transverse = 3
 ps_downres_radial = 6
 
