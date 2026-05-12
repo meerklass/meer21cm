@@ -640,3 +640,14 @@ def test_partial_beam_ch():
     bw3 = sp.beam_image[:, :, 0]
     bw4 = sp.get_beam_image(cache=False, ch_sel=[0])[:, :, 0]
     assert np.allclose(bw3, bw4)
+
+
+def test_generate_full_healpix_map():
+    sp = Specification(
+        hp_nside=32, ra_range=(40, 50), dec_range=(0, 5), sigma_beam_ch=0.5
+    )
+    full_healpix_map = sp.generate_full_healpix_map()
+    assert full_healpix_map.shape == (hp.nside2npix(sp.hp_nside), len(sp.nu))
+    with pytest.raises(ValueError, match="Skymap format must be healpix, got wcs"):
+        sp = Specification()
+        sp.generate_full_healpix_map()
