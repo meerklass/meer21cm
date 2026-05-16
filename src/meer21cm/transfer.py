@@ -209,6 +209,7 @@ required_attrs = [
     "k1dbins",
     "include_sky_sampling",
     "k1dweights",
+    "batch_number",
 ]
 
 

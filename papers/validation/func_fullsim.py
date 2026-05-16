@@ -9,6 +9,11 @@ from meer21cm.power import get_shot_noise_galaxy
 from meer21cm.grid import shot_noise_correction_from_gridding
 from astropy.cosmology import Planck18
 from meer21cm.util import pca_clean
+from meer21cm.transfer import (
+    TransferFunction,
+    run_tf_calculation_auto,
+    run_tf_calculation_cross,
+)
 
 # generate the foreground template once
 # from meer21cm.fg import ForegroundSimulation
@@ -22,6 +27,121 @@ from meer21cm.util import pca_clean
 # fg_map = fgsim.fg_wcs_cube(nu_arr)
 # np.save('fg_map',fg_map)
 fg_map = np.load("fg_map.npy")
+
+# seed_arr = np.arange(512)
+seed_arr = [
+    483,
+    471,
+    377,
+    425,
+    439,
+    380,
+    435,
+    461,
+    437,
+    507,
+    464,
+    426,
+    494,
+    497,
+    511,
+    472,
+    498,
+    375,
+    510,
+    484,
+    482,
+    485,
+    454,
+    470,
+    445,
+    432,
+    430,
+    478,
+    481,
+    467,
+    455,
+    476,
+    376,
+    493,
+    428,
+    449,
+    462,
+    354,
+    422,
+    509,
+    399,
+    427,
+    448,
+    419,
+    398,
+    453,
+    456,
+    500,
+    442,
+    496,
+    397,
+    429,
+    436,
+    460,
+    356,
+    451,
+    434,
+    501,
+    502,
+    505,
+    447,
+    492,
+    506,
+    431,
+    480,
+    499,
+    491,
+    504,
+    358,
+    475,
+    440,
+    473,
+    450,
+    444,
+    469,
+    468,
+    465,
+    433,
+    458,
+    490,
+    357,
+    459,
+    353,
+    402,
+    438,
+    443,
+    486,
+    487,
+    503,
+    446,
+    452,
+    378,
+    355,
+    474,
+    477,
+    421,
+    463,
+    466,
+    379,
+    479,
+    508,
+    423,
+    488,
+    424,
+    489,
+    457,
+    400,
+    495,
+    441,
+    420,
+    401,
+]
 
 
 def get_3d_power(seed):
@@ -115,6 +235,37 @@ def get_3d_power(seed):
     mock.apply_taper_to_field(2, axis=[0, 1, 2])
     phiclean3d = mock.auto_power_3d_1
     pxclean3d = mock.cross_power_3d
+
+    # transfer function
+    mock.k1dbins = k1dbins
+
+    tf = TransferFunction(
+        mock,
+        N_fg=N_fg,
+        highres_sim=None,
+        # generate mock data on a high-resolution grid, then to average it to sky map for injection
+        upres_transverse=2,
+        upres_radial=2,
+        uncleaned_data=tot_map,  # inject into the map data to reperform PCA
+        # R_mat=R_mat,
+        num_process=1,  # number of available cpus to run parallel calculation
+        pca_map_weights=mock.W_HI.astype("float"),
+        unmask_during_mock=True,
+        discrete_source_dndz=[
+            z_cen,
+            z_count / dV_arr,
+        ],
+    )
+    # arglist = tf.get_arg_list_for_parallel_auto(
+    arglist = tf.get_arg_list_for_parallel_cross(
+        np.array([mock.seed + 10000]),  # make sure it is a different seed
+        return_power_3d=True,
+        return_power_1d=False,
+    )
+    # result = run_tf_calculation_auto(*arglist[0])
+    result = run_tf_calculation_cross(*arglist[0])
+    power_tf_before = result[1]
+    power_tf_after = result[2]
     np.savez(
         f"/scratch3/users/ztchen/validation/full_sim_seed_{seed}.npz",
         phi3d=pdata3d,
@@ -126,12 +277,15 @@ def get_3d_power(seed):
         phiclean3d=phiclean3d,
         pxclean3d=pxclean3d,
         R_mat=R_mat,
+        power_tf_before=power_tf_before,
+        power_tf_after=power_tf_after,
     )
+    print(f"finish {seed}", flush=True)
     return 1
 
 
 if __name__ == "__main__":
     # run the simulations
-    with Pool(8) as p:
-        p.map(get_3d_power, range(512))
+    with Pool(4) as p:
+        p.map(get_3d_power, seed_arr)
     # get_3d_power(0)

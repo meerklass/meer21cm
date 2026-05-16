@@ -14,7 +14,11 @@ from meer21cm.power import get_shot_noise_galaxy
 from meer21cm.grid import shot_noise_correction_from_gridding
 from astropy.cosmology import Planck18
 from meer21cm.util import pca_clean
-from meer21cm.transfer import TransferFunction, run_tf_calculation_auto, run_tf_calculation_cross
+from meer21cm.transfer import (
+    TransferFunction,
+    run_tf_calculation_auto,
+    run_tf_calculation_cross,
+)
 import sys
 
 batch_id = int(sys.argv[-1])
@@ -32,9 +36,11 @@ window_name = "blackmanharris"
 # np.save('fg_map',fg_map)
 
 fg_map = np.load("fg_map.npy")
-#fg_map = np.zeros_like(fg_map)
+# fg_map = np.zeros_like(fg_map)
 N_fg = 5
-seed_arr = np.array_split(np.arange(1000),10)[batch_id]
+# seed_arr = np.array_split(np.arange(1000),10)[batch_id]
+seed_arr = np.arange(1000)
+
 
 def get_3d_power(seed):
     z_func = interp1d(
@@ -57,6 +63,8 @@ def get_3d_power(seed):
         sigma_beam_ch=sigma_beam_ch,
         sigma_v_1=100,
         sigma_v_2=100,
+        batch_number=3,
+        rsd_from_field=True,
     )
     mock.taper_func = getattr(windows, window_name)
     mock.W_HI = np.ones_like(mock.W_HI)
@@ -141,24 +149,27 @@ def get_3d_power(seed):
         upres_transverse=2,
         upres_radial=2,
         uncleaned_data=tot_map,  # inject into the map data to reperform PCA
-        #R_mat=R_mat,
+        # R_mat=R_mat,
         num_process=1,  # number of available cpus to run parallel calculation
         pca_map_weights=mock.W_HI.astype("float"),
         unmask_during_mock=True,
-        discrete_source_dndz=[z_cen, z_count / dV_arr,],
+        discrete_source_dndz=[
+            z_cen,
+            z_count / dV_arr,
+        ],
     )
-    #arglist = tf.get_arg_list_for_parallel_auto(
+    # arglist = tf.get_arg_list_for_parallel_auto(
     arglist = tf.get_arg_list_for_parallel_cross(
         np.array([mock.seed + 10000]),  # make sure it is a different seed
         return_power_3d=True,
         return_power_1d=False,
     )
-    #result = run_tf_calculation_auto(*arglist[0])
+    # result = run_tf_calculation_auto(*arglist[0])
     result = run_tf_calculation_cross(*arglist[0])
     power_tf_before = result[1]
     power_tf_after = result[2]
     np.savez(
-        f"/scratch3/users/ztchen/validation/02/{seed}_cross.npz",
+        f"/scratch3/users/ztchen/validation/02/{seed}_cross_rsd.npz",
         phi3d_arr=np.array(pdata3d),
         phimod3d_arr=np.array(phimod3d),
         pg3d_arr=np.array(pg3d),
@@ -174,5 +185,5 @@ def get_3d_power(seed):
 
 
 if __name__ == "__main__":
-    with Pool(10) as p:
+    with Pool(16) as p:
         p.map(get_3d_power, seed_arr)

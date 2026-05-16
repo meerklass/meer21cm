@@ -1005,12 +1005,18 @@ class Specification:
             num_pix_x = self.num_pix_x
         if num_pix_y is None:
             num_pix_y = self.num_pix_y
-        if ch_sel is None or np.allclose(ch_sel, np.arange(len(self.nu))):
-            ch_sel = np.arange(len(self.nu), dtype=int)
+        n_ch = len(self.nu)
+        if ch_sel is None:
+            ch_sel = np.arange(n_ch, dtype=int)
             use_full_channels = True
         else:
             ch_sel = np.asarray(ch_sel, dtype=int)
-            use_full_channels = False
+            full_idx = np.arange(n_ch, dtype=int)
+            use_full_channels = ch_sel.shape == full_idx.shape and np.allclose(
+                ch_sel, full_idx
+            )
+            if use_full_channels:
+                ch_sel = full_idx
         if (
             use_full_channels
             and cache
