@@ -177,7 +177,7 @@ def get_mock(seed):
         # sigma_beam_ch=sigma_beam_ch,
         sigma_v_1=sigma_v_hi,
         sigma_v_2=sigma_v_gal,
-        num_batch=num_batch,
+        batch_number=num_batch,
     )
     mock.taper_func = getattr(windows, window_name)
     return mock
