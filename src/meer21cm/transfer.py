@@ -22,7 +22,7 @@ from multiprocessing import Pool
 from .power import PowerSpectrum
 from typing import Callable
 from scipy.interpolate import interp1d
-
+import pickle
 
 def fft_matrix(mat, norm="backward"):
     r"""
@@ -290,6 +290,9 @@ class TransferFunction:
             This is useful for mitigating edge effects and when box buffer is small.
             For a large patch with a wide z-range, it is recommended to set this to True,
             otherwise the mock HI map may contain nan and cause errors.
+        mock_directory: string, default None
+            The filepath to where pre-run mocks are stored to load for the transfer functions computation.
+
     """
 
     def __init__(
@@ -309,6 +312,8 @@ class TransferFunction:
         pool: str = "multiprocessing",
         num_process: int | None = None,
         unmask_during_mock: bool = False,
+        mock_directory: str = None,
+        
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -329,6 +334,7 @@ class TransferFunction:
         self.num_process = num_process
         self.R_mat = R_mat
         self.unmask_during_mock = unmask_during_mock
+        self.mock_directory = mock_directory
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -373,6 +379,7 @@ class TransferFunction:
         seed_list,
         return_power_3d=False,
         return_power_1d=False,
+        multipole_ells=[0],
     ):
         """
         Generate a list of arguments for parallelisation of the null test runs.
@@ -389,6 +396,9 @@ class TransferFunction:
                 Note that for null test, the result itself is the 1D power, so this
                 is a dummy argument to keep consistency with
                 ``cross`` and ``auto`` runs.
+            multipole_ells: list, default [0]
+                List of multipoles to compute in 1D power spectrum.
+
 
         Returns
         -------
@@ -419,7 +429,7 @@ class TransferFunction:
         return arg_list
 
     def get_arg_list_for_parallel_cross(
-        self, seed_list, return_power_3d=False, return_power_1d=False
+        self, seed_list, return_power_3d=False, return_power_1d=False, multipole_ells=[0]
     ):
         """
         Generate a list of arguments for parallelisation of the cross-correlation runs
@@ -434,6 +444,8 @@ class TransferFunction:
                 Whether to return the 3D power spectrum of the cross-correlation.
             return_power_1d: bool, default False
                 Whether to return the 1D power spectrum of the cross-correlation.
+            multipole_ells: list, default [0]
+                List of multipoles to compute in 1D power spectrum.
 
         Returns
         -------
@@ -456,10 +468,17 @@ class TransferFunction:
                     self.N_fg,
                     self.pca_map_weights,
                     self.mean_center_map,
+
+                    self.mock_directory,
+                    self.ps,
+
                     self.R_mat,
                     self.uncleaned_data,
                     return_power_3d,
                     return_power_1d,
+
+                    multipole_ells,
+
                     self.unmask_during_mock,
                     self.ps.ra_range,
                     self.ps.dec_range,
@@ -469,7 +488,7 @@ class TransferFunction:
         return arg_list
 
     def get_arg_list_for_parallel_auto(
-        self, seed_list, return_power_3d=False, return_power_1d=False
+        self, seed_list, return_power_3d=False, return_power_1d=False, multipole_ells=[0]
     ):
         """
         Generate a list of arguments for parallelisation of the auto-correlation runs
@@ -484,6 +503,8 @@ class TransferFunction:
                 Whether to return the 3D power spectrum of the auto-correlation.
             return_power_1d: bool, default False
                 Whether to return the 1D power spectrum of the auto-correlation.
+            multipole_ells: list, default [0]
+                List of multipoles to compute in 1D power spectrum.
 
         Returns
         -------
@@ -504,10 +525,17 @@ class TransferFunction:
                     self.N_fg,
                     self.pca_map_weights,
                     self.mean_center_map,
+                    
+                    self.mock_directory,
+                    self.ps,
+
                     self.R_mat,
                     self.uncleaned_data,
                     return_power_3d,
                     return_power_1d,
+
+                    multipole_ells,
+
                     self.unmask_during_mock,
                     self.ps.ra_range,
                     self.ps.dec_range,
@@ -516,7 +544,7 @@ class TransferFunction:
         return arg_list
 
     def run(
-        self, seed_list, type="cross", return_power_3d=False, return_power_1d=False
+        self, seed_list, type="cross", return_power_3d=False, return_power_1d=False, multipole_ells=[0]
     ):
         """
         Run the transfer function calculation.
@@ -553,6 +581,8 @@ class TransferFunction:
                 Whether to return the 3D power spectrum of the transfer function.
             return_power_1d: bool, default False
                 Whether to return the 1D power spectrum of the transfer function.
+            multipole_ells: list, default [0]
+                List of multipoles to compute in 1D power spectrum.
 
         Returns
         -------
@@ -574,7 +604,7 @@ class TransferFunction:
         else:
             raise ValueError(f"Invalid type: {type}")
         arg_func = getattr(self, f"get_arg_list_for_parallel_{type}")
-        arg_list = arg_func(seed_list, return_power_3d, return_power_1d)
+        arg_list = arg_func(seed_list, return_power_3d, return_power_1d, multipole_ells)
         if self.pool == "multiprocessing":
             pool_func = Pool
         elif self.pool == "mpi":
@@ -584,9 +614,15 @@ class TransferFunction:
         else:
             raise ValueError(f"Invalid pool: {self.pool}")
         results_arr = []
-        with pool_func(self.num_process) as pool:
-            for result_i in pool.starmap(run_func, arg_list):
+        if self.num_process == 1:
+            for args in arg_list:
+                result_i = run_func(*args)
                 results_arr.append(result_i)
+        else:
+            with pool_func(self.num_process) as pool:
+                for result_i in pool.starmap(run_func, arg_list):
+                    results_arr.append(result_i)
+
         return results_arr
 
 
@@ -603,10 +639,17 @@ def run_tf_calculation_cross(
     N_fg,
     pca_map_weights,
     mean_center_map,
+
+    mock_directory,
+    ps,
+
     R_mat=None,
     uncleaned_data=0.0,
     return_power_3d=False,
     return_power_1d=False,
+
+    multipole_ells=[0],
+
     unmask_during_mock=False,
     ra_range=None,
     dec_range=None,
@@ -650,6 +693,8 @@ def run_tf_calculation_cross(
             Whether to return the 3D power spectrum of the mock results, including the uncleaned and cleaned data.
         return_power_1d: bool, default False
             Whether to return the 1D power spectrum of the mock results, including the uncleaned and cleaned data.
+        multipole_ells: list, default [0]
+            List of multipoles to compute in 1D power spectrum.
         unmask_during_mock: bool, default False
             Whether to unmask the wcs during the mock simulation.
             If True, the survey area will be unmasked during the mock simulation, and then masked again after mock HI is generated.
@@ -674,26 +719,58 @@ def run_tf_calculation_cross(
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
     mock = MockSimulation(**mock_attr_dict)
-    if not isinstance(discrete_source_dndz, Callable):
-        discrete_source_dndz = interp1d(
-            discrete_source_dndz[0],
-            discrete_source_dndz[1],
-            kind="linear",
-            bounds_error=False,
-            fill_value=0,
-        )
-    mock.discrete_source_dndz = discrete_source_dndz
-    if unmask_during_mock:
-        W_HI_mock = mock.W_HI.copy()
-        w_HI_mock = mock.w_HI.copy()
-        mock.W_HI = np.ones_like(mock.W_HI)
-        mock.w_HI = np.ones_like(mock.w_HI)
-    mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
-    mock.propagate_mock_tracer_to_gal_cat()
-    if unmask_during_mock:
-        mock.W_HI = W_HI_mock
-        mock.w_HI = w_HI_mock
-        mock.data[mock.W_HI == 0] = 0
+    if mock_directory==None:
+        if not isinstance(discrete_source_dndz, Callable):
+            discrete_source_dndz = interp1d(
+                discrete_source_dndz[0],
+                discrete_source_dndz[1],
+                kind="linear",
+                bounds_error=False,
+                fill_value=0,
+            )
+        mock.discrete_source_dndz = discrete_source_dndz
+        if unmask_during_mock:
+            W_HI_mock = mock.W_HI.copy()
+            w_HI_mock = mock.w_HI.copy()
+            mock.W_HI = np.ones_like(mock.W_HI)
+            mock.w_HI = np.ones_like(mock.w_HI)
+        mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
+        mock.propagate_mock_tracer_to_gal_cat()
+        if unmask_during_mock:
+            mock.W_HI = W_HI_mock
+            mock.w_HI = w_HI_mock
+            mock.data[mock.W_HI == 0] = 0
+
+    else:
+        seed = mock_attr_dict["seed"]
+        mock_file = mock_directory + f'HI_mock_{seed}.pkl'
+        with open(mock_file, "rb") as f:
+            data_dict = pickle.load(f)
+        mock.data = data_dict["HImap"]
+        nu_mock  = data_dict["freq"]*1e6 # convert to Hz
+        mock.nu_min,mock.nu_max = ps.nu_min,ps.nu_max
+        nu_sel = (nu_mock > mock.nu_min) * (nu_mock < mock.nu_max)
+        mock.data = mock.data[:,:,nu_sel]
+        
+        ##### MAY WANT TO INCLUDE A DIFFERENT INPUT HERE TO DISTINGUISH MODEL BEAM AND MOCK BEAM ?? #####
+        if mock_attr_dict["include_beam"][0]==True:
+        ###################################################################################################
+
+            from meer21cm.telescope import gaussian_beam, kat_beam, isotropic_beam_profile, weighted_convolution
+
+            ### KATBEAM CURRENTLY NOT WORKING - PRODUCES DISTORTED MAPS
+            #beam = kat_beam(mock.nu, mock.wproj, mock.num_pix_x, mock.num_pix_y, band='UHF')
+            ###################################################################################
+            sigma_beam_ch = mock_attr_dict["sigma_beam_ch"]
+            beam = np.zeros(np.shape(mock.data))
+            for i in range(len(mock.nu)):
+                beam[:,:,i] = isotropic_beam_profile(mock.num_pix_x,mock.num_pix_y,mock.wproj,gaussian_beam(sigma_beam_ch[i]) )
+            w = np.ones(np.shape(mock.data))
+            mock.data,w = weighted_convolution(mock.data,beam,w)
+        
+        mock.gal_file = mock_directory + f'gal_mock_{seed}.fits'
+        mock.read_gal_cat()
+
     mock.ra_range = ra_range
     mock.dec_range = dec_range
     mock.trim_map_to_range()
@@ -709,10 +786,19 @@ def run_tf_calculation_cross(
     mock.field_2 = mockgal_map_rg
     mock.weights_field_2 = weights_field_2
     mock.weights_grid_2 = weights_grid_2
+    
     # get 1d power
-    pmock_1d_cross, _, _ = mock.get_1d_power(
-        mock.cross_power_3d, k1dweights=k_sel_3d_to_1d
-    )
+    if len(multipole_ells)==1:
+        pmock_1d_cross, _, _ = mock.get_1d_power(
+            mock.cross_power_3d, k1dweights=k_sel_3d_to_1d, multipole_ell=multipole_ells[0]
+        )
+    else: # loop over 1D averaging for each multipole_ell
+        pmock_1d_cross = []
+        for multipole_ell in multipole_ells:
+            pmock_1d_cross_ell, _, _ = mock.get_1d_power(
+                mock.cross_power_3d, k1dweights=k_sel_3d_to_1d, multipole_ell=multipole_ell
+            )
+            pmock_1d_cross.append(pmock_1d_cross_ell)
     if return_power_3d:
         power_3d_uncleaned = mock.cross_power_3d
     # perform PCA cleaning
@@ -735,10 +821,19 @@ def run_tf_calculation_cross(
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
     # get 1d power again
-    pmock_1d_cross_cleaned, _, _ = mock.get_1d_power(
-        mock.cross_power_3d, k1dweights=k_sel_3d_to_1d
-    )
-    tf_1d_i = pmock_1d_cross_cleaned / pmock_1d_cross
+    if len(multipole_ells)==1:
+        pmock_1d_cross_cleaned, _, _ = mock.get_1d_power(
+            mock.cross_power_3d, k1dweights=k_sel_3d_to_1d, multipole_ell=multipole_ells[0]
+        )
+    else: # loop over 1D averaging for each multipole_ell
+        pmock_1d_cross_cleaned = []
+        for multipole_ell in multipole_ells:
+            pmock_1d_cross_cleaned_ell, _, _ = mock.get_1d_power(
+                mock.cross_power_3d, k1dweights=k_sel_3d_to_1d, multipole_ell=multipole_ell
+            )
+            pmock_1d_cross_cleaned.append(pmock_1d_cross_cleaned_ell)
+
+    tf_1d_i = np.array(pmock_1d_cross_cleaned) / np.array(pmock_1d_cross)
     result = [tf_1d_i]
     if return_power_3d:
         result.append(power_3d_uncleaned)
@@ -763,6 +858,9 @@ def run_tf_calculation_auto(
     uncleaned_data=0.0,
     return_power_3d=False,
     return_power_1d=False,
+
+    multipole_ells=[0],
+
     unmask_during_mock=False,
     ra_range=None,
     dec_range=None,
@@ -801,6 +899,8 @@ def run_tf_calculation_auto(
             Whether to return the 3D power spectrum of the mock results, including the uncleaned and cleaned data.
         return_power_1d: bool, default False
             Whether to return the 1D power spectrum of the mock results, including the uncleaned and cleaned data.
+        multipole_ells: list, default [0]
+            List of multipoles to compute in 1D power spectrum.
         unmask_during_mock: bool, default False
             Whether to unmask the wcs during the mock simulation.
             If True, the survey area will be unmasked during the mock simulation, and then masked again after mock HI is generated.
