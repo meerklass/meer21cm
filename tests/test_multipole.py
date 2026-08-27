@@ -1,6 +1,7 @@
 """Unit tests for MultipolePowerSpectrum and mesh k_in / column APIs."""
 
 import logging
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from meer21cm.window import (
     build_mesh_window_mas_out,
     build_mesh_window_matrix,
     propose_mesh_k_in,
+    tapered_theory_beam_kernels,
 )
 
 
@@ -357,3 +359,81 @@ def test_post_deposit_taper_operators_closer_on_long_axis():
         f"long-axis extra |ratio−1| from T={extra_long:.3f} not << "
         f"short-axis {extra_short:.3f} (slow-T limit)"
     )
+
+
+def test_model_power_3d_bins_match_window_apply():
+    """Bin of ``accumulate_mesh_window_cubes`` matches ``W @ P0`` (same weights)."""
+    mps = _make_mps(n_k_in=16)
+    mat = mps.run_window_matrix()
+    p_w = mps.model_multipoles
+    mps.run_model_power_3d()
+    p_c = mps._bin_model_power_3d()
+    nmodes = np.asarray(mat.nmodes, dtype=float)
+    good = nmodes > 4
+    scale = float(np.nanmax(np.abs(p_w["P_ell"][0])))
+    for ell in ELLS:
+        a = np.asarray(p_w["P_ell"][ell], dtype=float)
+        b = np.asarray(p_c["P_ell"][ell], dtype=float)
+        assert np.allclose(
+            a[good], b[good], rtol=1e-10, atol=1e-10 * max(scale, 1.0)
+        ), f"ell={ell}"
+
+
+def test_taper_plus_beam_uses_cic_then_t_kernels():
+    """Taper + ``sigma_beam_ch``: CIC-then-T (oms=1, ``W_MAS^2`` on theory), not T×NGP."""
+    box_ndim = (8, 8, 8)
+    box_len = (40.0, 40.0, 40.0)
+    rng = np.random.default_rng(1)
+    pix = rng.uniform(0.0, 40.0, size=(24, 3))
+    mps = MultipolePowerSpectrum(
+        field_1=np.ones(box_ndim, dtype="f8"),
+        box_len=box_len,
+        los="endpoint",
+        los_observer=_FAR_OBS,
+        kaiser_rsd=False,
+        tracer_bias_1=1.0,
+        window="mesh",
+        window_ells=(0, 2),
+        window_taper_axes=(2,),
+        grid_scheme="cic",
+        include_beam=[False, False],
+        n_k_in=8,
+        beam_at_theory_mode=True,
+        beam_n_mu=4,
+        beam_diag_as_ratio=False,
+        nu=np.linspace(900.0e6, 1050.0e6, 8),
+        sigma_beam_ch=0.4,
+    )
+    mps._pix_coor_in_cartesian = np.asarray(pix, dtype=float)
+    mps.box_origin = np.zeros(3, dtype=float)
+    mps.weights_1 = np.ones(box_ndim, dtype=float)
+    mps.apply_taper_to_field(1, axis=[2])
+    mps = _configure_bins(mps, k_hi=0.22)
+    assert mps._use_tapered_beam()
+    assert not mps._use_mas_out()
+    n_cell = int(pix.shape[0])
+    with patch(
+        "meer21cm.multipole_ops.beam_edge_cell_mass",
+        return_value=np.ones(n_cell),
+    ):
+        kw = mps._mesh_operator_kwargs()
+        kw_ngp = tapered_theory_beam_kernels(
+            mps,
+            mps._resolve_k_in(),
+            renorm_weights=mps.weights_1,
+            mas="ngp",
+            taper_axes=(2,),
+            ells=(0, 2),
+            n_mu=4,
+            n_phi=1,
+            beam_diag_as_ratio=False,
+        )
+    oms = np.asarray(kw["out_mode_scale"], dtype=float)
+    assert np.allclose(oms, 1.0)
+    w_mas2 = fourier_window_for_assignment(mps.box_ndim, "cic") ** 2
+    ms = np.asarray(kw["mode_scale"], dtype=float)
+    ms_ngp = np.asarray(kw_ngp["mode_scale"], dtype=float)
+    assert np.allclose(ms, ms_ngp * w_mas2)
+    oms_ngp = np.asarray(kw_ngp["out_mode_scale"], dtype=float)
+    assert np.allclose(oms_ngp, w_mas2)
+    assert not np.allclose(oms_ngp, 1.0)

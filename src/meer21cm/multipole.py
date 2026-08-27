@@ -15,8 +15,10 @@ Changing beam or survey settings flags the cached matrix stale; theory
 :math:`P(k,\mu)` updates automatically and is applied as ``W @ P_ell(k_in)``.
 
 Mesh windows map isotropic :math:`P_0(k_{\mathrm{in}})` only
-(``ells_in = (0,)``).  Fitting Kaiser :math:`P_2,P_4` uses
-``window='smooth'``.
+(``ells_in = (0,)``) when applying :math:`W`.  Kaiser :math:`P(k,\mu)`
+on the mesh path is the 3D bake :meth:`MultipolePowerSpectrum.run_model_power_3d`
+(theory IFFT carries ``power_kmu``).  Fitting Kaiser :math:`P_2,P_4`
+with a 1D matrix uses ``window='smooth'``.
 
 Helper functions (k-grids, beam / sampling transfers, selection fields)
 live in :mod:`meer21cm.multipole_ops`.
@@ -38,7 +40,7 @@ from .estimator import (
     MultipoleMeasurement,
     MultipoleShellMap,
 )
-from .grid import LightconeGriddingMixin, fourier_window_for_assignment
+from .grid import LightconeGriddingMixin, bh_taper_cube, fourier_window_for_assignment
 from .model import ModelPowerSpectrum
 from .multipole_ops import (
     Tracer,
@@ -46,8 +48,6 @@ from .multipole_ops import (
     _resolve_window_k_edges,
     _window_effective_weights,
     accumulate_window_multipoles,
-    beam_edge_cell_mass,
-    beam_theory_cell_kernels,
     make_galaxy_poisson_mean_density,
     map_sampling_mode_scale,
     propose_k1dbins_window,
@@ -56,21 +56,24 @@ from .multipole_ops import (
     run_smooth_window_realization,
 )
 from .power import _FieldModelGlueMixin
-from .power_ops import power_weights_renorm
+from .power_ops import bin_3d_to_1d, power_weights_renorm
 from .util import tagging
 from .wide_angle import propose_odd_wa_ells
 from .window import (
     DiscreteShellWindowMatrix,
     WindowEllMap,
+    _mas_out_kernel_kwargs,
     accumulate_mesh_window_matrices,
+    accumulate_mesh_window_cubes,
     apply_discrete_shell_window_matrix,
     build_discrete_shell_window_matrix,
-    build_mesh_window_mas_out,
     build_mesh_window_matrix,
     list_mesh_window_columns,
     propose_mesh_k_in,
     require_yamamoto_los,
     run_mesh_window_columns,
+    sum_mesh_window_cubes,
+    tapered_theory_beam_kernels,
     window_zero_mode_power,
 )
 
@@ -82,6 +85,7 @@ __all__ = [
     "WindowedMultipoleModel",
     "init_window_column_worker",
     "run_window_column",
+    "run_model_cube_column",
     "predict_windowed_multipoles",
     "propose_k_in",
     "propose_k1dbins_window",
@@ -101,9 +105,17 @@ _WINDOW_STALE = (
     "Cached window matrix is stale (beam or survey settings changed). "
     "Call run_window_matrix() to rebuild."
 )
+_MODEL_CUBES_NOT_BUILT = (
+    "3D model cubes have not been built. Call run_model_power_3d() or "
+    "get_arg_list_for_model_cubes() then accumulate_model_cubes()."
+)
+_MESH_KAISER_NO_CUBES = (
+    "window='mesh' with kaiser_rsd=True: W @ P0 has no Kaiser quadrupole. "
+    "Call run_model_power_3d() and read model_multipoles (bins those cubes) "
+    "or use window='smooth'."
+)
 
 _WINDOW_WORKER: MultipolePowerSpectrum | None = None
-_INNER_TAPER_BEAM_WARNED = False
 
 
 class WindowedMultipoleModel(ModelPowerSpectrum):
@@ -263,6 +275,27 @@ class WindowedMultipoleModel(ModelPowerSpectrum):
             Gauss–Legendre nodes for the continuous :math:`\\mu` integral.
         apply_window : bool, default True
             If True and a window matrix is set, apply it.
+
+        Returns
+        -------
+        result : dict
+            ``k``, ``P_ell``, ``ells``, ``window_applied``; when the
+            matrix is applied also ``k_in``, ``nmodes``,
+            ``P_ell_unconvolved``.
+
+        Notes
+        -----
+        Continuous theory is a Gauss–Legendre :math:`\\mu` integral of
+        :meth:`~meer21cm.model.ModelPowerSpectrum.power_kmu`.  The
+        matrix maps :math:`P_{\\ell'}(k_{\\mathrm{in}})\\to
+        P_\\ell(k_{\\mathrm{out}})`.  Mesh windows have
+        ``ells_in=(0,)`` (isotropic :math:`P_0`); Kaiser fitting on
+        mesh uses :meth:`MultipolePowerSpectrum.run_model_power_3d`
+        rather than this product.
+
+        References
+        ----------
+        Beutler, Castorina & Zhang, 2019, JCAP, 03, 040 (arXiv:1810.05051)
         """
         if ells is None:
             ells = self.window_ells
@@ -787,11 +820,27 @@ def run_window_column(kwargs: dict, columns) -> DiscreteShellWindowMatrix:
                 "run_window_column needs init_window_column_worker(mps) "
                 "when use_worker_object is True"
             )
+        if str(kwargs.get("kind", "mesh")).lower() == "cubes":
+            return _WINDOW_WORKER._fill_model_cubes(columns)
         return _WINDOW_WORKER._fill_window_columns(columns)
     kind = str(kwargs.get("kind", "mesh")).lower()
     if kind == "mesh":
         return run_mesh_window_columns(kwargs["build_kwargs"], columns)
+    if kind == "cubes":
+        return accumulate_mesh_window_cubes(**kwargs["build_kwargs"], columns=columns)
     raise ValueError(f"unsupported window kind for column worker: {kind!r}")
+
+
+def run_model_cube_column(kwargs: dict, columns) -> dict[int, np.ndarray]:
+    """
+    Pickleable worker for one mesh-window 3D-cube column chunk.
+
+    ``kwargs`` is one dict from
+    :meth:`MultipolePowerSpectrum.get_arg_list_for_model_cubes`.
+    Beam kernels require
+    ``initializer=init_window_column_worker, initargs=(mps,)``.
+    """
+    return run_window_column(kwargs, columns)
 
 
 class MultipolePowerSpectrum(
@@ -800,32 +849,121 @@ class MultipolePowerSpectrum(
     FieldPowerSpectrum,
     WindowedMultipoleModel,
 ):
-    """
+    r"""
     Combined Yamamoto field estimator and windowed multipole model.
 
-    Same constructor pattern as :class:`~meer21cm.power.PowerSpectrum`
-    (Specification survey kwargs, then box / field / model).  Defaults
-    differ: ``los='endpoint'``, and beam / sky sampling / MAS compensation
-    are **off** on the legacy 3D ``get_model_power_i`` path — those
-    operators live in the window matrix.
+    Analog of :class:`~meer21cm.power.PowerSpectrum` for local-LOS
+    multipoles.  Survey / box / field constructor arguments are the same
+    (see :class:`~meer21cm.power.PowerSpectrum`); defaults differ:
+    ``los='endpoint'``, and beam / sky sampling / MAS compensation are
+    **off** on the legacy 3D ``get_model_power_i`` path so those
+    operators are not double-counted.  They live in the window.
+
+    The window is **not** built on access (too expensive).  Call
+    :meth:`run_window_matrix` for the 1D matrix :math:`W`, and/or
+    :meth:`run_model_power_3d` for unbinned 3D theory cubes (cylindrical
+    power, mesh Kaiser).  One operator config drives both.
+
+    Typical usage::
+
+        mps = MultipolePowerSpectrum.from_power_spectrum(
+            ps, window="mesh", window_taper_axes=(2,),  # optional
+        )
+        mps.apply_taper_to_field(1, axis=[2])           # data, if tapering
+        mps.run_window_matrix()                         # W (isotropic P0)
+        data = mps.measure_multipoles(which="auto_1", ells=(0, 2, 4))
+        model_1d = mps.model_multipoles                 # W @ P_ell
+        mps.run_model_power_3d()                        # same operator, theory baked
+        P0_cy = mps.get_cy_power(mps.model_multipole_power_3d(0))
+
+    Mesh operator (unchanged physics, selected automatically):
+
+    - Untapered CIC lightcone + ``sigma_beam_ch``: MAS-out + theory-mode
+      beam (``n_mu=4``, additive :math:`\kappa=0`).
+    - Taper and **no** beam: inner-mode CIC-then-T,
+      ``mode_scale = W_MAS^2 × sampling``.
+    - Taper and beam: CIC-then-T + theory-mode beam
+      (:func:`~meer21cm.window.tapered_theory_beam_kernels` with
+      ``mas='cic'``): :math:`T\times\mathrm{CIC}[m_b]`,
+      ``out_mode_scale=1``, :math:`W_{\mathrm{MAS}}^2` on the theory
+      shell.
+
+    Mesh :math:`W` has ``ells_in=(0,)``.  Kaiser anisotropy on mesh is
+    :meth:`run_model_power_3d` (``power_kmu`` on the theory IFFT) then
+    bin the cubes — not ``W @ P_0``.  Smooth windows keep Hankel / Wigner
+    :math:`W` times Kaiser :math:`P_\ell`.
+
+    Do **not** pair Yamamoto data with inherited
+    ``auto_power_tracer_*_model`` (those cubes use box-:math:`z` :math:`\mu`).
 
     Parameters
     ----------
+    field_1, box_len, weights_*, k1dbins, tracer_bias_*, ...
+        Same as :class:`~meer21cm.power.PowerSpectrum`.
+    los : {'endpoint', 'firstpoint', 'global', 'midpoint'}, default 'endpoint'
+        Line of sight for :meth:`~meer21cm.estimator.FieldPowerSpectrum.measure_multipoles`.
+        Local Yamamoto is ``'endpoint'`` / ``'firstpoint'``.
+    los_observer : array_like, optional
+        Observer position in Mpc.  Defaults to :attr:`box_origin`.
     window : {'mesh', 'smooth'}, default 'mesh'
-        Window backend.  ``'mesh'`` is the lightcone FFT window
-        (:func:`~meer21cm.window.build_mesh_window_mas_out` when there is
-        no post-deposit taper; inner-mode
-        :func:`~meer21cm.window.build_mesh_window_matrix` when
-        ``window_taper_axes`` is set).  Theory input is the isotropic
-        monopole.  ``'smooth'`` is the Hankel / Wigner window matrix
-        (Kaiser :math:`P_\\ell` in, including optional wide-angle resum).
-    beam_n_mu, beam_at_theory_mode, beam_diag_as_ratio, ...
-        Forwarded to the mesh theory-mode beam model
-        (``beam_at_theory_mode``).  Defaults are ``n_mu=4`` and additive
-        :math:`\\kappa=0`.
+        ``'mesh'`` is the lightcone FFT window.  ``'smooth'`` is the
+        Hankel / Wigner matrix (Kaiser :math:`P_\ell` in).
+    window_ells : sequence of int, default (0, 2, 4)
+        Output multipoles for :math:`W` and the 3D cubes.
+    window_taper_axes : sequence of int, default ()
+        Post-deposit Blackman–Harris axes.  Empty: untapered operator.
+        With a dish beam this selects CIC-then-T + beam; without a beam,
+        inner-mode CIC-then-T (no theory-mode beam).
+    n_k_in : int, default 80
+        Number of theory :math:`|k|` nodes
+        (:func:`~meer21cm.window.propose_mesh_k_in`).
+    beam_at_theory_mode : bool, default True
+        Attach the dish beam at the **theory** Fourier mode (production).
+    beam_n_mu : int, default 4
+        :math:`|\mu|` groups for the theory-mode beam kernel.
+    beam_n_phi : int, default 1
+        Azimuthal groups for the theory-mode beam kernel.
+    beam_diag_correction : bool, default True
+        Additive :math:`\kappa=0` diagonal correction for :math:`\ell>0`.
+    beam_diag_as_ratio : bool, default False
+        If True, use the ratio form of the diagonal correction
+        (rescales leakage; not production).
+    beam_at_output_mode : bool, default False
+        Older output-mode beam kernel (diagnostic).
+    beam_ylm, beam_ylm_lmax
+        Optional :math:`Y_{LM}` grouping of the theory-mode beam.
+    theory_nmu : int, default 64
+        Gauss–Legendre nodes for continuous :math:`P_\ell(k_{\mathrm{in}})`.
+    wide_angle : bool, default False
+        Smooth-window only: resum wa_order=1 odd wide-angle into :math:`W`.
+    include_beam, include_sky_sampling, compensate : list, default all False
+        Legacy 3D ``get_model_power_i`` flags.  Keep False on this class.
+    kaiser_rsd : bool, default True
+        RSD in ``power_kmu``.  On mesh, quadrupole/hexadecapole 1D needs
+        :meth:`run_model_power_3d`.
+    **params
+        Forwarded to :class:`~meer21cm.cosmology.CosmologyCalculator`
+        (survey, cosmology, …).
+
+    Notes
+    -----
+    Column-parallel fills:
+    :meth:`get_arg_list_for_window_columns` /
+    :meth:`accumulate_window_columns` and
+    :meth:`get_arg_list_for_model_cubes` /
+    :meth:`accumulate_model_cubes`.  There is no in-library MPI.
+
+    References
+    ----------
+    Hand et al., 2017, AJ, 154, 199 (arXiv:1704.02357)
+    Beutler, Castorina & Zhang, 2019, JCAP, 03, 040 (arXiv:1810.05051)
     """
 
-    _window_cache_names = ("_window_matrix_obj", "_window_matrix_raw")
+    _window_cache_names = (
+        "_window_matrix_obj",
+        "_window_matrix_raw",
+        "_model_power_3d",
+    )
 
     def __init__(
         self,
@@ -993,6 +1131,7 @@ class MultipolePowerSpectrum(
         self._window_stale = False
         self._data_multipoles = None
         self._model_multipoles = None
+        self._model_power_3d = None
 
     def clean_cache(self, attr):
         """Flag the window matrix stale instead of wiping it."""
@@ -1108,8 +1247,29 @@ class MultipolePowerSpectrum(
     @property
     @tagging("cosmo_model", "nu", "kmode", "mumode", "tracer_1", "rsd")
     def model_multipoles(self) -> dict[str, Any] | None:
-        """Windowed theory multipoles ``W @ P_ell(k_in)`` from current ``power_kmu``."""
+        r"""
+        Windowed theory multipoles from the current ``power_kmu``.
+
+        - ``window='smooth'`` or mesh with ``kaiser_rsd=False``: ``W @ P_\ell(k_{\mathrm{in}})``
+          after :meth:`run_window_matrix`.
+        - ``window='mesh'`` and ``kaiser_rsd=True``: bins the 3D cubes from
+          :meth:`run_model_power_3d` (Kaiser lives on the theory IFFT, not
+          in mesh ``W``, which has ``ells_in=(0,)``).  If cubes are missing,
+          logs a warning and falls back to ``W @ P_0`` when a matrix exists.
+
+        Returns
+        -------
+        result : dict or None
+            Keys ``k``, ``P_ell``, ``nmodes`` (and ``k_in`` / ``window_applied``
+            on the matrix path).  ``None`` if neither ``W`` nor 3D cubes
+            have been built.
+        """
+        mesh_kaiser = self.window_kind == "mesh" and bool(self.kaiser_rsd)
+        if mesh_kaiser and self._model_power_3d is not None:
+            return self._bin_model_power_3d()
         self._warn_window_status()
+        if mesh_kaiser and self._model_power_3d is None:
+            logger.warning(_MESH_KAISER_NO_CUBES)
         if self._window_matrix_obj is None and self._window_matrix_raw is None:
             return None
         if self._model_multipoles is None:
@@ -1119,6 +1279,28 @@ class MultipolePowerSpectrum(
                 apply_window=True,
             )
         return self._model_multipoles
+
+    def _bin_model_power_3d(self) -> dict[str, Any]:
+        """Bin cached 3D model cubes with the estimator ``k1dbins`` / weights."""
+        p_ell: dict[int, NDArray[np.floating]] = {}
+        k_eff = nmodes = None
+        for ell in self.window_ells:
+            p1, ke, nm = bin_3d_to_1d(
+                self._model_power_3d[int(ell)],
+                self.k_mode,
+                self.k1dbins,
+                weights=self.k1dweights,
+                vectorize=False,
+            )
+            p_ell[int(ell)] = np.asarray(p1, dtype=float)
+            k_eff, nmodes = ke, nm
+        return {
+            "k": np.asarray(k_eff, dtype=float),
+            "P_ell": p_ell,
+            "nmodes": np.asarray(nmodes, dtype=float),
+            "window_applied": True,
+            "from_cubes": True,
+        }
 
     def _resolve_k_in(self) -> NDArray[np.floating]:
         """Theory :math:`k_{\\mathrm{in}}` nodes (cached, mesh, or smooth default)."""
@@ -1151,14 +1333,7 @@ class MultipolePowerSpectrum(
         axes = self._window_taper_axes
         if not axes:
             return None
-        taper = np.ones(shape, dtype=float)
-        ndim = np.asarray(shape, dtype=int)
-        for ax in axes:
-            t = np.asarray(self.taper_func(int(ndim[ax])), dtype=float)
-            slicer = [None, None, None]
-            slicer[int(ax)] = slice(None)
-            taper = taper * t[tuple(slicer)]
-        return taper
+        return bh_taper_cube(shape, axes, taper_func=self.taper_func)
 
     def _window_mode_scale(self) -> NDArray[np.floating] | None:
         """Map-sampling :math:`|S(k)|^2` on the rFFT grid, if available."""
@@ -1173,6 +1348,10 @@ class MultipolePowerSpectrum(
     def _use_inner_mode_taper(self) -> bool:
         """Post-deposit taper is inner-mode, not MAS-out × (T×NGP)."""
         return bool(self._window_taper_axes)
+
+    def _use_tapered_beam(self) -> bool:
+        """CIC-then-T plus theory-mode beam (production taper + dish beam)."""
+        return self._use_inner_mode_taper() and self._use_beam()
 
     def _inner_mode_scale(self) -> NDArray[np.floating]:
         """Inner-mode transfer :math:`W_{\\mathrm{MAS}}(k)^2` times map sampling."""
@@ -1191,18 +1370,6 @@ class MultipolePowerSpectrum(
         """
         return np.asarray(self._renorm_weights(), dtype=float)
 
-    def _warn_inner_taper_no_theory_beam(self) -> None:
-        global _INNER_TAPER_BEAM_WARNED
-        if getattr(self, "sigma_beam_ch", None) is None:
-            return
-        if _INNER_TAPER_BEAM_WARNED:
-            return
-        _INNER_TAPER_BEAM_WARNED = True
-        logger.warning(
-            "Post-deposit taper uses inner-mode (tapered CIC weights); "
-            "theory-mode beam (beam_at_theory_mode) is not applied on this path."
-        )
-
     def _use_mas_out(self) -> bool:
         """True when the untapered lightcone uses MAS-at-output NGP kernels."""
         if self._use_inner_mode_taper():
@@ -1217,6 +1384,57 @@ class MultipolePowerSpectrum(
         return (
             bool(self._beam_at_theory_mode)
             and getattr(self, "sigma_beam_ch", None) is not None
+        )
+
+    def _mesh_operator_kwargs(self) -> dict:
+        """Kernel kwargs for :func:`build_mesh_window_matrix` (mesh only)."""
+        k_in = self._resolve_k_in()
+        ells = self.window_ells
+        mode_scale = self._window_mode_scale()
+        if self._use_tapered_beam():
+            return tapered_theory_beam_kernels(
+                self,
+                k_in,
+                renorm_weights=self._inner_mode_taper_weights(),
+                mas="cic",
+                taper_axes=self._window_taper_axes,
+                ells=ells,
+                mode_scale=mode_scale,
+                n_mu=self._beam_n_mu,
+                n_phi=self._beam_n_phi,
+                beam_diag_as_ratio=self._beam_diag_as_ratio,
+                taper_func=self.taper_func,
+            )
+        if self._use_inner_mode_taper():
+            weights = self._inner_mode_taper_weights()
+            return dict(
+                weights=weights,
+                ells=ells,
+                mode_scale=self._inner_mode_scale(),
+                renorm_weights=weights,
+            )
+        if self._use_mas_out():
+            return _mas_out_kernel_kwargs(
+                self,
+                k_in,
+                renorm_weights=self._renorm_weights(),
+                ells=ells,
+                mode_scale=mode_scale,
+                beam_at_theory_mode=self._use_beam(),
+                beam_at_output_mode=self._beam_at_output_mode and not self._use_beam(),
+                beam_n_mu=self._beam_n_mu,
+                beam_n_phi=self._beam_n_phi,
+                beam_diag_correction=self._beam_diag_correction,
+                beam_diag_as_ratio=self._beam_diag_as_ratio,
+                beam_ylm=self._beam_ylm,
+                beam_ylm_lmax=self._beam_ylm_lmax,
+            )
+        weights = self._selection_weights()
+        return dict(
+            weights=weights,
+            ells=ells,
+            mode_scale=mode_scale,
+            renorm_weights=self._renorm_weights(),
         )
 
     def _fill_window_columns(self, columns=None) -> DiscreteShellWindowMatrix:
@@ -1236,59 +1454,65 @@ class MultipolePowerSpectrum(
                 )
             swe.accumulate([swe.run_one(0)])
             return swe.build_window_matrix(k_in, continuous="smooth")
+        kw = self._mesh_operator_kwargs()
+        return build_mesh_window_matrix(self, k_in, columns=columns, **kw)
 
-        mode_scale = self._window_mode_scale()
-        if self._use_inner_mode_taper():
-            # Data: CIC then T on weights (apply_taper_to_field).  MAS-out
-            # with T×NGP is the wrong operator when T varies on CIC scales.
-            self._warn_inner_taper_no_theory_beam()
-            weights = self._inner_mode_taper_weights()
-            return build_mesh_window_matrix(
-                self,
-                k_in,
-                weights=weights,
-                ells=ells,
-                mode_scale=self._inner_mode_scale(),
-                renorm_weights=weights,
-                columns=columns,
+    def _theory_for_cubes(self):
+        """``(theory_p0, theory_kmu)`` for :meth:`run_model_power_3d`."""
+        k_in = self._resolve_k_in()
+        if self.kaiser_rsd and self.window_kind == "mesh":
+            pk = np.asarray(
+                self.power_kmu(which="auto_1", include_mean_amp=True), dtype=float
             )
+            return None, pk
+        theory0 = self.get_theory_multipoles_kmu(k_in, ells=(0,), nmu=self.theory_nmu)[
+            "P_ell"
+        ][0]
+        return np.asarray(theory0, dtype=float), None
 
-        if self._use_mas_out():
-            return build_mesh_window_mas_out(
-                self,
-                k_in,
-                renorm_weights=self._renorm_weights(),
-                ells=ells,
-                mode_scale=mode_scale,
-                beam_at_theory_mode=self._use_beam(),
-                beam_at_output_mode=self._beam_at_output_mode and not self._use_beam(),
-                beam_n_mu=self._beam_n_mu,
-                beam_n_phi=self._beam_n_phi,
-                beam_diag_correction=self._beam_diag_correction,
-                beam_diag_as_ratio=self._beam_diag_as_ratio,
-                beam_ylm=self._beam_ylm,
-                beam_ylm_lmax=self._beam_ylm_lmax,
-                columns=columns,
+    def _fill_model_cubes(self, columns=None) -> dict[int, np.ndarray]:
+        """Build (a chunk of) theory-baked 3D mesh-window cubes."""
+        if self.window_kind == "smooth":
+            raise ValueError(
+                "run_model_power_3d is the mesh-window 3D bake; "
+                "smooth windows use model_multipoles = W @ P_ell"
             )
-
-        weights = self._selection_weights()
-        return build_mesh_window_matrix(
+        k_in = self._resolve_k_in()
+        kw = self._mesh_operator_kwargs()
+        theory, theory_kmu = self._theory_for_cubes()
+        return accumulate_mesh_window_cubes(
             self,
             k_in,
-            weights=weights,
-            ells=ells,
-            mode_scale=mode_scale,
-            renorm_weights=self._renorm_weights(),
+            theory=theory,
+            theory_kmu=theory_kmu,
             columns=columns,
+            **kw,
         )
 
     def run_window_matrix(self, columns=None) -> DiscreteShellWindowMatrix:
-        """
+        r"""
         Build the window matrix in this process (serial).
 
-        For column-parallel mesh builds, use
+        The operator is the same as :meth:`run_model_power_3d` (MAS-out
+        + theory-mode beam, inner-mode CIC-then-T, or CIC-then-T + beam).
+        Each column is the response to a **unit** theory shell; apply
+        current theory with :attr:`model_multipoles` (``W @ P_\ell``).
+
+        The matrix is **not** built on access — this call is required
+        and can be expensive.  For column-parallel mesh builds use
         :meth:`get_arg_list_for_window_columns` and
-        :meth:`accumulate_window_columns` instead.
+        :meth:`accumulate_window_columns`.
+
+        Parameters
+        ----------
+        columns : sequence of int or (group, k_in) pairs, optional
+            Fill only these columns (see
+            :func:`~meer21cm.window.build_mesh_window_matrix`).
+
+        Returns
+        -------
+        mat : DiscreteShellWindowMatrix
+            Attached as :attr:`window_matrix`.
         """
         mat = self._fill_window_columns(columns=columns)
         self.set_window_matrix(mat)
@@ -1297,26 +1521,65 @@ class MultipolePowerSpectrum(
         self._model_multipoles = None
         return mat
 
+    def run_model_power_3d(self, columns=None) -> dict[int, np.ndarray]:
+        r"""
+        Build theory-baked 3D Yamamoto multipole cubes (serial).
+
+        Same mesh operator as :meth:`run_window_matrix`, but each column
+        is scaled by isotropic :math:`P_0(k_{\mathrm{in}})` or, when
+        ``kaiser_rsd`` is True, by :meth:`~meer21cm.model.ModelPowerSpectrum.power_kmu`
+        on the theory IFFT, and **summed unbinned**.  Use this for
+        cylindrical power (:meth:`~meer21cm.power.PowerSpectrum.get_cy_power`)
+        and for mesh Kaiser 1D (:attr:`model_multipoles` bins the cubes).
+
+        Parameters
+        ----------
+        columns : sequence of int or (group, k_in) pairs, optional
+            Fill only these columns.
+
+        Returns
+        -------
+        acc : dict
+            ``{ell: ndarray}`` on the rFFT grid.
+        """
+        acc = self._fill_model_cubes(columns=columns)
+        self._model_power_3d = acc
+        self._model_multipoles = None
+        return acc
+
+    def model_multipole_power_3d(self, ell: int) -> NDArray[np.floating] | None:
+        r"""
+        Cached 3D model multipole cube for one :math:`\ell`.
+
+        Analogous to :meth:`~meer21cm.estimator.FieldPowerSpectrum.multipole_power_3d`
+        for the **data**.  Returns ``None`` (and logs a warning) until
+        :meth:`run_model_power_3d` has been called.
+
+        Parameters
+        ----------
+        ell : int
+            Multipole order.
+
+        Returns
+        -------
+        cube : ndarray or None
+            rFFT-shaped :math:`P_\ell^{3D}(\mathbf k)`.
+        """
+        if self._model_power_3d is None:
+            logger.warning(_MODEL_CUBES_NOT_BUILT)
+            return None
+        return np.asarray(self._model_power_3d[int(ell)], dtype=float)
+
     def _list_mesh_columns(self):
         """Column indices (or ``(group, j)`` pairs) for a parallel mesh fill."""
         k_in = self._resolve_k_in()
         n_in = int(np.asarray(k_in).size)
-        if (
-            self.window_kind != "mesh"
-            or not self._use_beam()
-            or not self._use_mas_out()
-        ):
+        if self.window_kind != "mesh":
             return list(range(n_in))
-        mode_scale = self._window_mode_scale()
-        edge = beam_edge_cell_mass(self)
-        gi, kernel = beam_theory_cell_kernels(
-            self,
-            k_in,
-            n_mu=self._beam_n_mu,
-            n_phi=self._beam_n_phi,
-            mode_scale=mode_scale,
-            cell_mass=edge,
-        )
+        kw = self._mesh_operator_kwargs()
+        in_bin = kw.get("in_bin_weights")
+        if in_bin is None:
+            return list(range(n_in))
         k_mode = np.asarray(self.k_mode, dtype=float).ravel()
         k_in_np = np.asarray(k_in, dtype=float)
         edges = np.concatenate(([0.0], 0.5 * (k_in_np[:-1] + k_in_np[1:]), [np.inf]))
@@ -1325,28 +1588,14 @@ class MultipolePowerSpectrum(
         ]
         return list_mesh_window_columns(
             n_in,
-            in_group_index=gi,
-            in_bin_weights=kernel,
+            in_group_index=kw.get("in_group_index"),
+            in_group_scale=kw.get("in_group_scale"),
+            in_bin_weights=in_bin,
             in_shell=in_shell,
+            column_empty=kw.get("column_empty"),
         )
 
-    def get_arg_list_for_window_columns(
-        self, n_chunks: int | None = None
-    ) -> list[tuple[dict, Any]]:
-        """
-        Pickleable ``(kwargs, columns)`` tuples for external mapping.
-
-        Mesh without beam kernels: ``kwargs`` is a dict for
-        :func:`~meer21cm.window.run_mesh_window_columns`.  Mesh with
-        theory-mode beam kernels sets ``use_worker_object=True`` so the pool must be
-        started with :func:`init_window_column_worker`.
-        """
-        if self.window_kind == "smooth":
-            swe = SmoothWindowEstimator.from_power_spectrum(
-                self, ells=self.window_ells, wide_angle=self.wide_angle
-            )
-            return swe.get_arg_list_for_seeds([0])
-
+    def _chunk_mesh_columns(self, n_chunks: int | None):
         cols = self._list_mesh_columns()
         n = max(1, int(n_chunks) if n_chunks is not None else len(cols) or 1)
         n = min(n, max(1, len(cols)))
@@ -1359,39 +1608,61 @@ class MultipolePowerSpectrum(
                 if take:
                     chunks.append(list(cols[idx : idx + take]))
                     idx += take
-        if self._use_inner_mode_taper():
-            self._warn_inner_taper_no_theory_beam()
-            weights = self._inner_mode_taper_weights()
-            build_kwargs = dict(
-                ps=self,
-                k_in=self._resolve_k_in(),
-                weights=weights,
-                ells=self.window_ells,
-                mode_scale=self._inner_mode_scale(),
-                renorm_weights=weights,
+        return chunks
+
+    def get_arg_list_for_window_columns(
+        self, n_chunks: int | None = None
+    ) -> list[tuple[dict, Any]]:
+        """
+        Pickleable ``(kwargs, columns)`` tuples for external mapping.
+
+        Mesh without beam kernels: ``kwargs`` is a dict for
+        :func:`~meer21cm.window.run_mesh_window_columns`.  Mesh with
+        theory-mode beam (or CIC-then-T + beam) kernels sets
+        ``use_worker_object=True`` so the pool must be started with
+        :func:`init_window_column_worker`.
+
+        Parameters
+        ----------
+        n_chunks : int, optional
+            Number of column chunks.  Default: one chunk per column.
+
+        Returns
+        -------
+        args : list of (dict, columns)
+            Map with :func:`run_window_column`.
+        """
+        if self.window_kind == "smooth":
+            swe = SmoothWindowEstimator.from_power_spectrum(
+                self, ells=self.window_ells, wide_angle=self.wide_angle
             )
-            return [
-                ({"kind": "mesh", "build_kwargs": build_kwargs}, ch) for ch in chunks
-            ]
-        if self._use_beam() and self._use_mas_out():
-            kwargs = {"use_worker_object": True, "kind": "mesh"}
-            return [(dict(kwargs), ch) for ch in chunks]
-        k_in = self._resolve_k_in()
-        weights = self._selection_weights()
-        build_kwargs = dict(
-            ps=self,
-            k_in=k_in,
-            weights=weights,
-            ells=self.window_ells,
-            mode_scale=self._window_mode_scale(),
-            renorm_weights=self._renorm_weights(),
-        )
+            return swe.get_arg_list_for_seeds([0])
+
+        chunks = self._chunk_mesh_columns(n_chunks)
+        kw = self._mesh_operator_kwargs()
+        if kw.get("in_bin_weights") is not None:
+            return [({"use_worker_object": True, "kind": "mesh"}, ch) for ch in chunks]
+        build_kwargs = dict(ps=self, k_in=self._resolve_k_in(), **kw)
         return [({"kind": "mesh", "build_kwargs": build_kwargs}, ch) for ch in chunks]
 
     def accumulate_window_columns(
         self, results: Sequence[DiscreteShellWindowMatrix]
     ) -> DiscreteShellWindowMatrix:
-        """Sum column chunks and attach the window matrix."""
+        """
+        Sum column chunks and attach the window matrix.
+
+        Parameters
+        ----------
+        results : sequence of DiscreteShellWindowMatrix
+            Outputs of :func:`run_window_column` (or
+            :func:`~meer21cm.window.build_mesh_window_matrix` with
+            ``columns=``).
+
+        Returns
+        -------
+        mat : DiscreteShellWindowMatrix
+            Attached as :attr:`window_matrix`.
+        """
         mat = accumulate_mesh_window_matrices(list(results))
         self.set_window_matrix(mat)
         self._window_k_in = np.asarray(mat.k_in, dtype=float)
@@ -1399,11 +1670,89 @@ class MultipolePowerSpectrum(
         self._model_multipoles = None
         return mat
 
+    def get_arg_list_for_model_cubes(
+        self, n_chunks: int | None = None
+    ) -> list[tuple[dict, Any]]:
+        """
+        Pickleable ``(kwargs, columns)`` tuples for 3D cube column chunks.
+
+        Same operator as :meth:`get_arg_list_for_window_columns`.  Map
+        with :func:`run_model_cube_column` (or :func:`run_window_column`
+        with ``kind='cubes'``).  Beam kernels need
+        :func:`init_window_column_worker`.
+
+        Parameters
+        ----------
+        n_chunks : int, optional
+            Number of column chunks.
+
+        Returns
+        -------
+        args : list of (dict, columns)
+        """
+        if self.window_kind == "smooth":
+            raise ValueError(
+                "3D model cubes are the mesh-window bake; "
+                "smooth windows use W @ P_ell"
+            )
+        chunks = self._chunk_mesh_columns(n_chunks)
+        kw = self._mesh_operator_kwargs()
+        if kw.get("in_bin_weights") is not None:
+            return [({"use_worker_object": True, "kind": "cubes"}, ch) for ch in chunks]
+        theory, theory_kmu = self._theory_for_cubes()
+        build_kwargs = dict(
+            ps=self,
+            k_in=self._resolve_k_in(),
+            theory=theory,
+            theory_kmu=theory_kmu,
+            **kw,
+        )
+        return [({"kind": "cubes", "build_kwargs": build_kwargs}, ch) for ch in chunks]
+
+    def accumulate_model_cubes(
+        self, results: Sequence[dict[int, np.ndarray]]
+    ) -> dict[int, np.ndarray]:
+        """
+        Sum 3D cube column chunks and cache them.
+
+        Parameters
+        ----------
+        results : sequence of dict
+            ``{ell: ndarray}`` partials from :func:`run_model_cube_column`.
+
+        Returns
+        -------
+        acc : dict
+            ``{ell: ndarray}`` on the rFFT grid.
+        """
+        acc = sum_mesh_window_cubes(list(results))
+        self._model_power_3d = acc
+        self._model_multipoles = None
+        return acc
+
     @classmethod
     def from_power_spectrum(cls, ps, **kwargs) -> MultipolePowerSpectrum:
         """
         Copy box, field, weights, bins, LOS, and lightcone state from a
         PowerSpectrum-like object (including :class:`~meer21cm.mock.MockSimulation`).
+
+        Also copies ``kperpbins`` / ``kparabins``, ``sigma_beam_ch`` /
+        ``beam_model``, and ``kaiser_rsd`` (overridable via ``kwargs``).
+        Window flags (``window``, ``window_taper_axes``, beam knobs,
+        ``n_k_in``, …) are constructor kwargs on this call — they are
+        not inferred.  Does **not** run :meth:`run_window_matrix` or
+        :meth:`run_model_power_3d`.
+
+        Parameters
+        ----------
+        ps : PowerSpectrum-like
+            Source object (must expose ``field_1``, ``box_len``, …).
+        **kwargs
+            Override copied attributes or set window options.
+
+        Returns
+        -------
+        mps : MultipolePowerSpectrum
         """
         weights_grid_1 = kwargs.pop(
             "weights_grid_1",

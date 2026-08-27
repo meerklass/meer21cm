@@ -227,12 +227,24 @@ def list_mesh_window_columns(
     in_group_scale: Sequence[ArrayLike] | None = None,
     in_bin_weights: Callable[[int, int], ArrayLike | None] | None = None,
     in_shell: Sequence[ArrayLike] | None = None,
+    column_empty: Callable[[int, int], bool] | None = None,
 ) -> list[int] | list[tuple[int, int]]:
     """
     Column ids filled by :func:`build_mesh_window_matrix`.
 
     Without inner-mode grouping this is ``range(n_k_in)``.  With
     ``in_bin_weights`` it is the active ``(group, k_in)`` pairs.
+
+    Parameters
+    ----------
+    n_k_in : int
+        Number of theory :math:`|k|` nodes.
+    in_group_index, in_group_scale, in_bin_weights, in_shell
+        Same meaning as in :func:`build_mesh_window_matrix`.
+    column_empty : callable, optional
+        ``column_empty(j, g) -> True`` to skip a ``(group, k_in)`` pair
+        without evaluating ``in_bin_weights`` (used when a CIC mass
+        function already knows the intersection is empty).
     """
     n_in = int(n_k_in)
     if in_bin_weights is None and in_group_index is None and in_group_scale is None:
@@ -262,10 +274,44 @@ def list_mesh_window_columns(
                 and not np.any(np.asarray(in_shell[j]) & sel_g)
             ):
                 continue
-            if in_bin_weights is not None and in_bin_weights(j, g) is None:
+            if column_empty is not None and column_empty(j, g):
+                continue
+            if (
+                column_empty is None
+                and in_bin_weights is not None
+                and in_bin_weights(j, g) is None
+            ):
                 continue
             cols.append((int(g), int(j)))
     return cols
+
+
+def sum_mesh_window_cubes(
+    parts: Sequence[Mapping[int, ArrayLike]],
+) -> dict[int, NDArray[np.floating]]:
+    r"""
+    Sum partial 3D mesh-window accumulators from column chunks.
+
+    Analogue of :func:`accumulate_mesh_window_matrices` for the unbinned
+    cubes returned by :func:`accumulate_mesh_window_cubes`.
+
+    Parameters
+    ----------
+    parts : sequence of dict
+        Each mapping is ``{ell: ndarray}`` on the rFFT grid.
+
+    Returns
+    -------
+    acc : dict
+        ``{ell: ndarray}`` summed over ``parts``.
+    """
+    if not parts:
+        raise ValueError("sum_mesh_window_cubes needs at least one partial")
+    out = {int(ell): np.asarray(parts[0][ell], dtype=float).copy() for ell in parts[0]}
+    for part in parts[1:]:
+        for ell in out:
+            out[int(ell)] = out[int(ell)] + np.asarray(part[ell], dtype=float)
+    return out
 
 
 def accumulate_mesh_window_matrices(
@@ -1546,6 +1592,388 @@ def _yamamoto_xi_kernels(w, xhat, ells_out, *, deconvolve_mas, wh_safe):
     return xi, w_tilde
 
 
+def _execute_mesh_window(
+    ps,
+    k_in: ArrayLike,
+    *,
+    weights: ArrayLike,
+    ells: Sequence[int] = (0, 2, 4),
+    mode_scale: ArrayLike | None = None,
+    out_mode_scale: ArrayLike | None = None,
+    deconvolve_mas: bool = False,
+    w_mas: ArrayLike | None = None,
+    renorm_weights: ArrayLike | None = None,
+    map_m2: ArrayLike | None = None,
+    out_bin_weights: Sequence[ArrayLike] | None = None,
+    out_group_index: ArrayLike | None = None,
+    diag_correction: dict | None = None,
+    in_bin_weights: Callable[[int, int], ArrayLike | None] | None = None,
+    in_group_index: ArrayLike | None = None,
+    in_group_scale: Sequence[ArrayLike] | None = None,
+    leg_scale: dict | None = None,
+    columns: Sequence[int] | Sequence[tuple[int, int]] | None = None,
+    column_empty: Callable[[int, int], bool] | None = None,
+    theory: ArrayLike | None = None,
+    theory_kmu: ArrayLike | None = None,
+    want: str = "matrix",
+    progress=None,
+):
+    r"""Shared mesh-window column fill (``want='matrix'`` or ``'cubes'``).
+
+    See :func:`build_mesh_window_matrix` and
+    :func:`accumulate_mesh_window_cubes` for equations and parameters.
+    Extra arguments: ``theory``, ``theory_kmu``, ``want``, ``progress``.
+    """
+    require_yamamoto_los(str(getattr(ps, "los", "endpoint")))
+    want_s = str(want)
+    if want_s not in ("matrix", "cubes"):
+        raise ValueError("want must be 'matrix' or 'cubes'")
+    ells_out_t = tuple(int(e) for e in ells)
+    ells_in_t = (0,)
+    k_in_np = np.asarray(k_in, dtype=float)
+    _warn_truncated_mesh_k_in(ps, k_in_np)
+    w = np.asarray(weights, dtype=float)
+    shape = tuple(w.shape)
+    n_grid = int(np.prod(shape))
+    w_ren = w if renorm_weights is None else np.asarray(renorm_weights, dtype=float)
+    if w_ren.shape != shape:
+        raise ValueError("renorm_weights must match weights shape")
+    R = float(power_weights_renorm(w_ren, w_ren))
+
+    w_tilde = np.fft.rfftn(w, norm="forward")
+    wh_safe = None
+    if deconvolve_mas:
+        if w_mas is None:
+            raise ValueError("deconvolve_mas=True requires w_mas on the rFFT grid")
+        wh = np.asarray(w_mas, dtype=float)
+        if wh.shape != w_tilde.shape:
+            raise ValueError(f"w_mas shape {wh.shape} != rFFT shape {w_tilde.shape}")
+        wh_safe = np.where(np.abs(wh) > 1e-30, wh, 1.0)
+        w_tilde = w_tilde / wh_safe
+
+    khat = unit_khat_from_k_vec(ps.k_vec)
+    xhat = ps.los_xhat
+    nz = w_tilde.shape[2]
+
+    k_mode = np.asarray(ps.k_mode, dtype=float).ravel()
+    k1dweights = (
+        np.ones_like(k_mode)
+        if getattr(ps, "k1dweights", None) is None
+        else np.asarray(ps.k1dweights, dtype=float).ravel()
+    )
+    k1dbins = np.asarray(ps.k1dbins, dtype=float)
+    n_out = len(k1dbins) - 1
+    if mode_scale is None:
+        ms = np.ones(w_tilde.shape, dtype=float)
+    else:
+        ms = np.asarray(mode_scale, dtype=float)
+        if ms.shape != w_tilde.shape:
+            raise ValueError(
+                "mode_scale must match the rFFT grid shape "
+                f"(got {ms.shape}, expected {w_tilde.shape})"
+            )
+
+    if out_mode_scale is None:
+        oms = np.ones(w_tilde.shape, dtype=float)
+    else:
+        oms = np.asarray(out_mode_scale, dtype=float)
+        if oms.shape != w_tilde.shape:
+            raise ValueError(
+                "out_mode_scale must match the rFFT grid shape "
+                f"(got {oms.shape}, expected {w_tilde.shape})"
+            )
+
+    # |k| shell of each theory node (Voronoi on k_in) and of each output bin
+    shell_edges = np.concatenate(([0.0], 0.5 * (k_in_np[:-1] + k_in_np[1:]), [np.inf]))
+    in_shell = [
+        (k_mode >= shell_edges[j]) & (k_mode < shell_edges[j + 1])
+        for j in range(len(k_in_np))
+    ]
+    pk_mu = None
+    if theory_kmu is not None:
+        pk_mu = np.asarray(theory_kmu, dtype=float)
+        if pk_mu.shape != w_tilde.shape:
+            raise ValueError(f"theory_kmu shape {pk_mu.shape} != rFFT {w_tilde.shape}")
+    theory_j = None
+    if theory is not None:
+        theory_j = np.asarray(theory, dtype=float).reshape(-1)
+        if theory_j.size != len(k_in_np):
+            raise ValueError(f"theory length {theory_j.size} != n_k_in {len(k_in_np)}")
+    acc_cubes = (
+        {ell: np.zeros(w_tilde.shape, dtype=float) for ell in ells_out_t}
+        if want_s == "cubes"
+        else None
+    )
+    bin_idx = np.digitize(k_mode, k1dbins) - 1
+    valid = (bin_idx >= 0) & (bin_idx < n_out) & (k1dweights > 0)
+    w_bin = np.bincount(
+        bin_idx[valid], weights=k1dweights[valid], minlength=n_out
+    ).astype(float)
+    w_bin[w_bin <= 0] = np.nan
+    k_eff = np.bincount(
+        bin_idx[valid], weights=(k_mode * k1dweights)[valid], minlength=n_out
+    ) / np.where(np.isnan(w_bin), 1.0, w_bin)
+    nmodes = np.bincount(bin_idx[valid], minlength=n_out).astype(float)
+
+    matrix = np.zeros((len(ells_out_t) * n_out, len(k_in_np)), dtype=float)
+    group_masks = None
+    if in_bin_weights is not None:
+        if out_bin_weights is not None:
+            raise ValueError("in_bin_weights is incompatible with out_bin_weights")
+        if map_m2 is not None:
+            raise ValueError("in_bin_weights is incompatible with map_m2")
+        if in_group_scale is not None and in_group_index is not None:
+            raise ValueError("in_group_scale and in_group_index are alternatives")
+        if in_group_scale is not None:
+            scale_list = []
+            for i_s, arr in enumerate(in_group_scale):
+                a = np.asarray(arr, dtype=float)
+                if a.size != k_mode.size:
+                    raise ValueError(
+                        f"in_group_scale[{i_s}] size {a.size} != n_mode {k_mode.size}"
+                    )
+                scale_list.append(a)
+            n_gin = len(scale_list)
+            gi_flat = None
+        elif in_group_index is None:
+            raise ValueError("in_bin_weights requires in_group_index or in_group_scale")
+        else:
+            gi_flat = np.asarray(in_group_index, dtype=np.int64).ravel()
+            if gi_flat.size != k_mode.size:
+                raise ValueError(
+                    f"in_group_index size {gi_flat.size} != n_mode {k_mode.size}"
+                )
+            n_gin = int(gi_flat.max()) + 1
+            scale_list = None
+        weight_list = None
+        xi = None
+    elif out_bin_weights is None:
+        weight_list = None
+        xi, _ = _yamamoto_xi_kernels(
+            w, xhat, ells_out_t, deconvolve_mas=deconvolve_mas, wh_safe=wh_safe
+        )
+    else:
+        if map_m2 is not None:
+            raise ValueError("out_bin_weights is incompatible with map_m2")
+        if out_group_index is None:
+            if len(out_bin_weights) != n_out:
+                raise ValueError(
+                    f"out_bin_weights length {len(out_bin_weights)} != n_out {n_out}"
+                )
+            g_flat = np.where(valid, bin_idx, -1)
+        else:
+            g_flat = np.asarray(out_group_index, dtype=np.int64).ravel()
+            if g_flat.size != k_mode.size:
+                raise ValueError(
+                    f"out_group_index size {g_flat.size} != n_mode {k_mode.size}"
+                )
+            if int(g_flat.max()) + 1 > len(out_bin_weights):
+                raise ValueError(
+                    f"out_group_index has {int(g_flat.max()) + 1} groups but "
+                    f"out_bin_weights has {len(out_bin_weights)}"
+                )
+        weight_list = []
+        for i, wi in enumerate(out_bin_weights):
+            arr = np.asarray(wi, dtype=float)
+            if arr.shape != shape:
+                raise ValueError(
+                    f"out_bin_weights[{i}] shape {arr.shape} != weights {shape}"
+                )
+            weight_list.append(arr)
+        group_masks = [valid & (g_flat == g) for g in range(len(weight_list))]
+
+    leg_s = None
+    if leg_scale is not None:
+        if diag_correction is not None:
+            raise ValueError("leg_scale and diag_correction are alternatives")
+        leg_s = {}
+        for key, arr in leg_scale.items():
+            a = np.asarray(arr, dtype=float)
+            if a.shape != w_tilde.shape:
+                raise ValueError(
+                    f"leg_scale[{key}] shape {a.shape} != rFFT {w_tilde.shape}"
+                )
+            leg_s[tuple(int(v) for v in key)] = a
+
+    diag_c = None
+    if diag_correction is not None:
+        diag_c = {}
+        for key, arr in diag_correction.items():
+            a = np.asarray(arr, dtype=float)
+            if a.shape != w_tilde.shape:
+                raise ValueError(
+                    f"diag_correction[{key}] shape {a.shape} != rFFT {w_tilde.shape}"
+                )
+            diag_c[tuple(int(v) for v in key)] = a
+
+    def _theory_ifft(j, extra=None):
+        # T(q) is real and even, so the Hermitian extension is q -> -q on
+        # all three axes.  A z-only flip happens to agree for an isotropic
+        # shell but not for a mu group, whose membership is set by the
+        # observer LOS rather than the box axes.
+        # extra may be a bool partition (mu/phi groups) or a float
+        # theory weight (α_LM² on the whole shell).
+        t_rfft = ms * in_shell[j].reshape(w_tilde.shape)
+        if extra is not None:
+            t_rfft = t_rfft * np.asarray(extra, dtype=float).reshape(w_tilde.shape)
+        if pk_mu is not None:
+            t_rfft = t_rfft * pk_mu
+        return np.fft.ifftn(_extend_hermitian_z(t_rfft.astype(complex), shape))
+
+    def _fill_from_xi(xi_use, xi_t, j, mask=None, accumulate=False, in_mask=None):
+        sel = valid if mask is None else mask
+        t_diag = None
+        if diag_c is not None:
+            # kappa = 0 means q = k, so an inner-mode group restricts which
+            # output modes may take the diagonal — otherwise every group
+            # would add it again.
+            sel_in = in_shell[j] if in_mask is None else (in_shell[j] & in_mask)
+            t_diag = ms * sel_in.reshape(w_tilde.shape)
+            if pk_mu is not None:
+                t_diag = t_diag * pk_mu
+        amp = 1.0 if pk_mu is not None or theory_j is None else float(theory_j[j])
+        for i_ell, ell in enumerate(ells_out_t):
+            cube = np.zeros(w_tilde.shape, dtype=complex)
+            for m in range(-ell, ell + 1):
+                ylm = get_real_Ylm(ell, m)
+                conv = np.fft.fftn(xi_use[(ell, m)] * xi_t) * n_grid
+                term = conv[..., :nz]
+                if leg_s is not None and (ell, m) in leg_s:
+                    term = term * leg_s[(ell, m)]
+                cube = cube + ylm(*khat) * term
+                if t_diag is not None and (ell, m) in diag_c:
+                    cube = cube + ylm(*khat) * (diag_c[(ell, m)] * t_diag)
+            p3d = (4.0 * np.pi) * R * np.real(cube) * oms
+            if want_s == "cubes":
+                acc_cubes[ell] += amp * p3d
+                continue
+            binned = (
+                np.bincount(bin_idx[sel], weights=p3d.ravel()[sel], minlength=n_out)
+                / w_bin
+            )
+            rows = slice(i_ell * n_out, (i_ell + 1) * n_out)
+            if mask is None and not accumulate:
+                matrix[rows, j] = np.nan_to_num(binned)
+            else:
+                matrix[rows, j] += np.nan_to_num(binned)
+
+    col_j = None
+    col_gj = None
+    if columns is not None:
+        col_list = list(columns)
+        if col_list and isinstance(col_list[0], (tuple, list, np.ndarray)):
+            col_gj = {(int(g), int(j)) for g, j in col_list}
+        else:
+            col_j = {int(j) for j in col_list}
+
+    if in_bin_weights is not None:
+        empty_in = np.zeros(k_mode.size, dtype=bool)
+        for g in range(n_gin):
+            if gi_flat is not None:
+                sel_g = gi_flat == g
+                if not np.any(sel_g):
+                    continue
+                extra_g = sel_g
+            else:
+                sel_g = None
+                extra_g = scale_list[g]
+            for j in range(len(k_in_np)):
+                if col_gj is not None and (g, j) not in col_gj:
+                    continue
+                if col_j is not None and j not in col_j:
+                    continue
+                if sel_g is not None and not np.any(in_shell[j] & sel_g):
+                    continue
+                if column_empty is not None and column_empty(j, g):
+                    continue
+                cube_g = in_bin_weights(j, g)
+                if cube_g is None:
+                    if progress is not None:
+                        progress()
+                    continue
+                cube_g = np.asarray(cube_g, dtype=float)
+                if cube_g.shape != shape:
+                    raise ValueError(
+                        f"in_bin_weights({j},{g}) shape {cube_g.shape} != {shape}"
+                    )
+                xi_g, _ = _yamamoto_xi_kernels(
+                    cube_g,
+                    xhat,
+                    ells_out_t,
+                    deconvolve_mas=deconvolve_mas,
+                    wh_safe=wh_safe,
+                )
+                if sel_g is not None:
+                    in_mask = sel_g
+                else:
+                    # α_LM² weights every shell mode; add κ=0 once.
+                    in_mask = in_shell[j] if g == 0 else empty_in
+                _fill_from_xi(
+                    xi_g,
+                    _theory_ifft(j, extra=extra_g),
+                    j,
+                    accumulate=True,
+                    in_mask=in_mask,
+                )
+                if progress is not None:
+                    progress()
+    elif weight_list is None:
+        for j in range(len(k_in_np)):
+            if col_j is not None and j not in col_j:
+                continue
+            if col_gj is not None and j not in {jj for _, jj in col_gj}:
+                continue
+            _fill_from_xi(xi, _theory_ifft(j), j)
+            if progress is not None:
+                progress()
+    else:
+        j_iter = range(len(k_in_np))
+        if col_j is not None:
+            j_iter = [j for j in j_iter if j in col_j]
+        xi_t_list = {j: _theory_ifft(j) for j in j_iter}
+        for g, w_g in enumerate(weight_list):
+            if not np.any(group_masks[g]):
+                continue
+            xi_g, _ = _yamamoto_xi_kernels(
+                w_g, xhat, ells_out_t, deconvolve_mas=deconvolve_mas, wh_safe=wh_safe
+            )
+            for j, xi_t in xi_t_list.items():
+                if col_gj is not None and (g, j) not in col_gj:
+                    continue
+                _fill_from_xi(xi_g, xi_t, j, mask=group_masks[g])
+
+    shot_offset = None
+    if want_s == "matrix" and map_m2 is not None and columns is None:
+        # exact b=b' diagonal: replace the model's own diagonal (whose
+        # per-cell variance is mode_scale-suppressed) with the data's actual
+        # diagonal (the map variance).  The subtraction is per column; the
+        # data diagonal is a theory-independent monopole offset.
+        shot = map_sampling_shot_diagonal(
+            ps,
+            weights=weights,
+            mode_scale=ms,
+            map_m2=map_m2,
+            k_in=k_in_np,
+        )
+        if shot["cols"].shape != (len(k_in_np), n_out):
+            raise RuntimeError("shot diagonal column shape mismatch")
+        matrix[0:n_out, :] -= shot["cols"].T
+        shot_offset = shot["offset"]
+
+    if want_s == "cubes":
+        return acc_cubes
+    return DiscreteShellWindowMatrix(
+        matrix=matrix,
+        k_in=k_in_np,
+        k_out=k_eff,
+        nmodes=nmodes,
+        ells=ells_out_t,
+        ells_in=ells_in_t,
+        ells_out=ells_out_t,
+        offset=shot_offset,
+    )
+
+
 def build_mesh_window_matrix(
     ps,
     k_in: ArrayLike,
@@ -1566,6 +1994,7 @@ def build_mesh_window_matrix(
     in_group_scale: Sequence[ArrayLike] | None = None,
     leg_scale: dict | None = None,
     columns: Sequence[int] | Sequence[tuple[int, int]] | None = None,
+    column_empty: Callable[[int, int], bool] | None = None,
 ) -> DiscreteShellWindowMatrix:
     r"""
     Exact mesh-level (FFT) window matrix for a local-LOS Yamamoto estimator.
@@ -1705,318 +2134,142 @@ def build_mesh_window_matrix(
         groups of ``in_bin_weights``.  ``None`` fills every column.
         Chunks sum with :func:`accumulate_mesh_window_matrices`.
         ``map_m2`` is applied only on a full (``columns is None``) build.
+
+    Returns
+    -------
+    mat : DiscreteShellWindowMatrix
+        Dense :math:`P_0(k_{\mathrm{in}})\to P_\ell(k_{\mathrm{out}})`
+        matrix.  Unbinned theory-baked cubes are
+        :func:`accumulate_mesh_window_cubes`.
+
+    References
+    ----------
+    Hand et al., 2017, AJ, 154, 199 (arXiv:1704.02357)
     """
-    require_yamamoto_los(str(getattr(ps, "los", "endpoint")))
-    ells_out_t = tuple(int(e) for e in ells)
-    ells_in_t = (0,)
-    k_in_np = np.asarray(k_in, dtype=float)
-    _warn_truncated_mesh_k_in(ps, k_in_np)
-    w = np.asarray(weights, dtype=float)
-    shape = tuple(w.shape)
-    n_grid = int(np.prod(shape))
-    w_ren = w if renorm_weights is None else np.asarray(renorm_weights, dtype=float)
-    if w_ren.shape != shape:
-        raise ValueError("renorm_weights must match weights shape")
-    R = float(power_weights_renorm(w_ren, w_ren))
-
-    w_tilde = np.fft.rfftn(w, norm="forward")
-    wh_safe = None
-    if deconvolve_mas:
-        if w_mas is None:
-            raise ValueError("deconvolve_mas=True requires w_mas on the rFFT grid")
-        wh = np.asarray(w_mas, dtype=float)
-        if wh.shape != w_tilde.shape:
-            raise ValueError(f"w_mas shape {wh.shape} != rFFT shape {w_tilde.shape}")
-        wh_safe = np.where(np.abs(wh) > 1e-30, wh, 1.0)
-        w_tilde = w_tilde / wh_safe
-
-    khat = unit_khat_from_k_vec(ps.k_vec)
-    xhat = ps.los_xhat
-    nz = w_tilde.shape[2]
-
-    k_mode = np.asarray(ps.k_mode, dtype=float).ravel()
-    k1dweights = (
-        np.ones_like(k_mode)
-        if getattr(ps, "k1dweights", None) is None
-        else np.asarray(ps.k1dweights, dtype=float).ravel()
+    return _execute_mesh_window(
+        ps,
+        k_in,
+        weights=weights,
+        ells=ells,
+        mode_scale=mode_scale,
+        out_mode_scale=out_mode_scale,
+        deconvolve_mas=deconvolve_mas,
+        w_mas=w_mas,
+        renorm_weights=renorm_weights,
+        map_m2=map_m2,
+        out_bin_weights=out_bin_weights,
+        out_group_index=out_group_index,
+        diag_correction=diag_correction,
+        in_bin_weights=in_bin_weights,
+        in_group_index=in_group_index,
+        in_group_scale=in_group_scale,
+        leg_scale=leg_scale,
+        columns=columns,
+        column_empty=column_empty,
+        want="matrix",
     )
-    k1dbins = np.asarray(ps.k1dbins, dtype=float)
-    n_out = len(k1dbins) - 1
-    if mode_scale is None:
-        ms = np.ones(w_tilde.shape, dtype=float)
-    else:
-        ms = np.asarray(mode_scale, dtype=float)
-        if ms.shape != w_tilde.shape:
-            raise ValueError(
-                "mode_scale must match the rFFT grid shape "
-                f"(got {ms.shape}, expected {w_tilde.shape})"
-            )
 
-    if out_mode_scale is None:
-        oms = np.ones(w_tilde.shape, dtype=float)
-    else:
-        oms = np.asarray(out_mode_scale, dtype=float)
-        if oms.shape != w_tilde.shape:
-            raise ValueError(
-                "out_mode_scale must match the rFFT grid shape "
-                f"(got {oms.shape}, expected {w_tilde.shape})"
-            )
 
-    # |k| shell of each theory node (Voronoi on k_in) and of each output bin
-    shell_edges = np.concatenate(([0.0], 0.5 * (k_in_np[:-1] + k_in_np[1:]), [np.inf]))
-    in_shell = [
-        (k_mode >= shell_edges[j]) & (k_mode < shell_edges[j + 1])
-        for j in range(len(k_in_np))
-    ]
-    bin_idx = np.digitize(k_mode, k1dbins) - 1
-    valid = (bin_idx >= 0) & (bin_idx < n_out) & (k1dweights > 0)
-    w_bin = np.bincount(
-        bin_idx[valid], weights=k1dweights[valid], minlength=n_out
-    ).astype(float)
-    w_bin[w_bin <= 0] = np.nan
-    k_eff = np.bincount(
-        bin_idx[valid], weights=(k_mode * k1dweights)[valid], minlength=n_out
-    ) / np.where(np.isnan(w_bin), 1.0, w_bin)
-    nmodes = np.bincount(bin_idx[valid], minlength=n_out).astype(float)
+def accumulate_mesh_window_cubes(
+    ps,
+    k_in: ArrayLike,
+    *,
+    weights: ArrayLike,
+    ells: Sequence[int] = (0, 2, 4),
+    mode_scale: ArrayLike | None = None,
+    out_mode_scale: ArrayLike | None = None,
+    deconvolve_mas: bool = False,
+    w_mas: ArrayLike | None = None,
+    renorm_weights: ArrayLike | None = None,
+    out_bin_weights: Sequence[ArrayLike] | None = None,
+    out_group_index: ArrayLike | None = None,
+    diag_correction: dict | None = None,
+    in_bin_weights: Callable[[int, int], ArrayLike | None] | None = None,
+    in_group_index: ArrayLike | None = None,
+    in_group_scale: Sequence[ArrayLike] | None = None,
+    leg_scale: dict | None = None,
+    columns: Sequence[int] | Sequence[tuple[int, int]] | None = None,
+    column_empty: Callable[[int, int], bool] | None = None,
+    theory: ArrayLike | None = None,
+    theory_kmu: ArrayLike | None = None,
+    progress=None,
+) -> dict[int, NDArray[np.floating]]:
+    r"""
+    Theory-baked 3D Yamamoto multipole cubes from the mesh-window operator.
 
-    matrix = np.zeros((len(ells_out_t) * n_out, len(k_in_np)), dtype=float)
-    group_masks = None
-    if in_bin_weights is not None:
-        if out_bin_weights is not None:
-            raise ValueError("in_bin_weights is incompatible with out_bin_weights")
-        if map_m2 is not None:
-            raise ValueError("in_bin_weights is incompatible with map_m2")
-        if in_group_scale is not None and in_group_index is not None:
-            raise ValueError("in_group_scale and in_group_index are alternatives")
-        if in_group_scale is not None:
-            scale_list = []
-            for i_s, arr in enumerate(in_group_scale):
-                a = np.asarray(arr, dtype=float)
-                if a.size != k_mode.size:
-                    raise ValueError(
-                        f"in_group_scale[{i_s}] size {a.size} != n_mode {k_mode.size}"
-                    )
-                scale_list.append(a)
-            n_gin = len(scale_list)
-            gi_flat = None
-        elif in_group_index is None:
-            raise ValueError("in_bin_weights requires in_group_index or in_group_scale")
-        else:
-            gi_flat = np.asarray(in_group_index, dtype=np.int64).ravel()
-            if gi_flat.size != k_mode.size:
-                raise ValueError(
-                    f"in_group_index size {gi_flat.size} != n_mode {k_mode.size}"
-                )
-            n_gin = int(gi_flat.max()) + 1
-            scale_list = None
-        weight_list = None
-        xi = None
-    elif out_bin_weights is None:
-        weight_list = None
-        xi, _ = _yamamoto_xi_kernels(
-            w, xhat, ells_out_t, deconvolve_mas=deconvolve_mas, wh_safe=wh_safe
-        )
-    else:
-        if map_m2 is not None:
-            raise ValueError("out_bin_weights is incompatible with map_m2")
-        if out_group_index is None:
-            if len(out_bin_weights) != n_out:
-                raise ValueError(
-                    f"out_bin_weights length {len(out_bin_weights)} != n_out {n_out}"
-                )
-            g_flat = np.where(valid, bin_idx, -1)
-        else:
-            g_flat = np.asarray(out_group_index, dtype=np.int64).ravel()
-            if g_flat.size != k_mode.size:
-                raise ValueError(
-                    f"out_group_index size {g_flat.size} != n_mode {k_mode.size}"
-                )
-            if int(g_flat.max()) + 1 > len(out_bin_weights):
-                raise ValueError(
-                    f"out_group_index has {int(g_flat.max()) + 1} groups but "
-                    f"out_bin_weights has {len(out_bin_weights)}"
-                )
-        weight_list = []
-        for i, wi in enumerate(out_bin_weights):
-            arr = np.asarray(wi, dtype=float)
-            if arr.shape != shape:
-                raise ValueError(
-                    f"out_bin_weights[{i}] shape {arr.shape} != weights {shape}"
-                )
-            weight_list.append(arr)
-        group_masks = [valid & (g_flat == g) for g in range(len(weight_list))]
+    Same column loop as :func:`build_mesh_window_matrix`, but each column
+    is scaled by theory and **summed unbinned** on the rFFT grid instead
+    of being stored as a matrix column.  For isotropic theory
 
-    leg_s = None
-    if leg_scale is not None:
-        if diag_correction is not None:
-            raise ValueError("leg_scale and diag_correction are alternatives")
-        leg_s = {}
-        for key, arr in leg_scale.items():
-            a = np.asarray(arr, dtype=float)
-            if a.shape != w_tilde.shape:
-                raise ValueError(
-                    f"leg_scale[{key}] shape {a.shape} != rFFT {w_tilde.shape}"
-                )
-            leg_s[tuple(int(v) for v in key)] = a
+    .. math::
 
-    diag_c = None
-    if diag_correction is not None:
-        diag_c = {}
-        for key, arr in diag_correction.items():
-            a = np.asarray(arr, dtype=float)
-            if a.shape != w_tilde.shape:
-                raise ValueError(
-                    f"diag_correction[{key}] shape {a.shape} != rFFT {w_tilde.shape}"
-                )
-            diag_c[tuple(int(v) for v in key)] = a
+        P_\ell^{3D}(\mathbf k)
+        =
+        \sum_j P_0(k_{\mathrm{in},j})\,
+        \mathcal{R}_\ell(\mathbf k;\,S_j),
 
-    def _theory_ifft(j, extra=None):
-        # T(q) is real and even, so the Hermitian extension is q -> -q on
-        # all three axes.  A z-only flip happens to agree for an isotropic
-        # shell but not for a mu group, whose membership is set by the
-        # observer LOS rather than the box axes.
-        # extra may be a bool partition (mu/phi groups) or a float
-        # theory weight (α_LM² on the whole shell).
-        t_rfft = ms * in_shell[j].reshape(w_tilde.shape)
-        if extra is not None:
-            t_rfft = t_rfft * np.asarray(extra, dtype=float).reshape(w_tilde.shape)
-        return np.fft.ifftn(_extend_hermitian_z(t_rfft.astype(complex), shape))
+    where :math:`\mathcal{R}_\ell(\mathbf k; S_j)` is the unit-shell
+    response that becomes column :math:`j` of :math:`W` after
+    :math:`|k|`-shell binning.  Consequently, with the same
+    ``k1dweights``,
 
-    def _fill_from_xi(xi_use, xi_t, j, mask=None, accumulate=False, in_mask=None):
-        sel = valid if mask is None else mask
-        t_diag = None
-        if diag_c is not None:
-            # kappa = 0 means q = k, so an inner-mode group restricts which
-            # output modes may take the diagonal — otherwise every group
-            # would add it again.
-            sel_in = in_shell[j] if in_mask is None else (in_shell[j] & in_mask)
-            t_diag = ms * sel_in.reshape(w_tilde.shape)
-        for i_ell, ell in enumerate(ells_out_t):
-            cube = np.zeros(w_tilde.shape, dtype=complex)
-            for m in range(-ell, ell + 1):
-                ylm = get_real_Ylm(ell, m)
-                conv = np.fft.fftn(xi_use[(ell, m)] * xi_t) * n_grid
-                term = conv[..., :nz]
-                if leg_s is not None and (ell, m) in leg_s:
-                    term = term * leg_s[(ell, m)]
-                cube = cube + ylm(*khat) * term
-                if t_diag is not None and (ell, m) in diag_c:
-                    cube = cube + ylm(*khat) * (diag_c[(ell, m)] * t_diag)
-            p3d = (4.0 * np.pi) * R * np.real(cube) * oms
-            binned = (
-                np.bincount(bin_idx[sel], weights=p3d.ravel()[sel], minlength=n_out)
-                / w_bin
-            )
-            rows = slice(i_ell * n_out, (i_ell + 1) * n_out)
-            if mask is None and not accumulate:
-                matrix[rows, j] = np.nan_to_num(binned)
-            else:
-                matrix[rows, j] += np.nan_to_num(binned)
+    .. math::
 
-    col_j = None
-    col_gj = None
-    if columns is not None:
-        col_list = list(columns)
-        if col_list and isinstance(col_list[0], (tuple, list, np.ndarray)):
-            col_gj = {(int(g), int(j)) for g, j in col_list}
-        else:
-            col_j = {int(j) for j in col_list}
+        \mathrm{bin}_{|k|}[P_\ell^{3D}] = (W P_0)_\ell.
 
-    if in_bin_weights is not None:
-        empty_in = np.zeros(k_mode.size, dtype=bool)
-        for g in range(n_gin):
-            if gi_flat is not None:
-                sel_g = gi_flat == g
-                if not np.any(sel_g):
-                    continue
-                extra_g = sel_g
-            else:
-                sel_g = None
-                extra_g = scale_list[g]
-            for j in range(len(k_in_np)):
-                if col_gj is not None and (g, j) not in col_gj:
-                    continue
-                if col_j is not None and j not in col_j:
-                    continue
-                if sel_g is not None and not np.any(in_shell[j] & sel_g):
-                    continue
-                cube_g = in_bin_weights(j, g)
-                if cube_g is None:
-                    continue
-                cube_g = np.asarray(cube_g, dtype=float)
-                if cube_g.shape != shape:
-                    raise ValueError(
-                        f"in_bin_weights({j},{g}) shape {cube_g.shape} != {shape}"
-                    )
-                xi_g, _ = _yamamoto_xi_kernels(
-                    cube_g,
-                    xhat,
-                    ells_out_t,
-                    deconvolve_mas=deconvolve_mas,
-                    wh_safe=wh_safe,
-                )
-                if sel_g is not None:
-                    in_mask = sel_g
-                else:
-                    # α_LM² weights every shell mode; add κ=0 once.
-                    in_mask = in_shell[j] if g == 0 else empty_in
-                _fill_from_xi(
-                    xi_g,
-                    _theory_ifft(j, extra=extra_g),
-                    j,
-                    accumulate=True,
-                    in_mask=in_mask,
-                )
-    elif weight_list is None:
-        for j in range(len(k_in_np)):
-            if col_j is not None and j not in col_j:
-                continue
-            if col_gj is not None and j not in {jj for _, jj in col_gj}:
-                continue
-            _fill_from_xi(xi, _theory_ifft(j), j)
-    else:
-        j_iter = range(len(k_in_np))
-        if col_j is not None:
-            j_iter = [j for j in j_iter if j in col_j]
-        xi_t_list = {j: _theory_ifft(j) for j in j_iter}
-        for g, w_g in enumerate(weight_list):
-            if not np.any(group_masks[g]):
-                continue
-            xi_g, _ = _yamamoto_xi_kernels(
-                w_g, xhat, ells_out_t, deconvolve_mas=deconvolve_mas, wh_safe=wh_safe
-            )
-            for j, xi_t in xi_t_list.items():
-                if col_gj is not None and (g, j) not in col_gj:
-                    continue
-                _fill_from_xi(xi_g, xi_t, j, mask=group_masks[g])
+    For Kaiser anisotropy pass ``theory_kmu``: the theory IFFT carries
+    :math:`P(k,\mu)` on the rFFT grid (``amp = 1``; ``theory`` unused).
+    Mesh :math:`W` still has ``ells_in = (0,)`` — anisotropic theory
+    lives on these cubes, not in ``mode_scale``.
 
-    shot_offset = None
-    if map_m2 is not None and columns is None:
-        # exact b=b' diagonal: replace the model's own diagonal (whose
-        # per-cell variance is mode_scale-suppressed) with the data's actual
-        # diagonal (the map variance).  The subtraction is per column; the
-        # data diagonal is a theory-independent monopole offset.
-        shot = map_sampling_shot_diagonal(
-            ps,
-            weights=weights,
-            mode_scale=ms,
-            map_m2=map_m2,
-            k_in=k_in_np,
-        )
-        if shot["cols"].shape != (len(k_in_np), n_out):
-            raise RuntimeError("shot diagonal column shape mismatch")
-        matrix[0:n_out, :] -= shot["cols"].T
-        shot_offset = shot["offset"]
+    Parameters
+    ----------
+    ps, k_in, weights, ells, mode_scale, out_mode_scale, ...
+        Same kernel arguments as :func:`build_mesh_window_matrix`.
+    theory : array_like, optional
+        Isotropic :math:`P_0(k_{\mathrm{in}})` of length ``len(k_in)``.
+        Ignored when ``theory_kmu`` is set.  If both are omitted every
+        column contributes with amplitude 1 (sum of unit shells).
+    theory_kmu : array_like, optional
+        Anisotropic :math:`P(k,\mu)` on the rFFT grid (same shape as
+        ``ps.k_mode``).  Typical source:
+        :meth:`~meer21cm.model.ModelPowerSpectrum.power_kmu`.
+    columns, column_empty, progress
+        Column subset, skip-empty callback, and per-column progress hook
+        (same as the validation 3D accumulator).
 
-    return DiscreteShellWindowMatrix(
-        matrix=matrix,
-        k_in=k_in_np,
-        k_out=k_eff,
-        nmodes=nmodes,
-        ells=ells_out_t,
-        ells_in=ells_in_t,
-        ells_out=ells_out_t,
-        offset=shot_offset,
+    Returns
+    -------
+    acc : dict
+        ``{ell: ndarray}`` on the rFFT grid.
+
+    References
+    ----------
+    Hand et al., 2017, AJ, 154, 199 (arXiv:1704.02357)
+    """
+    return _execute_mesh_window(
+        ps,
+        k_in,
+        weights=weights,
+        ells=ells,
+        mode_scale=mode_scale,
+        out_mode_scale=out_mode_scale,
+        deconvolve_mas=deconvolve_mas,
+        w_mas=w_mas,
+        renorm_weights=renorm_weights,
+        out_bin_weights=out_bin_weights,
+        out_group_index=out_group_index,
+        diag_correction=diag_correction,
+        in_bin_weights=in_bin_weights,
+        in_group_index=in_group_index,
+        in_group_scale=in_group_scale,
+        leg_scale=leg_scale,
+        columns=columns,
+        column_empty=column_empty,
+        theory=theory,
+        theory_kmu=theory_kmu,
+        want="cubes",
+        progress=progress,
     )
 
 
@@ -2066,118 +2319,27 @@ def ngp_raw_cell_comb(ps, particle_mass=None):
     return np.asarray(raw, dtype=float)
 
 
-def build_mesh_window_mas_out(
+def _mas_out_kernel_kwargs(
     ps,
-    k_in: ArrayLike,
+    k_in,
     *,
-    renorm_weights: ArrayLike,
-    ells: Sequence[int] = (0, 2, 4),
-    mode_scale: ArrayLike | None = None,
-    particle_mass: ArrayLike | None = None,
-    raw_comb: ArrayLike | None = None,
-    out_mode_scale_extra: ArrayLike | None = None,
-    beam_at_output_mode: bool = False,
-    beam_at_theory_mode: bool = False,
-    beam_n_mu: int = 4,
-    beam_n_phi: int = 1,
-    beam_diag_correction: bool = True,
-    beam_diag_as_ratio: bool = False,
-    beam_l_max: int | None = None,
-    beam_ylm: bool = False,
-    beam_ylm_lmax: int = 2,
-    columns: Sequence[int] | Sequence[tuple[int, int]] | None = None,
-) -> DiscreteShellWindowMatrix:
-    r"""
-    Preferred MAS-at-output mesh window for lightcone CIC deposits.
-
-    Builds :func:`build_mesh_window_matrix` with:
-
-    - ``weights`` = NGP raw cell comb at ``pix_coor_in_box``
-      (:func:`ngp_raw_cell_comb`), or ``raw_comb`` if given;
-    - ``out_mode_scale`` = :math:`W_{\mathrm{MAS}}(k)^2`;
-    - ``renorm_weights`` = the estimator's CIC counts (for ``R``);
-    - ``mode_scale`` = map-sampling (etc.) only — do **not** put
-      :math:`W_{\mathrm{MAS}}^2` here.
-
-    The theory :math:`q` integral runs over the PS Fourier grid only.
-    Extending it past the grid is negligible: out-of-zone :math:`q` enters
-    weighted by the cell-comb power at large lag, which is
-    :math:`\sim 10^{-6}` of the :math:`\kappa = 0` spike.
-
-    Parameters
-    ----------
-    particle_mass :
-        Optional per-cell masses for the NGP comb (e.g. a pre-deposit
-        frequency taper or the binary-mask beam edge factor
-        :func:`~meer21cm.multipole_ops.beam_edge_cell_mass`).
-        Ignored when ``raw_comb`` is provided.
-    out_mode_scale_extra :
-        Optional extra factor at the **output** Fourier mode, multiplied
-        onto :math:`W_{\mathrm{MAS}}(k)^2` (e.g. the scalar beam transfer
-        :func:`~meer21cm.multipole_ops.beam_out_mode_scale`).  With
-        ``beam_at_output_mode`` the default extra is the residual anisotropy
-        :math:`\\bar B^2(k)/\\langle B\\rangle_{\\mathrm{bin}}^2`.
-    beam_at_output_mode :
-        If True, attach :math:`\tilde B_b(\mathbf k)` to the **output**
-        Fourier mode (the deposit comb at the estimator :math:`k`).
-        The cube kernel carries the mean-field cell mass
-        :math:`\langle\tilde B_b\rangle/n_b` (leakage), and the exact
-        :math:`\ell`-dependent **diagonal** is restored additively by
-        :func:`~meer21cm.multipole_ops.beam_diagonal_correction`.
-        A real-space cube can only hold a :math:`\hat k`-independent
-        selection, but the beam is
-        :math:`u_{\mathbf k}(x)=w(x)\tilde B_x(\mathbf k)`.
-    beam_at_theory_mode :
-        Preferred beam model.  Attaches
-        :math:`\tilde B_b(\mathbf q)` to the **theory** mode, which is
-        where the beam physically acts — it smooths the field before the
-        selection multiplies it.  The theory shell is split into
-        ``beam_n_mu`` :math:`|\mu|` groups, each with its own beamed cube
-        (:func:`~meer21cm.multipole_ops.beam_theory_cell_kernels`), and
-        the groups sum into the same column.  Curved sky and chromaticity
-        are exact per cell.  The cube still cannot hold the beam's
-        azimuthal structure, so the default is an additive
-        :math:`\boldsymbol\kappa=0` correction
-        (:func:`~meer21cm.multipole_ops.beam_theory_diagonal_correction`).
-        Overrides ``beam_at_output_mode``.
-    beam_n_mu :
-        With ``beam_at_theory_mode``, number of :math:`|\mu|` groups of the
-        **theory** mode (production default 4: enough to resolve
-        \(k_\perp\)-dependent leakage).  With ``beam_at_output_mode``,
-        number of :math:`|\mu|` sub-groups per output :math:`|k|` bin for
-        the mean-field cube
-        (:func:`~meer21cm.multipole_ops.beam_mode_group_index`); there
-        it only affects the leakage and ``1`` is the measured optimum.
-    beam_n_phi :
-        Extra equal-count azimuth bins around \(\hat n_{\mathrm{ref}}\)
-        (default 1: a further azimuth split does not recover the beam's
-        azimuthal structure around each cell's own \(\hat n_b\)).
-    beam_diag_correction :
-        Apply the exact per-mode beam response of
-        :func:`~meer21cm.multipole_ops.beam_theory_diagonal_correction`.
-        Needed because no real-space cube can hold the beam's azimuthal
-        structure: on its own the cube saturates at \(0.40\) of the exact
-        \(\ell=2\) zero-lag response, however fine ``beam_n_mu`` is.
-    beam_diag_as_ratio :
-        If True, apply that correction as a **ratio** on the whole
-        :math:`\boldsymbol\kappa` profile.  Production default is False:
-        additive at :math:`\boldsymbol\kappa=0` only, so the
-        \(n_\mu\)-split leakage is not rescaled.  Both are exact on the
-        diagonal; the ratio assumes the beam's directional response is
-        slowly varying across the window width and fights the grouping.
-    beam_l_max :
-        Highest beam multipole :math:`L` in the diagonal expansion.
-        :math:`\ell` couples to :math:`L\ge\ell`; default
-        ``max(ells) + 4`` for per-mode convergence.
-    beam_ylm :
-        Opt-in diagonal :math:`Y_{LM}` cubes
-        (:func:`~meer21cm.multipole_ops.beam_ylm_cell_kernels`)
-        instead of :math:`|\mu|` groups.  Off by default — production
-        stays :math:`n_\mu=4` + additive :math:`\kappa=0`.  Requires
-        ``beam_at_theory_mode``.  Incompatible with ``beam_diag_as_ratio``.
-    beam_ylm_lmax :
-        Highest even :math:`L` of the cubes (default 2: 6 cubes).
-    """
+    renorm_weights,
+    ells=(0, 2, 4),
+    mode_scale=None,
+    particle_mass=None,
+    raw_comb=None,
+    out_mode_scale_extra=None,
+    beam_at_output_mode=False,
+    beam_at_theory_mode=False,
+    beam_n_mu=4,
+    beam_n_phi=1,
+    beam_diag_correction=True,
+    beam_diag_as_ratio=False,
+    beam_l_max=None,
+    beam_ylm=False,
+    beam_ylm_lmax=2,
+) -> dict:
+    """Keyword arguments for :func:`build_mesh_window_matrix` (MAS-at-output)."""
     from .grid import fourier_window_for_assignment
 
     beam_at_output_mode = bool(beam_at_output_mode)
@@ -2305,9 +2467,7 @@ def build_mesh_window_mas_out(
                 f"{extra.shape} != W_MAS^2 shape {w_mas2.shape}"
             )
         w_mas2 = w_mas2 * extra
-    return build_mesh_window_matrix(
-        ps,
-        k_in,
+    return dict(
         weights=kernel,
         ells=ells,
         mode_scale=mode_scale,
@@ -2320,7 +2480,361 @@ def build_mesh_window_mas_out(
         in_group_index=in_group_index,
         in_group_scale=in_group_scale,
         leg_scale=leg_scale,
+    )
+
+
+def build_mesh_window_mas_out(
+    ps,
+    k_in: ArrayLike,
+    *,
+    renorm_weights: ArrayLike,
+    ells: Sequence[int] = (0, 2, 4),
+    mode_scale: ArrayLike | None = None,
+    particle_mass: ArrayLike | None = None,
+    raw_comb: ArrayLike | None = None,
+    out_mode_scale_extra: ArrayLike | None = None,
+    beam_at_output_mode: bool = False,
+    beam_at_theory_mode: bool = False,
+    beam_n_mu: int = 4,
+    beam_n_phi: int = 1,
+    beam_diag_correction: bool = True,
+    beam_diag_as_ratio: bool = False,
+    beam_l_max: int | None = None,
+    beam_ylm: bool = False,
+    beam_ylm_lmax: int = 2,
+    columns: Sequence[int] | Sequence[tuple[int, int]] | None = None,
+) -> DiscreteShellWindowMatrix:
+    r"""
+    Preferred MAS-at-output mesh window for lightcone CIC deposits.
+
+    Builds :func:`build_mesh_window_matrix` with:
+
+    - ``weights`` = NGP raw cell comb at ``pix_coor_in_box``
+      (:func:`ngp_raw_cell_comb`), or ``raw_comb`` if given;
+    - ``out_mode_scale`` = :math:`W_{\mathrm{MAS}}(k)^2`;
+    - ``renorm_weights`` = the estimator's CIC counts (for ``R``);
+    - ``mode_scale`` = map-sampling (etc.) only — do **not** put
+      :math:`W_{\mathrm{MAS}}^2` here.
+
+    The theory :math:`q` integral runs over the PS Fourier grid only.
+    Extending it past the grid is negligible: out-of-zone :math:`q` enters
+    weighted by the cell-comb power at large lag, which is
+    :math:`\sim 10^{-6}` of the :math:`\kappa = 0` spike.
+
+    Parameters
+    ----------
+    particle_mass :
+        Optional per-cell masses for the NGP comb (e.g. a pre-deposit
+        frequency taper or the binary-mask beam edge factor
+        :func:`~meer21cm.multipole_ops.beam_edge_cell_mass`).
+        Ignored when ``raw_comb`` is provided.
+    out_mode_scale_extra :
+        Optional extra factor at the **output** Fourier mode, multiplied
+        onto :math:`W_{\mathrm{MAS}}(k)^2` (e.g. the scalar beam transfer
+        :func:`~meer21cm.multipole_ops.beam_out_mode_scale`).  With
+        ``beam_at_output_mode`` the default extra is the residual anisotropy
+        :math:`\\bar B^2(k)/\\langle B\\rangle_{\\mathrm{bin}}^2`.
+    beam_at_output_mode :
+        If True, attach :math:`\tilde B_b(\mathbf k)` to the **output**
+        Fourier mode (the deposit comb at the estimator :math:`k`).
+        The cube kernel carries the mean-field cell mass
+        :math:`\langle\tilde B_b\rangle/n_b` (leakage), and the exact
+        :math:`\ell`-dependent **diagonal** is restored additively by
+        :func:`~meer21cm.multipole_ops.beam_diagonal_correction`.
+        A real-space cube can only hold a :math:`\hat k`-independent
+        selection, but the beam is
+        :math:`u_{\mathbf k}(x)=w(x)\tilde B_x(\mathbf k)`.
+    beam_at_theory_mode :
+        Preferred beam model.  Attaches
+        :math:`\tilde B_b(\mathbf q)` to the **theory** mode, which is
+        where the beam physically acts — it smooths the field before the
+        selection multiplies it.  The theory shell is split into
+        ``beam_n_mu`` :math:`|\mu|` groups, each with its own beamed cube
+        (:func:`~meer21cm.multipole_ops.beam_theory_cell_kernels`), and
+        the groups sum into the same column.  Curved sky and chromaticity
+        are exact per cell.  The cube still cannot hold the beam's
+        azimuthal structure, so the default is an additive
+        :math:`\boldsymbol\kappa=0` correction
+        (:func:`~meer21cm.multipole_ops.beam_theory_diagonal_correction`).
+        Overrides ``beam_at_output_mode``.
+    beam_n_mu :
+        With ``beam_at_theory_mode``, number of :math:`|\mu|` groups of the
+        **theory** mode (production default 4: enough to resolve
+        \(k_\perp\)-dependent leakage).  With ``beam_at_output_mode``,
+        number of :math:`|\mu|` sub-groups per output :math:`|k|` bin for
+        the mean-field cube
+        (:func:`~meer21cm.multipole_ops.beam_mode_group_index`); there
+        it only affects the leakage and ``1`` is the measured optimum.
+    beam_n_phi :
+        Extra equal-count azimuth bins around \(\hat n_{\mathrm{ref}}\)
+        (default 1: a further azimuth split does not recover the beam's
+        azimuthal structure around each cell's own \(\hat n_b\)).
+    beam_diag_correction :
+        Apply the exact per-mode beam response of
+        :func:`~meer21cm.multipole_ops.beam_theory_diagonal_correction`.
+        Needed because no real-space cube can hold the beam's azimuthal
+        structure: on its own the cube saturates at \(0.40\) of the exact
+        \(\ell=2\) zero-lag response, however fine ``beam_n_mu`` is.
+    beam_diag_as_ratio :
+        If True, apply that correction as a **ratio** on the whole
+        :math:`\boldsymbol\kappa` profile.  Production default is False:
+        additive at :math:`\boldsymbol\kappa=0` only, so the
+        \(n_\mu\)-split leakage is not rescaled.  Both are exact on the
+        diagonal; the ratio assumes the beam's directional response is
+        slowly varying across the window width and fights the grouping.
+    beam_l_max :
+        Highest beam multipole :math:`L` in the diagonal expansion.
+        :math:`\ell` couples to :math:`L\ge\ell`; default
+        ``max(ells) + 4`` for per-mode convergence.
+    beam_ylm :
+        Opt-in diagonal :math:`Y_{LM}` cubes
+        (:func:`~meer21cm.multipole_ops.beam_ylm_cell_kernels`)
+        instead of :math:`|\mu|` groups.  Off by default — production
+        stays :math:`n_\mu=4` + additive :math:`\kappa=0`.  Requires
+        ``beam_at_theory_mode``.  Incompatible with ``beam_diag_as_ratio``.
+    beam_ylm_lmax :
+        Highest even :math:`L` of the cubes (default 2: 6 cubes).
+    """
+    kw = _mas_out_kernel_kwargs(
+        ps,
+        k_in,
+        renorm_weights=renorm_weights,
+        ells=ells,
+        mode_scale=mode_scale,
+        particle_mass=particle_mass,
+        raw_comb=raw_comb,
+        out_mode_scale_extra=out_mode_scale_extra,
+        beam_at_output_mode=beam_at_output_mode,
+        beam_at_theory_mode=beam_at_theory_mode,
+        beam_n_mu=beam_n_mu,
+        beam_n_phi=beam_n_phi,
+        beam_diag_correction=beam_diag_correction,
+        beam_diag_as_ratio=beam_diag_as_ratio,
+        beam_l_max=beam_l_max,
+        beam_ylm=beam_ylm,
+        beam_ylm_lmax=beam_ylm_lmax,
+    )
+    return build_mesh_window_matrix(ps, k_in, columns=columns, **kw)
+
+
+def tapered_theory_beam_kernels(
+    ps,
+    k_in: ArrayLike,
+    *,
+    renorm_weights: ArrayLike,
+    mas: str = "cic",
+    taper_axes: Sequence[int] = (),
+    ells: Sequence[int] = (0, 2, 4),
+    mode_scale: ArrayLike | None = None,
+    n_mu: int = 4,
+    n_phi: int = 1,
+    beam_diag_as_ratio: bool = False,
+    taper_func=None,
+) -> dict:
+    r"""
+    Mesh-window kwargs for post-deposit taper plus theory-mode beam.
+
+    Shared cell masses :math:`m_b(\mathbf q)` come from
+    :func:`~meer21cm.multipole_ops.beam_theory_cell_masses`
+    (``n_mu=4``, additive :math:`\kappa=0`).  ``mas`` selects the
+    deposit of those masses:
+
+    - ``"cic"`` (production, model B) — :math:`T\times\mathrm{CIC}[m_b]`,
+      ``out_mode_scale = 1``, and :math:`W_{\mathrm{MAS}}^2` stays on
+      the **theory** shell together with map sampling (inner-mode pairing:
+      CIC is already in the real-space cube).
+    - ``"ngp"`` (diagnostic, model 07) — :math:`T\times\mathrm{NGP}[m_b]`,
+      then ``out_mode_scale = W_{\mathrm{MAS}}^2`` (MAS at the **output**
+      mode).  Wrong when :math:`T` varies on CIC scales.
+
+    The returned dict is passed to :func:`build_mesh_window_matrix` or
+    :func:`accumulate_mesh_window_cubes`.  It includes ``column_empty``.
+
+    Parameters
+    ----------
+    ps :
+        Lightcone ``PowerSpectrum``-like object with ``pix_coor_in_box``,
+        ``sigma_beam_ch``, and a local LOS.
+    k_in : array_like
+        Theory :math:`|k|` nodes.
+    renorm_weights : array_like
+        Estimator weights used for :math:`R=\sum w^2` (typically the
+        **already-tapered** CIC counts).
+    mas : {'cic', 'ngp'}, default 'cic'
+        Deposit of the theory-mode beam masses.
+    taper_axes : sequence of int, default ()
+        Axes of the Blackman–Harris product :func:`~meer21cm.grid.bh_taper_cube`.
+        Empty means :math:`T=1`.
+    ells, mode_scale, n_mu, n_phi, beam_diag_as_ratio
+        Forwarded to the theory-mode beam kernels / diagonal correction.
+    taper_func : callable, optional
+        1-D window.  Default Blackman–Harris.
+
+    Returns
+    -------
+    kwargs : dict
+        Arguments for :func:`build_mesh_window_matrix` plus
+        ``column_empty(j, g)``.
+
+    Notes
+    -----
+    See ``misc/rsd_sims/window_formalism.md`` §11.1 for the two operators.
+    """
+    from .grid import (
+        bh_taper_cube,
+        fourier_window_for_assignment,
+        project_particle_to_regular_grid,
+    )
+    from .multipole_ops import (
+        beam_edge_cell_mass,
+        beam_theory_cell_masses,
+        beam_theory_diagonal_correction,
+        map_sampling_mode_scale,
+    )
+
+    mas_s = str(mas).lower()
+    if mas_s not in ("ngp", "cic"):
+        raise ValueError(f"mas must be 'ngp' or 'cic', got {mas!r}")
+    axes = tuple(int(a) for a in taper_axes)
+    samp = mode_scale
+    if samp is None:
+        try:
+            samp = map_sampling_mode_scale(ps, z_resolved=True)
+        except Exception:
+            samp = None
+    kw = _mas_out_kernel_kwargs(
+        ps,
+        k_in,
+        renorm_weights=renorm_weights,
+        ells=ells,
+        mode_scale=samp,
+        beam_at_theory_mode=True,
+        beam_n_mu=int(n_mu),
+        beam_n_phi=int(n_phi),
+        beam_diag_correction=True,
+        beam_diag_as_ratio=bool(beam_diag_as_ratio),
+    )
+    shape = tuple(np.asarray(kw["weights"]).shape)
+    taper = (
+        bh_taper_cube(shape, axes, taper_func=taper_func)
+        if axes
+        else np.ones(shape, dtype=float)
+    )
+    edge = beam_edge_cell_mass(ps)
+    _idx, _edges, mass_fn = beam_theory_cell_masses(
+        ps,
+        k_in,
+        n_mu=int(n_mu),
+        n_phi=int(n_phi),
+        mode_scale=samp,
+        cell_mass=edge,
+    )
+
+    def column_empty(j, g):
+        return mass_fn(j, g) is None
+
+    orig_kernel = kw["in_bin_weights"]
+    if mas_s == "ngp":
+
+        def in_kernel(j, g):
+            cube = orig_kernel(j, g)
+            if cube is None:
+                return None
+            return np.asarray(cube, dtype=float) * taper
+
+        kw["in_bin_weights"] = in_kernel
+    else:
+        pix = np.asarray(ps.pix_coor_in_box, dtype=float)
+        box_len = np.asarray(ps.box_len, float)
+        box_ndim = np.asarray(ps.box_ndim, int)
+
+        def in_kernel(j, g):
+            mass = mass_fn(j, g)
+            if mass is None:
+                return None
+            cube, _w, _c = project_particle_to_regular_grid(
+                pix,
+                box_len,
+                box_ndim,
+                particle_mass=mass,
+                grid_scheme="cic",
+                average=False,
+                compensate=False,
+            )
+            return np.asarray(cube, dtype=float) * taper
+
+        w_mas2 = fourier_window_for_assignment(ps.box_ndim, ps.grid_scheme) ** 2
+        kw["out_mode_scale"] = np.ones_like(
+            np.asarray(kw["out_mode_scale"], dtype=float)
+        )
+        ms = kw["mode_scale"]
+        if ms is None:
+            kw["mode_scale"] = w_mas2
+        else:
+            kw["mode_scale"] = np.asarray(ms, dtype=float) * w_mas2
+        kw["in_bin_weights"] = in_kernel
+
+    kw["column_empty"] = column_empty
+    return kw
+
+
+def accumulate_mesh_window_mas_out_cubes(
+    ps,
+    k_in: ArrayLike,
+    *,
+    renorm_weights: ArrayLike,
+    theory: ArrayLike | None = None,
+    theory_kmu: ArrayLike | None = None,
+    ells: Sequence[int] = (0, 2, 4),
+    mode_scale: ArrayLike | None = None,
+    particle_mass: ArrayLike | None = None,
+    raw_comb: ArrayLike | None = None,
+    out_mode_scale_extra: ArrayLike | None = None,
+    beam_at_output_mode: bool = False,
+    beam_at_theory_mode: bool = False,
+    beam_n_mu: int = 4,
+    beam_n_phi: int = 1,
+    beam_diag_correction: bool = True,
+    beam_diag_as_ratio: bool = False,
+    beam_l_max: int | None = None,
+    beam_ylm: bool = False,
+    beam_ylm_lmax: int = 2,
+    columns: Sequence[int] | Sequence[tuple[int, int]] | None = None,
+    progress=None,
+) -> dict[int, NDArray[np.floating]]:
+    r"""
+    3D Yamamoto cubes for the MAS-at-output (untapered lightcone) operator.
+
+    Same kernels as :func:`build_mesh_window_mas_out`; theory is baked
+    with :func:`accumulate_mesh_window_cubes`.
+    """
+    kw = _mas_out_kernel_kwargs(
+        ps,
+        k_in,
+        renorm_weights=renorm_weights,
+        ells=ells,
+        mode_scale=mode_scale,
+        particle_mass=particle_mass,
+        raw_comb=raw_comb,
+        out_mode_scale_extra=out_mode_scale_extra,
+        beam_at_output_mode=beam_at_output_mode,
+        beam_at_theory_mode=beam_at_theory_mode,
+        beam_n_mu=beam_n_mu,
+        beam_n_phi=beam_n_phi,
+        beam_diag_correction=beam_diag_correction,
+        beam_diag_as_ratio=beam_diag_as_ratio,
+        beam_l_max=beam_l_max,
+        beam_ylm=beam_ylm,
+        beam_ylm_lmax=beam_ylm_lmax,
+    )
+    return accumulate_mesh_window_cubes(
+        ps,
+        k_in,
+        theory=theory,
+        theory_kmu=theory_kmu,
         columns=columns,
+        progress=progress,
+        **kw,
     )
 
 

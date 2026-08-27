@@ -160,6 +160,48 @@ def find_rotation_matrix(vec):
     return rot_mat_2 @ rot_mat_1
 
 
+def bh_taper_cube(shape, axes, taper_func=None):
+    r"""
+    Product taper over selected Cartesian axes of a 3D box.
+
+    The same operator as
+    :meth:`LightconeGriddingMixin.apply_taper_to_field`: for each axis
+    :math:`a` in ``axes``, multiply by a 1-D window of length
+    :math:`N_a`.  The default window is Blackman–Harris.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Box shape ``(N_x, N_y, N_z)``.
+    axes : sequence of int
+        Axes to taper (``0``, ``1``, and/or ``2``).  An empty sequence
+        returns an array of ones.
+    taper_func : callable, optional
+        ``taper_func(n) -> (n,)`` window.  Default
+        ``scipy.signal.windows.blackmanharris``.
+
+    Returns
+    -------
+    taper : ndarray
+        Real-space cube of shape ``shape``.
+    """
+    from scipy.signal.windows import blackmanharris
+
+    if taper_func is None:
+        taper_func = blackmanharris
+    shape_t = tuple(int(n) for n in shape)
+    taper = np.ones(shape_t, dtype=float)
+    for ax in axes:
+        a = int(ax)
+        if a not in (0, 1, 2):
+            raise ValueError(f"taper axis must be 0, 1, or 2; got {ax}")
+        t = np.asarray(taper_func(int(shape_t[a])), dtype=float)
+        slicer = [None, None, None]
+        slicer[a] = slice(None)
+        taper = taper * t[tuple(slicer)]
+    return taper
+
+
 def fourier_window_for_assignment(
     num_mesh,
     window="nnb",
