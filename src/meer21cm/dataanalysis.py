@@ -7,6 +7,7 @@ It is typically used as a base class for other classes that inherit from it, and
 
 
 import numpy as np
+from numpy.typing import NDArray
 from astropy.io import fits
 from .util import (
     check_unit_equiv,
@@ -1380,13 +1381,13 @@ class Specification:
 
     def get_gal_patch_labels(
         self,
-        ra_patch_num,
-        dec_patch_num,
-        nu_patch_num,
-        ra_range=None,
-        dec_range=None,
-        nu_range=None,
-    ):
+        ra_patch_num: int,
+        dec_patch_num: int,
+        nu_patch_num: int,
+        ra_range: tuple[float, float] | None = None,
+        dec_range: tuple[float, float] | None = None,
+        nu_range: tuple[float, float] | None = None,
+    ) -> NDArray[np.integer]:
         """
         Assign a jackknife patch label to each galaxy in the catalogue.
 
@@ -1398,13 +1399,13 @@ class Specification:
         redshifts, while the map channels (and therefore the patch splits,
         which are linear in frequency) are defined in frequency.
         For consistency, the 21cm line frequency of each galaxy,
-        :math:`\\nu_g = f_{21} / (1 + z_g)` (see :attr:`freq_gal`),
-        taken from the :attr:freq_gal property, is digitized into the
-        same frequency bins used for the map patches. This automatically
-        handles the inversion of the radial direction (redshift decreases as
-        frequency increases): the line-of-sight patch index ``k`` corresponds
-        to the frequency interval ``[nu_bins[k], nu_bins[k+1]]``, i.e. to the
-        redshift interval ``[f_21/nu_bins[k+1] - 1, f_21/nu_bins[k] - 1]``.
+        :math:`\\nu_g = f_{21} / (1 + z_g)` (see :attr:`freq_gal`), is
+        digitized into the same frequency bins used for the map patches.
+        This automatically handles the inversion of the radial direction
+        (redshift decreases as frequency increases): the line-of-sight patch
+        index ``k`` corresponds to the frequency interval
+        ``[nu_bins[k], nu_bins[k+1]]``, i.e. to the redshift interval
+        ``[f_21/nu_bins[k+1] - 1, f_21/nu_bins[k] - 1]``.
         Binning the redshifts linearly in z would **not** match the map
         patches, since bins linear in frequency are not linear in redshift.
 
@@ -1488,7 +1489,6 @@ class Specification:
             + nu_indx[inside]
         )
         return label
-
 
     def create_white_noise_map(self, sigma_N, counts=None, seed=None, inf_to_zero=True):
         """

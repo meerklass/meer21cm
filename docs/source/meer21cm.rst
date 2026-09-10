@@ -49,6 +49,14 @@ meer21cm.io module
    :undoc-members:
    :show-inheritance:
 
+meer21cm.jackknife module
+-------------------------
+
+.. automodule:: meer21cm.jackknife
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 meer21cm.mock module
 --------------------
 

@@ -19,9 +19,9 @@ and the galaxies are assigned to the same patches with
 Along the line-of-sight, the patches are defined as bins in frequency for the
 HI map, while the galaxy positions are stored as redshifts;
 ``get_gal_patch_labels`` converts each galaxy redshift to its 21cm frequency,
-:math:`\\nu_g = f_{21} / (1 + z_g)`, taken from the :attr:freq_gal property,
-and digitizes it into the same frequency bins, so that map voxels and galaxies 
-belonging to the same comoving slab are always removed together. 
+:math:`\\nu_g = f_{21} / (1 + z_g)`, taken from the :attr:`freq_gal` property,
+and digitizes it into the same frequency bins, so that map voxels and galaxies
+belonging to the same comoving slab are always removed together.
 Note that bins that are linear in frequency are not linear in
 redshift, so digitizing the galaxy redshifts into linear z-bins would not
 match the map patches; the line-of-sight binning is always done in frequency.
@@ -35,11 +35,11 @@ Two important implementation details:
    the jackknife mask is applied, using the full ``W_HI`` window and the same
    ``seed`` as the input instance. This guarantees that every realisation
    (and the data measurement itself) lives on the identical Cartesian grid and
-   k-modes. The jackknife masking is applied by zeroing the map data 
-   and the pixel weights ``w_HI`` inside the removed patch; 
-   the gridded weights returned by the regridding then automatically define 
-   the jackknifed window on the Cartesian grid. ``W_HI`` itself is left untouched, 
-   because the pixel coordinates used by the gridding routines are tied to the 
+   k-modes. The jackknife masking is applied by zeroing the map data
+   and the pixel weights ``w_HI`` inside the removed patch;
+   the gridded weights returned by the regridding then automatically define
+   the jackknifed window on the Cartesian grid. ``W_HI`` itself is left untouched,
+   because the pixel coordinates used by the gridding routines are tied to the
    ``W_HI`` footprint used to build the box.
 
 2. Every jackknife realisation is computed on a fresh
@@ -61,12 +61,34 @@ A minimum example:
     >>> results = jc.run(type="cross")  # or type="auto" for the HI auto-power
     >>> cov, mean_p1d = jc.get_covariance(results)
 """
-import numpy as np
+from __future__ import annotations
+
+from collections.abc import Sequence
 from multiprocessing import Pool
+from typing import Any, Literal
+import warnings
+
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from .power import PowerSpectrum
 from .util import f_21
 from .transfer import required_attrs
+
+# string-literal aliases for the string-valued keyword arguments,
+# following the convention of the explicitly typed modules.
+JackknifeType = Literal["cross", "auto"]
+WeightsScheme = Literal["validation", "gridded", "counts"]
+GalaxyGridWeights = Literal["binary", "gridded"]
+PoolKind = Literal["multiprocessing", "mpi", "serial"]
+
+# the result of one jackknife realisation: the requested power spectrum,
+# optionally followed by the 3D power spectrum and the two 1D auto-powers.
+JackknifeResult = list[NDArray[np.floating]]
+
+# box attributes held fixed across realisations, so that every realisation lands
+# on the identical Cartesian grid, k-modes and mass-assignment compensation.
+BOX_GEOMETRY_ATTRS = ("box_len", "box_ndim", "box_origin", "box_resol")
 
 # attributes of the input PowerSpectrum instance that are propagated
 # to the per-realisation instances, on top of ``meer21cm.transfer.required_attrs``.
@@ -75,11 +97,121 @@ from .transfer import required_attrs
 # the per-realisation instances to the ranges, whereas the input map data must be
 # reproduced exactly as it is (the input instance may have been used with an
 # untrimmed map, and trimming would change the enclosing box and the k-modes).
-extra_required_attrs = [
+extra_required_attrs: list[str] = [
     "seed",
     "downres_factor_radial",
     "downres_factor_transverse",
 ]
+
+
+def box_geometry(ps: PowerSpectrum) -> dict[str, NDArray]:
+    """
+    The box attributes that must be identical in every jackknife realisation.
+
+    The enclosing box fixes the k-grid (hence the 1D binning), the power
+    normalisation, and the mass-assignment compensation
+    (:meth:`meer21cm.power.PowerSpectrum.gridding_compensation`, which is built
+    from ``box_ndim``). Realisations that drifted onto a different box would not
+    be comparable with the data measurement, so the geometry is recorded once
+    and checked on every realisation.
+
+    Parameters
+    ----------
+    ps: :class:`meer21cm.power.PowerSpectrum`
+        An instance whose enclosing box has already been computed.
+
+    Returns
+    -------
+    geometry: dict
+        A mapping of attribute name to value for ``box_len``, ``box_ndim``,
+        ``box_origin`` and ``box_resol``.
+    """
+    return {attr: np.array(getattr(ps, attr)) for attr in BOX_GEOMETRY_ATTRS}
+
+
+def _check_box_geometry(jk: PowerSpectrum, reference: dict[str, NDArray]) -> None:
+    """
+    Check that a realisation landed on the reference box.
+
+    Parameters
+    ----------
+    jk: :class:`meer21cm.power.PowerSpectrum`
+        The per-realisation instance, after ``get_enclosing_box()``.
+    reference: dict
+        The geometry recorded on the input instance, from :func:`box_geometry`.
+
+    Raises
+    ------
+    ValueError
+        If any geometry attribute differs from the reference.
+    """
+    for attr, ref in reference.items():
+        got = np.asarray(getattr(jk, attr))
+        ref = np.asarray(ref)
+        if got.shape != ref.shape or not np.array_equal(got, ref):
+            raise ValueError(
+                f"the jackknife realisation has {attr}={got!r}, but the input "
+                f"instance has {attr}={ref!r}. Every realisation must live on the "
+                "identical box: the k-grid, the 1D binning and the gridding "
+                "compensation all depend on it. Check that the input instance's "
+                "box was computed with the final gridding settings (call "
+                "ps.get_enclosing_box()) and that W_HI / map_has_sampling, the "
+                "downres factors and the seed are not changed between the data "
+                "measurement and the jackknife."
+            )
+
+
+def _normalise_weights_argument(weights, type_default: str = "cross"):
+    """
+    Validate and normalise the ``weights`` argument of :class:`JackknifeCovariance`.
+
+    Accepts ``None`` (use the scheme's defaults), a single array (tracer 1), or a
+    tuple with one entry per tracer. Each entry is either an array, used as the
+    *grid* weights -- the library convention, since ``weights_1``/``weights_2``
+    are aliases of ``weights_grid_1``/``weights_grid_2`` -- or a
+    ``(field_weights, grid_weights)`` pair in which either element may be
+    ``None``.
+
+    Parameters
+    ----------
+    weights: None or array_like or tuple
+        The user-supplied weights.
+    type_default: str, default "cross"
+        Set to ``"auto"`` to allow a single array without wrapping it in a tuple.
+
+    Returns
+    -------
+    weights: None or tuple
+        ``None``, or a 2-tuple of ``(field_weights, grid_weights)`` entries. A
+        missing entry is ``(None, None)``.
+    """
+    if weights is None:
+        return None
+    if not isinstance(weights, (tuple, list)):
+        weights = (weights,)
+    if len(weights) == 1 and type_default == "auto":
+        weights = (weights[0], None)
+    if len(weights) not in (1, 2):
+        raise ValueError(
+            "weights must be None, a single array, or a tuple with one entry per "
+            f"tracer; got {len(weights)} entries"
+        )
+    out = []
+    for entry in weights:
+        if entry is None:
+            out.append((None, None))
+        elif isinstance(entry, (tuple, list)):
+            if len(entry) != 2:
+                raise ValueError(
+                    "a per-tracer weights entry must be an array or a "
+                    f"(field_weights, grid_weights) pair; got {len(entry)} elements"
+                )
+            out.append((entry[0], entry[1]))
+        else:
+            out.append((None, entry))
+    while len(out) < 2:
+        out.append((None, None))
+    return tuple(out)
 
 
 class JackknifeCovariance:
@@ -141,10 +273,19 @@ class JackknifeCovariance:
         to ``nu_range``. It is converted internally to a frequency range via
         :math:`\\nu = f_{21}/(1+z)`, and the split is performed linearly in
         frequency for both the map and the galaxies.
-    weights_scheme: str, default "gridded"
+    weights_scheme: str, default "validation"
         The scheme used to assign the power spectrum weights of each
         realisation. Make sure this matches what you did for the data
         measurement.
+
+        ``"validation"`` (default) follows
+        ``papers/validation/func_fullsim.py``: the HI grid weights are the
+        jackknifed ``counts_in_box`` with uniform field weights, and the galaxy
+        field weights are the dN/dz with grid weights
+        ``(dN/dz > 0) * counts_in_box``. The dN/dz comes from
+        ``ps.discrete_source_dndz`` when the instance has one (mock
+        simulations); for real data pass ``weights`` explicitly, or the galaxy
+        falls back to its binary occupancy.
 
         If ``"gridded"``, the field and grid weights of the HI map are the
         gridded jackknifed pixel weights ``w_HI`` (second output of
@@ -160,6 +301,28 @@ class JackknifeCovariance:
         :meth:`meer21cm.power.PowerSpectrum.get_counts_in_box` after
         zeroing the pixel weights inside the removed patch, so that the
         patch carries zero weight.
+    weights: tuple, default None
+        Explicit weights, overriding ``weights_scheme``. ``None`` uses the
+        scheme's defaults.
+
+        Otherwise a tuple with one entry per tracer (a single array is accepted
+        and treated as tracer 1). Each entry is either
+
+        * an array, used as the **grid** weights of that tracer -- the library
+          convention, since ``weights_1``/``weights_2`` are aliases of
+          ``weights_grid_1``/``weights_grid_2``; or
+        * a ``(field_weights, grid_weights)`` pair, in which either element may
+          be ``None`` (``None`` means uniform).
+
+        For example, to reproduce the validation weighting of a simulation
+        explicitly, pass ``weights=(counts, (dndz, (dndz > 0) * counts))`` where
+        ``counts = ps.get_counts_in_box()``.
+
+        The supplied arrays are restricted to the region kept by the jackknife
+        (box cells with gridded jackknifed ``w_HI > 0``), so the removed patch
+        always carries zero weight; arrays that are already zero inside the
+        patch are unaffected. They must live on the box of the input instance
+        (call ``ps.get_enclosing_box()`` first).
     apply_taper: bool, default True
         Whether to apply the taper function ``ps.taper_func`` to the gridded
         weights of each field in each realisation
@@ -202,18 +365,19 @@ class JackknifeCovariance:
         ra_patch_num: int,
         dec_patch_num: int,
         los_patch_num: int,
-        ra_range: tuple | None = None,
-        dec_range: tuple | None = None,
-        nu_range: tuple | None = None,
-        z_range: tuple | None = None,
-        weights_scheme: str = "counts",
+        ra_range: tuple[float, float] | None = None,
+        dec_range: tuple[float, float] | None = None,
+        nu_range: tuple[float, float] | None = None,
+        z_range: tuple[float, float] | None = None,
+        weights_scheme: WeightsScheme | str = "validation",
+        weights: tuple | None = None,
         apply_taper: bool = True,
-        taper_axis: tuple = (2,),
-        gal_grid_weights: str = "binary",
+        taper_axis: tuple[int, ...] = (2,),
+        gal_grid_weights: GalaxyGridWeights | str = "binary",
         min_patch_weight_fraction: float = 0.0,
-        pool: str = "multiprocessing",
+        pool: PoolKind | str = "multiprocessing",
         num_process: int | None = None,
-    ):
+    ) -> None:
         self.ps = ps
         self.ra_patch_num = ra_patch_num
         self.dec_patch_num = dec_patch_num
@@ -237,9 +401,10 @@ class JackknifeCovariance:
                 ps.nu.max() + ps.freq_resol / 2,
             )
         self.nu_range = tuple(nu_range)
-        if weights_scheme not in ("gridded", "counts"):
+        if weights_scheme not in ("validation", "gridded", "counts"):
             raise ValueError(f"Invalid weights_scheme: {weights_scheme}")
         self.weights_scheme = weights_scheme
+        self.weights = _normalise_weights_argument(weights, type_default="cross")
         self.apply_taper = apply_taper
         self.taper_axis = tuple(taper_axis)
         if gal_grid_weights not in ("binary", "gridded"):
@@ -248,10 +413,23 @@ class JackknifeCovariance:
         self.min_patch_weight_fraction = min_patch_weight_fraction
         self.pool = pool
         self.num_process = num_process
-        self.patch_indices_used = None
+        self.patch_indices_used: NDArray[np.integer] | None = None
+
+        # Fix the box once, on the input instance, and record its geometry.
+        # Every realisation re-derives the box from the propagated window and
+        # seed; the geometry is checked against this reference so that a
+        # realisation can never silently land on a different k-grid (which would
+        # change the binning and the gridding compensation).
+        ps.get_enclosing_box()
+        self.box_geometry = box_geometry(ps)
+        # The per-realisation instances are plain PowerSpectrum objects built
+        # from required_attrs, which does not carry discrete_source_dndz. The
+        # dN/dz is therefore evaluated once here, on the input instance's box,
+        # which is identical to every realisation's box (see box_geometry).
+        self.gal_dndz = _get_dndz_box(ps)
 
     @property
-    def num_patches(self):
+    def num_patches(self) -> int:
         """
         The total number of jackknife patches,
         ``ra_patch_num * dec_patch_num * los_patch_num``.
@@ -259,13 +437,13 @@ class JackknifeCovariance:
         return self.ra_patch_num * self.dec_patch_num * self.los_patch_num
 
     @property
-    def z_range(self):
+    def z_range(self) -> tuple[float, float]:
         """
         The redshift range corresponding to ``self.nu_range``.
         """
         return (f_21 / self.nu_range[1] - 1, f_21 / self.nu_range[0] - 1)
 
-    def get_patch_masks(self):
+    def get_patch_masks(self) -> NDArray[np.bool_]:
         """
         The jackknife patch masks of the map, computed with
         :meth:`meer21cm.dataanalysis.Specification.get_jackknife_patches`
@@ -288,7 +466,7 @@ class JackknifeCovariance:
         )
         return mask_arr.reshape((self.num_patches,) + self.ps.W_HI.shape)
 
-    def get_gal_patch_labels(self):
+    def get_gal_patch_labels(self) -> NDArray[np.integer]:
         """
         The jackknife patch label of each galaxy in ``ps``, computed with
         :meth:`meer21cm.dataanalysis.Specification.get_gal_patch_labels`.
@@ -311,7 +489,7 @@ class JackknifeCovariance:
             nu_range=self.nu_range,
         )
 
-    def patch_weight_fraction(self):
+    def patch_weight_fraction(self) -> NDArray[np.floating]:
         """
         The fraction of the total map weight ``(w_HI * W_HI)`` contained
         in each patch. Useful for identifying (nearly) empty patches and
@@ -328,7 +506,7 @@ class JackknifeCovariance:
         masks = self.get_patch_masks()
         return np.array([(w * m).sum() for m in masks]) / w.sum()
 
-    def get_ps_instance_attr_dict(self):
+    def get_ps_instance_attr_dict(self) -> dict[str, Any]:
         """
         Generate the attribute dictionary for the per-realisation
         power spectrum instances.
@@ -350,7 +528,7 @@ class JackknifeCovariance:
             attr_dict[attr] = getattr(self.ps, attr)
         return attr_dict
 
-    def get_default_patch_indices(self):
+    def get_default_patch_indices(self) -> NDArray[np.integer]:
         """
         The indices of the patches used by default in ``run``:
         all patches whose weight fraction is greater than
@@ -364,8 +542,11 @@ class JackknifeCovariance:
         return np.where(frac > self.min_patch_weight_fraction)[0]
 
     def get_arg_list_for_parallel_auto(
-        self, patch_indices, return_power_3d=False, return_auto_power=False
-    ):
+        self,
+        patch_indices: ArrayLike,
+        return_power_3d: bool = False,
+        return_auto_power: bool = False,
+    ) -> list[tuple[Any, ...]]:
         """
         Generate a list of arguments for parallelisation of the auto-power runs.
         This list is then used for ``pool.starmap``.
@@ -394,16 +575,22 @@ class JackknifeCovariance:
                     masks[j],
                     self.ps.k1dweights,
                     self.weights_scheme,
+                    self.weights,
                     self.apply_taper,
                     self.taper_axis,
                     return_power_3d,
+                    self.box_geometry,
+                    self.gal_dndz,
                 )
             )
         return arg_list
 
     def get_arg_list_for_parallel_cross(
-        self, patch_indices, return_power_3d=False, return_auto_power=False
-    ):
+        self,
+        patch_indices: ArrayLike,
+        return_power_3d: bool = False,
+        return_auto_power: bool = False,
+    ) -> list[tuple[Any, ...]]:
         """
         Generate a list of arguments for parallelisation of the cross-power runs.
         This list is then used for ``pool.starmap``.
@@ -445,22 +632,25 @@ class JackknifeCovariance:
                     gal_radecz,
                     self.ps.k1dweights,
                     self.weights_scheme,
+                    self.weights,
                     self.apply_taper,
                     self.taper_axis,
                     self.gal_grid_weights,
                     return_power_3d,
                     return_auto_power,
+                    self.box_geometry,
+                    self.gal_dndz,
                 )
             )
         return arg_list
 
     def run(
         self,
-        patch_indices=None,
-        type="cross",
-        return_power_3d=False,
-        return_auto_power=False,
-    ):
+        patch_indices: ArrayLike | None = None,
+        type: JackknifeType | str = "cross",
+        return_power_3d: bool = False,
+        return_auto_power: bool = False,
+    ) -> list[JackknifeResult]:
         """
         Run the jackknife realisations.
 
@@ -551,7 +741,9 @@ class JackknifeCovariance:
         return results_arr
 
     @staticmethod
-    def jackknife_covariance(power_arr):
+    def jackknife_covariance(
+        power_arr: ArrayLike,
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         r"""
         The delete-one jackknife covariance matrix of the input realisations,
 
@@ -579,15 +771,17 @@ class JackknifeCovariance:
         power_arr = np.asarray(power_arr)
         num_jack = power_arr.shape[0]
         if num_jack < 2:
-            raise ValueError(
-                f"at least 2 realisations are needed, got {num_jack}"
-            )
+            raise ValueError(f"at least 2 realisations are needed, got {num_jack}")
         mean = power_arr.mean(axis=0)
         delta = power_arr - mean[None, :]
         cov = (num_jack - 1) / num_jack * np.einsum("ja,jb->ab", delta, delta)
         return cov, mean
 
-    def get_covariance(self, results_arr, element=0):
+    def get_covariance(
+        self,
+        results_arr: Sequence[Sequence[NDArray[np.floating]]],
+        element: int = 0,
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """
         Compute the jackknife covariance matrix from the output of ``run``.
 
@@ -612,7 +806,7 @@ class JackknifeCovariance:
 
 
 # this must be pickleable inputs for multiprocessing
-def _check_k1dweights(jk, k_sel_3d_to_1d):
+def _check_k1dweights(jk: PowerSpectrum, k_sel_3d_to_1d: ArrayLike | None) -> None:
     """
     Check that the input ``k1dweights`` (``k_sel``) matches the k-mode grid
     of the realisation. A mismatched array (e.g. built from ``ps.k_mode``
@@ -636,7 +830,197 @@ def _check_k1dweights(jk, k_sel_3d_to_1d):
         )
 
 
-def _grid_jackknifed_map(jk, patch_mask, return_kept_counts=False):
+# this must be pickleable inputs for multiprocessing
+def _materialise_none_grid_weights(jk: PowerSpectrum, tracer: int) -> None:
+    """
+    Replace ``None`` grid weights of a tracer with an explicit uniform array.
+
+    ``None`` means uniform throughout this pipeline, but
+    :meth:`meer21cm.power.PowerSpectrum.apply_taper_to_field` multiplies the
+    weights in place and therefore cannot handle ``None``. Materialising the
+    array keeps the semantics identical (``None`` is read as ones by
+    ``get_weights_none_to_one``) while allowing the taper to be applied.
+
+    Parameters
+    ----------
+    jk: :class:`meer21cm.power.PowerSpectrum`
+        The per-realisation instance.
+    tracer: int
+        ``1`` for the HI map, ``2`` for the galaxy field.
+    """
+    if getattr(jk, f"weights_grid_{tracer}") is None:
+        setattr(
+            jk,
+            f"weights_grid_{tracer}",
+            np.ones(jk.box_ndim, dtype=jk.real_dtype),
+        )
+
+
+def resolve_tracer_weights(
+    tracer: int,
+    weights_scheme: WeightsScheme | str,
+    weights: tuple | None,
+    jk: PowerSpectrum,
+    counts_keep_rg: NDArray[np.floating] | None,
+    weights_rg: NDArray[np.floating],
+    gal_grid_weights: GalaxyGridWeights | str = "binary",
+    gal_weights_rg: NDArray[np.floating] | None = None,
+    gal_window_rg: NDArray[np.floating] | None = None,
+    gal_dndz: NDArray[np.floating] | None = None,
+) -> tuple[ArrayLike | None, ArrayLike | None]:
+    """
+    Resolve the ``(field_weights, grid_weights)`` of one tracer in one realisation.
+
+    In this pipeline the *grid* weights are the ones that matter for the data
+    power spectrum: they are multiplied into the field before the FFT and used
+    for the mean-centring, while the *field* weights enter only through the
+    renormalisation factor ``power_weights_renorm(grid_w * field_w, ...)``.
+
+    The default, ``weights_scheme="validation"``, reproduces the weighting of
+    ``papers/validation/func_fullsim.py``:
+
+    ``tracer=1`` (HI)
+        field weights ``None`` (uniform), grid weights ``counts_in_box`` of the
+        jackknifed map.
+    ``tracer=2`` (galaxy)
+        field weights ``dN/dz`` evaluated on the box voxel redshifts, grid
+        weights ``(dN/dz > 0) * counts_in_box`` of the jackknifed map. The
+        dN/dz is taken from ``ps.discrete_source_dndz`` when available (mock
+        simulations); otherwise the tracer-2 grid weights fall back to the
+        binary occupancy and the field weights to ``None``, and the user should
+        pass ``weights`` explicitly.
+
+    When ``weights`` is given it takes precedence over the scheme. The supplied
+    arrays are restricted to the region kept by the jackknife (box cells with
+    ``weights_rg > 0``) so that the removed patch carries zero weight; arrays
+    that are already zero inside the patch are unaffected.
+
+    Parameters
+    ----------
+    tracer: int
+        ``1`` for the HI map, ``2`` for the galaxy field.
+    weights_scheme: str
+        The scheme to use when ``weights`` is None.
+    weights: tuple or None
+        The normalised user weights, from
+        :func:`_normalise_weights_argument`. Entry ``tracer - 1`` is used.
+    jk: :class:`meer21cm.power.PowerSpectrum`
+        The per-realisation instance.
+    counts_keep_rg: np.ndarray or None
+        The jackknifed ``counts_in_box``; required by the ``"validation"`` and
+        ``"counts"`` schemes and by ``gal_grid_weights="binary"``.
+    weights_rg: np.ndarray
+        The gridded jackknifed pixel weights, ``(weights_rg > 0)`` marking the
+        kept window.
+    gal_grid_weights: str, default "binary"
+        Only used by ``weights_scheme="gridded"`` for tracer 2.
+
+    Returns
+    -------
+    field_weights: np.ndarray or None
+        The field-level weights of the tracer (``None`` means uniform).
+    grid_weights: np.ndarray or None
+        The grid-level weights of the tracer (``None`` means uniform).
+    """
+    kept = weights_rg > 0
+
+    if weights is not None:
+        field_w, grid_w = weights[tracer - 1]
+        field_w = None if field_w is None else np.asarray(field_w) * kept
+        grid_w = None if grid_w is None else np.asarray(grid_w) * kept
+        return field_w, grid_w
+
+    if weights_scheme == "validation":
+        if tracer == 1:
+            if counts_keep_rg is None:
+                raise ValueError(
+                    "counts_keep_rg is required by weights_scheme='validation'"
+                )
+            return None, counts_keep_rg
+        dndz = gal_dndz if gal_dndz is not None else _get_dndz_box(jk)
+        if dndz is None:
+            warnings.warn(
+                "weights_scheme='validation' needs a dN/dz for the galaxy field "
+                "weights, but none is available on this instance (it is not a "
+                "mock simulation and gal_dndz was not passed). Falling back to "
+                "the binary occupancy of the jackknifed lightcone, which is NOT "
+                "the validation weighting. Pass weights=(w1, (dndz, grid2)) or "
+                "gal_dndz=dndz explicitly.",
+                stacklevel=2,
+            )
+            # no analytic dN/dz available (e.g. real data): fall back to the
+            # binary occupancy of the jackknifed lightcone
+            if counts_keep_rg is None:
+                raise ValueError(
+                    "counts_keep_rg is required for the galaxy weights when no "
+                    "dN/dz is available"
+                )
+            return (counts_keep_rg > 0).astype(weights_rg.dtype), np.ones_like(
+                weights_rg
+            )
+        return dndz, (dndz > 0) * counts_keep_rg
+
+    if weights_scheme == "counts":
+        if counts_keep_rg is None:
+            raise ValueError("counts_keep_rg is required by weights_scheme='counts'")
+        if tracer == 1:
+            return None, counts_keep_rg
+        return (counts_keep_rg > 0).astype(weights_rg.dtype), np.ones_like(weights_rg)
+
+    if weights_scheme == "gridded":
+        if tracer == 1:
+            return weights_rg, weights_rg
+        if gal_grid_weights == "binary":
+            # the galaxy window set by grid_gal_to_field, restricted to the
+            # region kept by the jackknife
+            window = gal_window_rg
+            if window is None:
+                window = getattr(jk, "weights_field_2", None)
+            if window is None:
+                window = (counts_keep_rg > 0) if counts_keep_rg is not None else kept
+            window = np.asarray(window, dtype=weights_rg.dtype) * kept
+            return window, window
+        if gal_grid_weights == "gridded":
+            if gal_weights_rg is None:
+                raise ValueError(
+                    "gal_grid_weights='gridded' needs the gridded galaxy weights, "
+                    "which are only available for the cross jackknife"
+                )
+            return gal_weights_rg, gal_weights_rg
+        raise ValueError(f"Invalid gal_grid_weights: {gal_grid_weights}")
+
+    raise ValueError(f"Invalid weights_scheme: {weights_scheme}")
+
+
+def _get_dndz_box(jk: PowerSpectrum) -> NDArray[np.floating] | None:
+    """
+    The dN/dz of the discrete tracers evaluated on the box voxel redshifts.
+
+    Parameters
+    ----------
+    jk: :class:`meer21cm.power.PowerSpectrum`
+        The per-realisation instance.
+
+    Returns
+    -------
+    dndz: np.ndarray or None
+        The dN/dz per box voxel, or ``None`` when the instance has no
+        ``discrete_source_dndz`` callable (i.e. it is not a mock simulation).
+    """
+    dndz_func = getattr(jk, "discrete_source_dndz", None)
+    if dndz_func is None or not callable(dndz_func):
+        return None
+    dndz = np.asarray(dndz_func(jk.box_voxel_redshift))
+    return np.broadcast_to(dndz, jk.box_ndim).astype(jk.real_dtype, copy=True)
+
+
+def _grid_jackknifed_map(
+    jk: PowerSpectrum,
+    patch_mask: ArrayLike,
+    return_kept_counts: bool = False,
+    box_reference: dict[str, NDArray] | None = None,
+    return_kept_window: bool = False,
+) -> tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating] | None,]:
     """
     Apply the jackknife mask to the map data and pixel weights of a
     per-realisation instance, and grid the jackknifed map to the Cartesian box.
@@ -657,8 +1041,15 @@ def _grid_jackknifed_map(jk, patch_mask, return_kept_counts=False):
     return_kept_counts: bool, default False
         Whether to also compute the number of kept map voxels falling in
         each box cell (the jackknife-consistent analogue of
-        ``counts_in_box``, needed for ``weights_scheme="counts"``).
-        This requires a second gridding pass.
+        ``counts_in_box``). This requires a second gridding pass.
+    box_reference: dict, default None
+        The box geometry recorded on the input instance, from
+        :func:`box_geometry`. If given, the realisation's own box is checked
+        against it and a ``ValueError`` is raised on any mismatch.
+    return_kept_window: bool, default False
+        Whether to also return the boolean mask of box cells that are covered by
+        the jackknifed window ``(weights_rg > 0)``. Used to restrict
+        user-supplied weights to the kept region.
 
     Returns
     -------
@@ -673,6 +1064,8 @@ def _grid_jackknifed_map(jk, patch_mask, return_kept_counts=False):
     # identical box for all realisations: computed from the full window
     # with the seed propagated from the input instance
     jk.get_enclosing_box()
+    if box_reference is not None:
+        _check_box_geometry(jk, box_reference)
     keep = (~np.asarray(patch_mask, dtype=bool)) * (jk.W_HI > 0)
     keep = keep.astype(jk.data.dtype)
     # nan_to_num: real maps can store nan outside the sampled window;
@@ -682,7 +1075,7 @@ def _grid_jackknifed_map(jk, patch_mask, return_kept_counts=False):
     jk.weights_map_pixel = np.nan_to_num(jk.weights_map_pixel) * keep
     map_rg, weights_rg, _ = jk.grid_data_to_field()
     counts_keep_rg = None
-    if return_kept_counts:
+    if return_kept_counts or return_kept_window:
         # the jackknife-consistent analogue of ``counts_in_box``:
         # get_counts_in_box grids the pixel weights ``w_HI`` (single particle
         # pass, no interlacing), which at this point are already jackknifed,
@@ -693,14 +1086,17 @@ def _grid_jackknifed_map(jk, patch_mask, return_kept_counts=False):
 
 
 def run_jackknife_auto(
-    ps_attr_dict,
-    patch_mask,
-    k_sel_3d_to_1d=None,
-    weights_scheme="gridded",
-    apply_taper=True,
-    taper_axis=(2,),
-    return_power_3d=False,
-):
+    ps_attr_dict: dict[str, Any],
+    patch_mask: ArrayLike,
+    k_sel_3d_to_1d: ArrayLike | None = None,
+    weights_scheme: WeightsScheme | str = "validation",
+    weights: tuple | None = None,
+    apply_taper: bool = True,
+    taper_axis: tuple[int, ...] = (2,),
+    return_power_3d: bool = False,
+    box_reference: dict[str, NDArray] | None = None,
+    gal_dndz: NDArray[np.floating] | None = None,
+) -> JackknifeResult:
     """
     Compute the 1D auto-power spectrum of the HI map for one jackknife
     realisation, with the patch given by ``patch_mask`` removed.
@@ -714,15 +1110,20 @@ def run_jackknife_auto(
     k_sel_3d_to_1d: np.ndarray, default None
         The weights for averaging the 3D power spectrum k-modes to
         the 1D power spectrum.
-    weights_scheme: str, default "gridded"
+    weights_scheme: str, default "validation"
         The scheme used to assign the power spectrum weights,
         see :class:`JackknifeCovariance`.
+    weights: tuple, default None
+        Explicit weights, see :class:`JackknifeCovariance`.
     apply_taper: bool, default True
         Whether to apply the taper function to the gridded weights.
     taper_axis: tuple, default (2,)
         The box axes along which the taper is applied.
     return_power_3d: bool, default False
         Whether to also return the 3D power spectrum.
+    box_reference: dict, default None
+        The box geometry to check each realisation against, from
+        :func:`box_geometry`.
 
     Returns
     -------
@@ -733,30 +1134,33 @@ def run_jackknife_auto(
     """
     jk = PowerSpectrum(**ps_attr_dict)
     map_rg, weights_rg, counts_keep_rg = _grid_jackknifed_map(
-        jk, patch_mask, return_kept_counts=(weights_scheme == "counts")
+        jk,
+        patch_mask,
+        return_kept_counts=(weights_scheme in ("validation", "counts")),
+        box_reference=box_reference,
     )
     _check_k1dweights(jk, k_sel_3d_to_1d)
     jk.field_1 = map_rg
-    if weights_scheme == "counts":
-        # cookbook convention: inverse noise variance weighting with the
-        # (jackknifed) number of map voxels per box cell
-        jk.weights_grid_1 = counts_keep_rg
-        jk.weights_field_1 = None
-    elif weights_scheme == "gridded":
-        jk.weights_field_1 = weights_rg
-        jk.weights_grid_1 = weights_rg
-    else:
-        raise ValueError(f"Invalid weights_scheme: {weights_scheme}")
+    field_w, grid_w = resolve_tracer_weights(
+        tracer=1,
+        weights_scheme=weights_scheme,
+        weights=weights,
+        jk=jk,
+        counts_keep_rg=counts_keep_rg,
+        weights_rg=weights_rg,
+        gal_grid_weights="binary",
+    )
+    jk.weights_field_1 = field_w
+    jk.weights_grid_1 = grid_w
     # gridding may have overridden these, restore the input settings
     jk.mean_center_1 = ps_attr_dict["mean_center_1"]
     jk.unitless_1 = ps_attr_dict["unitless_1"]
     jk.include_beam = ps_attr_dict["include_beam"]
     jk.include_sky_sampling = ps_attr_dict["include_sky_sampling"]
+    _materialise_none_grid_weights(jk, 1)
     if apply_taper:
         jk.apply_taper_to_field(1, axis=list(taper_axis))
-    p1d_auto, _, _ = jk.get_1d_power(
-        "auto_power_3d_1", k1dweights=k_sel_3d_to_1d
-    )
+    p1d_auto, _, _ = jk.get_1d_power("auto_power_3d_1", k1dweights=k_sel_3d_to_1d)
     result = [p1d_auto]
     if return_power_3d:
         result.append(jk.auto_power_3d_1)
@@ -764,17 +1168,20 @@ def run_jackknife_auto(
 
 
 def run_jackknife_cross(
-    ps_attr_dict,
-    patch_mask,
-    gal_radecz,
-    k_sel_3d_to_1d=None,
-    weights_scheme="gridded",
-    apply_taper=True,
-    taper_axis=(2,),
-    gal_grid_weights="binary",
-    return_power_3d=False,
-    return_auto_power=False,
-):
+    ps_attr_dict: dict[str, Any],
+    patch_mask: ArrayLike,
+    gal_radecz: tuple[ArrayLike, ArrayLike, ArrayLike],
+    k_sel_3d_to_1d: ArrayLike | None = None,
+    weights_scheme: WeightsScheme | str = "validation",
+    weights: tuple | None = None,
+    apply_taper: bool = True,
+    taper_axis: tuple[int, ...] = (2,),
+    gal_grid_weights: GalaxyGridWeights | str = "binary",
+    return_power_3d: bool = False,
+    return_auto_power: bool = False,
+    box_reference: dict[str, NDArray] | None = None,
+    gal_dndz: NDArray[np.floating] | None = None,
+) -> JackknifeResult:
     """
     Compute the 1D HI x galaxy cross-power spectrum for one jackknife
     realisation, with the patch given by ``patch_mask`` removed from the map
@@ -791,9 +1198,11 @@ def run_jackknife_cross(
     k_sel_3d_to_1d: np.ndarray, default None
         The weights for averaging the 3D power spectrum k-modes to
         the 1D power spectrum.
-    weights_scheme: str, default "gridded"
+    weights_scheme: str, default "validation"
         The scheme used to assign the power spectrum weights,
         see :class:`JackknifeCovariance`.
+    weights: tuple, default None
+        Explicit weights, see :class:`JackknifeCovariance`.
     apply_taper: bool, default True
         Whether to apply the taper function to the gridded weights
         of both fields.
@@ -816,8 +1225,12 @@ def run_jackknife_cross(
         the 1D auto-power of field 1 (HI) and of field 2 (galaxy).
     """
     jk = PowerSpectrum(**ps_attr_dict)
+    needs_counts = weights_scheme in ("validation", "counts")
     map_rg, weights_rg, counts_keep_rg = _grid_jackknifed_map(
-        jk, patch_mask, return_kept_counts=(weights_scheme == "counts")
+        jk,
+        patch_mask,
+        return_kept_counts=needs_counts,
+        box_reference=box_reference,
     )
     _check_k1dweights(jk, k_sel_3d_to_1d)
     # jackknifed galaxy catalogue
@@ -826,41 +1239,48 @@ def run_jackknife_cross(
     jk._dec_gal = np.asarray(dec_gal)
     jk._z_gal = np.asarray(z_gal)
     gal_map_rg, gal_weights_rg, _ = jk.grid_gal_to_field()
+    # the galaxy window that grid_gal_to_field has just set on the instance,
+    # captured before the weighting below overwrites it
+    gal_window_rg = np.array(jk.weights_field_2, copy=True)
     # field 1: HI map
     jk.field_1 = map_rg
-    if weights_scheme == "counts":
-        # cookbook convention: inverse noise variance weighting with the
-        # (jackknifed) number of map voxels per box cell
-        jk.weights_grid_1 = counts_keep_rg
-        jk.weights_field_1 = None
-    elif weights_scheme == "gridded":
-        jk.weights_field_1 = weights_rg
-        jk.weights_grid_1 = weights_rg
-    else:
-        raise ValueError(f"Invalid weights_scheme: {weights_scheme}")
+    field_w_1, grid_w_1 = resolve_tracer_weights(
+        tracer=1,
+        weights_scheme=weights_scheme,
+        weights=weights,
+        jk=jk,
+        counts_keep_rg=counts_keep_rg,
+        weights_rg=weights_rg,
+        gal_grid_weights=gal_grid_weights,
+        gal_weights_rg=gal_weights_rg,
+        gal_window_rg=gal_window_rg,
+        gal_dndz=gal_dndz,
+    )
+    jk.weights_field_1 = field_w_1
+    jk.weights_grid_1 = grid_w_1
     jk.mean_center_1 = ps_attr_dict["mean_center_1"]
     jk.unitless_1 = ps_attr_dict["unitless_1"]
     # field 2: galaxy number counts
     # (grid_gal_to_field has already set mean_center_2=True, unitless_2=True)
     jk.field_2 = gal_map_rg
-    if weights_scheme == "counts":
-        # cookbook convention: binary occupancy of the (jackknifed) lightcone
-        # as field weights, uniform grid weights
-        jk.weights_field_2 = (counts_keep_rg > 0).astype(gal_map_rg.dtype)
-        jk.weights_grid_2 = np.ones_like(gal_map_rg)
-    elif gal_grid_weights == "binary":
-        # default galaxy window (box region sampled by the lightcone),
-        # restricted to the region kept by the jackknife
-        weights_g = jk.weights_field_2 * (weights_rg > 0)
-        jk.weights_field_2 = weights_g
-        jk.weights_grid_2 = weights_g
-    elif gal_grid_weights == "gridded":
-        jk.weights_field_2 = gal_weights_rg
-        jk.weights_grid_2 = gal_weights_rg
-    else:
-        raise ValueError(f"Invalid gal_grid_weights: {gal_grid_weights}")
+    field_w_2, grid_w_2 = resolve_tracer_weights(
+        tracer=2,
+        weights_scheme=weights_scheme,
+        weights=weights,
+        jk=jk,
+        counts_keep_rg=counts_keep_rg,
+        weights_rg=weights_rg,
+        gal_grid_weights=gal_grid_weights,
+        gal_weights_rg=gal_weights_rg,
+        gal_window_rg=gal_window_rg,
+        gal_dndz=gal_dndz,
+    )
+    jk.weights_field_2 = field_w_2
+    jk.weights_grid_2 = grid_w_2
     jk.include_beam = ps_attr_dict["include_beam"]
     jk.include_sky_sampling = ps_attr_dict["include_sky_sampling"]
+    _materialise_none_grid_weights(jk, 1)
+    _materialise_none_grid_weights(jk, 2)
     if apply_taper:
         jk.apply_taper_to_field(1, axis=list(taper_axis))
         jk.apply_taper_to_field(2, axis=list(taper_axis))
@@ -869,12 +1289,8 @@ def run_jackknife_cross(
     if return_power_3d:
         result.append(jk.cross_power_3d)
     if return_auto_power:
-        p1d_auto_1, _, _ = jk.get_1d_power(
-            "auto_power_3d_1", k1dweights=k_sel_3d_to_1d
-        )
-        p1d_auto_2, _, _ = jk.get_1d_power(
-            "auto_power_3d_2", k1dweights=k_sel_3d_to_1d
-        )
+        p1d_auto_1, _, _ = jk.get_1d_power("auto_power_3d_1", k1dweights=k_sel_3d_to_1d)
+        p1d_auto_2, _, _ = jk.get_1d_power("auto_power_3d_2", k1dweights=k_sel_3d_to_1d)
         result.append(p1d_auto_1)
         result.append(p1d_auto_2)
     return result
