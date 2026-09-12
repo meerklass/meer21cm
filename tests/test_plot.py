@@ -318,3 +318,98 @@ def test_finish_healpix_cartview_figure_colorbar_layout():
     assert cb_ax.texts[0].removed
     assert cb_ax.label == ("K", 2.0)
     assert cb_ax.pos_set is not None
+
+
+def _tiny_discrete_shell_mat(ells=(0, 2, 4), n_out=3, n_in=5):
+    from meer21cm.smooth_window import DiscreteShellWindowMatrix
+
+    n_ell = len(ells)
+    return DiscreteShellWindowMatrix(
+        matrix=np.linspace(0.0, 1.0, n_ell * n_out * n_ell * n_in).reshape(
+            n_ell * n_out, n_ell * n_in
+        ),
+        k_in=np.linspace(0.1, 0.5, n_in),
+        k_out=np.linspace(0.15, 0.4, n_out),
+        nmodes=np.ones(n_out),
+        ells=tuple(ells),
+    )
+
+
+def test_plot_discrete_shell_window_row():
+    plt.switch_backend("Agg")
+    mat = _tiny_discrete_shell_mat(ells=(0, 2, 4), n_out=3, n_in=5)
+
+    # ell_out is None → defaults to mat.ells[0]; multi-panel path
+    fig, axes = plot_discrete_shell_window_row(mat, k_out_index=1)
+    assert len(axes) == 3
+    assert axes[1].get_xlabel() == r"$k_\mathrm{in}$"
+    plt.close(fig)
+
+    # explicit ell_out + sharey/figsize kwargs
+    fig, axes = plot_discrete_shell_window_row(
+        mat, k_out_index=0, ell_out=2, figsize=(8, 2), sharey=False
+    )
+    assert len(axes) == 3
+    plt.close(fig)
+
+    # single-multipole path (len(ells) == 1 wraps axes)
+    mat1 = _tiny_discrete_shell_mat(ells=(0,), n_out=2, n_in=4)
+    fig, axes = plot_discrete_shell_window_row(mat1, k_out_index=0)
+    assert len(axes) == 1
+    assert axes[0].get_xlabel() == r"$k_\mathrm{in}$"
+    plt.close(fig)
+
+    with pytest.raises(ValueError, match="ell_out=1 not in mat.ells"):
+        plot_discrete_shell_window_row(mat, k_out_index=0, ell_out=1)
+    with pytest.raises(IndexError, match="k_out_index=-1 out of range"):
+        plot_discrete_shell_window_row(mat, k_out_index=-1)
+    with pytest.raises(IndexError, match="k_out_index=3 out of range"):
+        plot_discrete_shell_window_row(mat, k_out_index=3)
+    plt.close("all")
+
+
+def test_plot_discrete_shell_window_matrix():
+    plt.switch_backend("Agg")
+    mat = _tiny_discrete_shell_mat(ells=(0, 2, 4), n_out=3, n_in=5)
+
+    # multi-ell: bottom-row xlabel / left-column ylabel branches
+    fig, axes = plot_discrete_shell_window_matrix(mat)
+    assert axes.shape == (3, 3)
+    assert axes[2, 0].get_xlabel() == r"$k_\mathrm{out}$"
+    assert axes[0, 0].get_ylabel() == r"$k_\mathrm{in}$"
+    assert axes[0, 1].get_xlabel() == ""
+    assert axes[1, 1].get_ylabel() == ""
+    plt.close(fig)
+
+    # single-ell axes wrap + optional style kwargs
+    mat1 = _tiny_discrete_shell_mat(ells=(0,), n_out=2, n_in=4)
+    fig, axes = plot_discrete_shell_window_matrix(
+        mat1, vmin=-0.5, vmax=0.5, cmap="RdBu_r", figsize=(4, 4), fontsize=10
+    )
+    assert axes.shape == (1, 1)
+    assert axes[0, 0].get_xlabel() == r"$k_\mathrm{out}$"
+    assert axes[0, 0].get_ylabel() == r"$k_\mathrm{in}$"
+    plt.close(fig)
+
+    empty = _tiny_discrete_shell_mat(ells=(0, 2), n_out=2, n_in=3)
+    empty.ells = ()
+    with pytest.raises(ValueError, match="at least one multipole"):
+        plot_discrete_shell_window_matrix(empty)
+
+    short = _tiny_discrete_shell_mat(ells=(0,), n_out=2, n_in=4)
+    short.k_in = np.array([0.2])
+    short.matrix = np.zeros((2, 1))
+    with pytest.raises(ValueError, match="at least two nodes"):
+        plot_discrete_shell_window_matrix(short)
+
+    short_out = _tiny_discrete_shell_mat(ells=(0,), n_out=2, n_in=4)
+    short_out.k_out = np.array([0.2])
+    short_out.matrix = np.zeros((1, 4))
+    with pytest.raises(ValueError, match="at least two nodes"):
+        plot_discrete_shell_window_matrix(short_out)
+
+    bad = _tiny_discrete_shell_mat(ells=(0, 2), n_out=2, n_in=3)
+    bad.matrix = np.zeros((3, 3))
+    with pytest.raises(ValueError, match="mat.matrix shape"):
+        plot_discrete_shell_window_matrix(bad)
+    plt.close("all")

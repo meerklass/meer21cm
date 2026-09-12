@@ -5,7 +5,7 @@ import numpy as np
 import copy
 import matplotlib
 
-from .util import tightest_ra_interval
+from .util import center_to_edges, tightest_ra_interval
 
 
 def plot_pixels_along_los(
@@ -634,3 +634,175 @@ def visualise_patch_split(mask_arr, wproj):
                 sel = mask_arr[i, j, nu_indx].sum(-1) > 0
                 mask_map[sel] = i + j * mask_arr.shape[0]
         plot_map(mask_map, wproj, have_cbar=False, title=f"frequency bin {nu_indx}")
+
+
+def plot_discrete_shell_window_row(
+    mat,
+    k_out_index,
+    ell_out=None,
+    figsize=(10, 3),
+    sharey=True,
+):
+    """
+    Plot one discrete-shell window matrix row vs theory ``k_in``.
+
+    For fixed output multipole ``ell_out`` and estimator bin ``k_out_index``,
+    shows :math:`W_{\\ell_{\\mathrm{out}}\\ell'}(k_{\\mathrm{out}}, k_{\\mathrm{in}})`
+    in one panel per theory multipole ``ell'`` in ``mat.ells``.
+
+    Parameters
+    ----------
+    mat : DiscreteShellWindowMatrix
+        Matrix from :func:`~meer21cm.smooth_window.build_discrete_shell_window_matrix`.
+    k_out_index : int
+        Index into ``mat.k_out``.
+    ell_out : int, optional
+        Output multipole. Defaults to ``mat.ells[0]``.
+    figsize : tuple, default (10, 3)
+        Passed to :func:`matplotlib.pyplot.subplots`.
+    sharey : bool, default True
+        Share the y-axis across panels.
+
+    Returns
+    -------
+    fig, axes
+        Matplotlib figure and axes array (length ``len(mat.ells)``).
+    """
+    ells = tuple(int(e) for e in mat.ells)
+    if ell_out is None:
+        ell_out = ells[0]
+    else:
+        ell_out = int(ell_out)
+    if ell_out not in ells:
+        raise ValueError(f"ell_out={ell_out} not in mat.ells={ells}")
+    n_out = len(mat.k_out)
+    n_in = len(mat.k_in)
+    if not (0 <= int(k_out_index) < n_out):
+        raise IndexError(f"k_out_index={k_out_index} out of range for n_out={n_out}")
+    i_out = ells.index(ell_out)
+    row = np.asarray(mat.matrix[i_out * n_out + int(k_out_index)], dtype=float)
+    k_out = float(mat.k_out[int(k_out_index)])
+
+    fig, axes = plt.subplots(
+        1,
+        len(ells),
+        figsize=figsize,
+        sharey=sharey,
+        gridspec_kw={"wspace": 0},
+    )
+    if len(ells) == 1:
+        axes = np.asarray([axes])
+
+    for i, (ax, ell_in) in enumerate(zip(axes, ells)):
+        ax.plot(mat.k_in, row[i * n_in : (i + 1) * n_in])
+        ax.axvline(k_out, color="k", ls="--")
+        ax.set_title(rf"$W_{{{ell_out}, {ell_in}}}(k_\mathrm{{out}},k_\mathrm{{in}})$")
+        if i == len(ells) // 2:
+            ax.set_xlabel(r"$k_\mathrm{in}$")
+    fig.suptitle(rf"$k_\mathrm{{out}}={k_out:g}$", y=1.05)
+    return fig, axes
+
+
+def plot_discrete_shell_window_matrix(
+    mat,
+    vmin=-1.0,
+    vmax=1.0,
+    cmap="coolwarm",
+    figsize=None,
+    fontsize=12,
+):
+    """
+    Plot all blocks of a discrete-shell window matrix as a multipole grid.
+
+    Each panel shows
+    :math:`W_{\\ell_{\\mathrm{out}}\\ell'}(k_{\\mathrm{out}}, k_{\\mathrm{in}})`
+    with output multipoles increasing upward and theory multipoles left→right
+    (same layout as the cookbook notebook).
+
+    Parameters
+    ----------
+    mat : DiscreteShellWindowMatrix
+        Matrix from :func:`~meer21cm.smooth_window.build_discrete_shell_window_matrix`.
+    vmin, vmax : float, default -1, 1
+        Color scale for :meth:`~matplotlib.axes.Axes.pcolormesh`.
+    cmap : str or Colormap, default 'coolwarm'
+        Colormap name / object.
+    figsize : tuple, optional
+        Defaults to ``(n_ell * 3, n_ell * 3)``.
+    fontsize : float, default 12
+        Size of the per-panel :math:`W_{\\ell\\ell'}` annotation.
+
+    Returns
+    -------
+    fig, axes
+        Matplotlib figure and 2D axes array of shape ``(n_ell, n_ell)``.
+    """
+    ells = tuple(int(e) for e in mat.ells)
+    num_ell = len(ells)
+    if num_ell < 1:
+        raise ValueError("mat.ells must contain at least one multipole")
+    k_in = np.asarray(mat.k_in, dtype=float)
+    k_out = np.asarray(mat.k_out, dtype=float)
+    if len(k_in) < 2 or len(k_out) < 2:
+        raise ValueError(
+            "mat.k_in and mat.k_out each need at least two nodes for pcolormesh edges"
+        )
+    num_k_in = len(k_in)
+    num_k_out = len(k_out)
+    matrix = np.asarray(mat.matrix, dtype=float)
+    expected = (num_ell * num_k_out, num_ell * num_k_in)
+    if matrix.shape != expected:
+        raise ValueError(
+            f"mat.matrix shape {matrix.shape} != expected {expected} "
+            f"for ells={ells}, n_out={num_k_out}, n_in={num_k_in}"
+        )
+
+    k_in_edges = center_to_edges(k_in)
+    k_out_edges = center_to_edges(k_out)
+    if figsize is None:
+        figsize = (num_ell * 3, num_ell * 3)
+    fig, axes = plt.subplots(
+        num_ell,
+        num_ell,
+        figsize=figsize,
+        gridspec_kw={"hspace": 0.01, "wspace": 0.01},
+    )
+    if num_ell == 1:
+        axes = np.array([[axes]])
+    else:
+        axes = np.asarray(axes)
+
+    for i in range(num_ell):
+        for j in range(num_ell):
+            if i != num_ell - 1:
+                axes[i, j].set_xticklabels([])
+            else:
+                axes[i, j].set_xlabel(r"$k_\mathrm{out}$")
+            if j != 0:
+                axes[i, j].set_yticklabels([])
+            else:
+                axes[i, j].set_ylabel(r"$k_\mathrm{in}$")
+
+    for i, ell_out in enumerate(ells):
+        for j, ell_in in enumerate(ells):
+            i_indx = i * num_k_out
+            j_indx = j * num_k_in
+            ax = axes[num_ell - i - 1, j]
+            ax.pcolormesh(
+                k_out_edges,
+                k_in_edges,
+                matrix[i_indx : i_indx + num_k_out, j_indx : j_indx + num_k_in].T,
+                vmin=vmin,
+                vmax=vmax,
+                cmap=cmap,
+            )
+            ax.text(
+                0.9,
+                0.1,
+                rf"$W_{{{ell_out},{ell_in}}}(k_\mathrm{{out}},k_\mathrm{{in}})$",
+                ha="right",
+                va="center",
+                fontsize=fontsize,
+                transform=ax.transAxes,
+            )
+    return fig, axes

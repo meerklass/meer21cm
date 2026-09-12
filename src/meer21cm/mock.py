@@ -1815,7 +1815,14 @@ def generate_lognormal_field(
         box_ndim, box_len, Delta_G, seed, ps_has_volume=False
     )
     # Apply lognormal transformation
-    sigma_sq = np.asarray(np.mean(Delta_G.ravel()[1:]), dtype=real_dtype)
+    # sigma_sq must be the actual variance of the generated Gaussian field g,
+    # i.e. the zero-lag value of its correlation irfftn(Delta_G).  A plain mean
+    # over the stored rfft modes over-weights the k_z=0 plane (each stored mode
+    # there represents one full mode, not two), biasing sigma_sq high and
+    # suppressing the lognormal field amplitude. ifftn back to get the true variance.
+    sigma_sq = np.fft.irfftn(Delta_G, axes=(0, 1, 2), s=box_ndim, norm="backward")[
+        0, 0, 0
+    ].astype(real_dtype)
     half = np.asarray(0.5, dtype=real_dtype)
     one = np.asarray(1.0, dtype=real_dtype)
     delta_x = np.exp(delta_x_g - sigma_sq * half) - one

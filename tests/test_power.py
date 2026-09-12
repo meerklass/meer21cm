@@ -1,10 +1,13 @@
+import warnings
+
 import numpy as np
 from meer21cm.power import *
 import pytest
 from scipy.signal import windows
-from meer21cm import PowerSpectrum, Specification
+from meer21cm import PowerSpectrum
 from meer21cm.util import center_to_edges, f_21
 from meer21cm.mock import generate_gaussian_field
+from scipy.interpolate import interp1d
 
 
 def test_nyquist_k():
@@ -476,6 +479,82 @@ def test_model_in_real_space():
     model.tracer_bias_2 = 3.0
     assert np.allclose(model.auto_power_tracer_2_model, matter_ps_real * 9)
     assert np.allclose(model.cross_power_tracer_model, matter_ps_real * 6)
+
+
+def test_power_kmu_mean_amp_none_and_tracer_2():
+    """Cover mean_amp=None → 1, auto_2 / cross with mean_amp, and bad which."""
+    model = ModelPowerSpectrum(
+        kaiser_rsd=False,
+        tracer_bias_1=2.0,
+        tracer_bias_2=3.0,
+        mean_amp_1=None,
+        mean_amp_2=None,
+    )
+    assert model.mean_amp_value(1) == 1.0
+    assert model.mean_amp_value(2) == 1.0
+
+    p1 = model.power_kmu("auto_1", include_mean_amp=True)
+    p2 = model.power_kmu("auto_2", include_mean_amp=True)
+    px = model.power_kmu("cross", include_mean_amp=True)
+    np.testing.assert_allclose(p1, model.auto_power_tracer_1_model_noobs)
+    np.testing.assert_allclose(p2, model.auto_power_tracer_2_model_noobs)
+    np.testing.assert_allclose(px, model.cross_power_tracer_model_noobs)
+
+    model.mean_amp_1 = 2.0
+    model.mean_amp_2 = 5.0
+    np.testing.assert_allclose(
+        model.power_kmu("auto_2", include_mean_amp=True),
+        model.auto_power_tracer_2_model_noobs * 25.0,
+    )
+    np.testing.assert_allclose(
+        model.power_kmu("cross", include_mean_amp=True),
+        model.cross_power_tracer_model_noobs * 2.0 * 5.0,
+    )
+    with pytest.raises(ValueError, match="auto_1"):
+        model.power_kmu("auto_3")
+
+
+def test_get_theory_multipoles_kmu_on_model():
+    model = ModelPowerSpectrum(kaiser_rsd=False, tracer_bias_1=1.0, mean_amp_1=1.0)
+    k_in = np.geomspace(0.05, 0.3, 12)
+    # ModelPowerSpectrum has no los → no warning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        raw = model.get_theory_multipoles_kmu(k_in, ells=(0, 2), nmu=32, which="auto_1")
+    assert not any(issubclass(w.category, UserWarning) for w in caught)
+    assert raw["P_ell"][0].shape == k_in.shape
+    assert np.all(np.isfinite(raw["P_ell"][0]))
+
+
+def test_get_theory_multipoles_kmu_warns_for_global_los():
+    from meer21cm.power import PowerSpectrum
+
+    box_len = np.array([80.0, 80.0, 80.0])
+    field = np.ones((8, 8, 8))
+    ps = PowerSpectrum(
+        field,
+        box_len,
+        los="global",
+        tracer_bias_1=1.0,
+        mean_amp_1=1.0,
+        kaiser_rsd=False,
+        include_beam=[False, False],
+        include_sky_sampling=[False, False],
+        model_k_from_field=True,
+    )
+    k_in = np.geomspace(0.05, 0.3, 8)
+    with pytest.warns(UserWarning, match="get_1d_power"):
+        ps.get_theory_multipoles_kmu(k_in, ells=(0,), nmu=16, which="auto_1")
+
+
+def test_warn_continuous_multipoles_skips_nonglobal_los():
+    """``los`` present but not ``'global'`` → no continuous-multipole warning."""
+    model = ModelPowerSpectrum(kaiser_rsd=False, tracer_bias_1=1.0, mean_amp_1=1.0)
+    model.los = "endpoint"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model._warn_if_global_los_for_continuous_multipoles()
+    assert not any(issubclass(w.category, UserWarning) for w in caught)
 
 
 @pytest.mark.parametrize("fog_profile", ["gaussian", "lorentz"])
@@ -1050,6 +1129,164 @@ def test_poisson_gal_gen():
     assert np.abs(plateau - psn) / psn < 2.5e-1
 
 
+def test_poisson_gal_gen_paired_wcs_pixels():
+    """RA and Dec must come from the same selected pixel (no independent draws)."""
+    from meer21cm.grid import _random_radec_in_radec_rectangles
+
+    ps = PowerSpectrum(
+        ra_range=(334, 357),
+        dec_range=(-35, -26.5),
+        survey="meerklass_2021",
+        band="L",
+        num_particle_per_pixel=1,
+    )
+    # Two well-separated pixels only.
+    sel = np.zeros_like(ps.W_HI[..., 0], dtype=bool)
+    flat = sel.ravel()
+    idx = np.flatnonzero(ps.W_HI[..., 0].ravel())
+    i0, i1 = idx[0], idx[len(idx) // 2]
+    flat[i0] = True
+    flat[i1] = True
+    sel = flat.reshape(sel.shape)
+    ra0 = np.array([ps.ra_map.ravel()[i0], ps.ra_map.ravel()[i1]])
+    dec0 = np.array([ps.dec_map.ravel()[i0], ps.dec_map.ravel()[i1]])
+    # Centres are far apart relative to pixel size.
+    assert np.hypot(ra0[0] - ra0[1], dec0[0] - dec0[1]) > 5 * ps.pix_resol
+
+    ra, dec, freq = ps.gen_random_poisson_galaxy(sel=sel, num_g_rand=2000, seed=7)
+    assert ra.shape == dec.shape == freq.shape == (2000,)
+    half = ps.pix_resol / 2
+    d0 = np.hypot(ra - ra0[0], dec - dec0[0])
+    d1 = np.hypot(ra - ra0[1], dec - dec0[1])
+    # Every galaxy must land near exactly one of the two centres.
+    assert np.all((d0 < 2 * half) | (d1 < 2 * half))
+    assert np.all(~((d0 < 2 * half) & (d1 < 2 * half)))
+
+    # Helper: sin(δ) sampling stays inside the rectangle in Dec.
+    rng = np.random.default_rng(0)
+    ra_t, dec_t = _random_radec_in_radec_rectangles(
+        np.full(5000, 10.0), np.full(5000, -30.0), 0.5, 0.5, rng
+    )
+    assert ra_t.min() >= 9.5 and ra_t.max() <= 10.5
+    assert dec_t.min() >= -30.5 and dec_t.max() <= -29.5
+
+
+def test_poisson_gal_gen_healpix():
+    """HEALPix footprint must work; samples stay in selected pixels."""
+    import healpy as hp
+
+    ps = PowerSpectrum(
+        hp_nside=64,
+        ra_range=(40, 50),
+        dec_range=(-5, 5),
+        nu=np.linspace(900e6, 950e6, 8),
+        num_particle_per_pixel=1,
+    )
+    ps._ra_gal = np.ones(5000)
+    ps._dec_gal = np.ones(5000)
+    ps._z_gal = np.ones(5000)
+    ra, dec, freq = ps.gen_random_poisson_galaxy(seed=11)
+    assert ra.shape == dec.shape == freq.shape == (5000,)
+    pix = hp.ang2pix(ps.hp_nside, ra, dec, lonlat=True)
+    assert np.all(np.isin(pix, ps.pixel_id[ps.W_HI[..., 0]]))
+
+    # Empty selection / shape mismatch.
+    with pytest.raises(ValueError, match="empty"):
+        ps.gen_random_poisson_galaxy(sel=np.zeros_like(ps.W_HI[..., 0], dtype=bool))
+    with pytest.raises(ValueError, match="sel shape"):
+        ps.gen_random_poisson_galaxy(sel=np.ones((3, 3), dtype=bool))
+
+
+def test_poisson_gal_gen_chi2_radial():
+    """Default radial sampling is p(chi) ∝ chi**2 (constant comoving density)."""
+    from meer21cm.util import freq_to_redshift
+
+    zmin = 0.6
+    zmax = 0.8
+    nu = np.linspace(redshift_to_freq(zmax), redshift_to_freq(zmin), 100)
+    raminMK, ramaxMK = 320, 380
+    decminMK, decmaxMK = -35, -26.5
+    ra_range = (raminMK, ramaxMK)
+    dec_range = (decminMK, decmaxMK)
+    ps = PowerSpectrum(
+        hp_nside=128,
+        ra_range=ra_range,
+        dec_range=dec_range,
+        omega_hi=5.4e-4,
+        mean_amp_1="average_hi_temp",
+        tracer_bias_1=1.5,
+        tracer_bias_2=1.9,
+        nu=nu,
+        # seed=42,
+        kmax=10.0,
+        num_particle_per_pixel=2,
+        box_buffkick=[5, 5, 5],
+    )
+    ps._ra_gal = np.ones(400000)
+    ps._dec_gal = np.ones(400000)
+    ps._z_gal = np.ones(400000)
+    dndz_func = lambda z: 0.01 * np.exp(-((z - 0.7) ** 2) / 0.01)
+    radecfreq = ps.gen_random_poisson_galaxy(dndz=dndz_func(ps.z_ch))
+    ps.compensate = False
+    gal_count, _, _ = ps.grid_gal_to_field(radecfreq)
+    volume = (
+        (ps.W_HI[..., 0].sum() * ps.pixel_area * (np.pi / 180) ** 2)
+        / 3
+        * (
+            ps.astropy_cosmo_true.comoving_distance(ps.z_ch.max()) ** 3
+            - ps.astropy_cosmo_true.comoving_distance(ps.z_ch.min()) ** 3
+        ).value
+    )
+    k1dedges = np.linspace(0.01, 0.3, 21)
+    ps.k1dbins = k1dedges
+    ps.field_2 = gal_count
+    ps.weights_field_2 = dndz_func(ps._box_voxel_redshift)
+    ps.weights_2 = (ps.counts_in_box > 0).astype(float)
+    ps.apply_taper_to_field(2, axis=(0, 1, 2))
+    psn = volume / ps.ra_gal.size
+    psn1d, _, _ = ps.get_1d_power(
+        "auto_power_3d_2",
+    )
+    # remove first 2 bins to avoid windowing and large var
+    psn1d = psn1d[2:]
+    assert psn1d.mean() == pytest.approx(psn, rel=2e-1)
+    # roughly a plateau
+    assert psn1d.std() < (psn * 0.2)
+
+    # check z dist
+    z_rand = freq_to_redshift(radecfreq[-1])
+    z_interp = np.linspace(z_rand.min(), z_rand.max(), 100)
+    diff_V = ps.cosmo.differential_comoving_volume(z_interp).value
+    diff_V_interp = interp1d(z_interp, diff_V)
+    diff_V_rand = diff_V_interp(z_rand)
+    counts, bins = np.histogram(z_rand, weights=1 / diff_V_rand, bins=50)
+    counts /= counts.sum()
+    bins = (bins[:-1] + bins[1:]) / 2
+    counts_func = dndz_func(bins)
+    counts_func /= counts_func.sum()
+    assert np.abs(counts / counts_func - 1).max() < 5e-2
+
+    chi_min = ps.astropy_cosmo_fiducial.comoving_distance(ps.z_ch.min()).to("Mpc").value
+    chi_max = ps.astropy_cosmo_fiducial.comoving_distance(ps.z_ch.max()).to("Mpc").value
+
+    def _chi3_hist_scatter(freq):
+        z = freq_to_redshift(freq)
+        chi = ps.astropy_cosmo_fiducial.comoving_distance(z).to("Mpc").value
+        # CDF of p(χ)∝χ² is uniform in χ³.
+        u = (chi**3 - chi_min**3) / (chi_max**3 - chi_min**3)
+        hist, _ = np.histogram(u, bins=10, range=(0, 1))
+        return hist.std() / hist.mean()
+
+    _, _, freq = ps.gen_random_poisson_galaxy(num_g_rand=80000, seed=3)
+    assert _chi3_hist_scatter(freq) < 0.08
+
+    # Per-volume ones_like matches the same χ² measure (mock default convention).
+    _, _, freq2 = ps.gen_random_poisson_galaxy(
+        num_g_rand=80000, seed=4, dndz=np.ones_like
+    )
+    assert _chi3_hist_scatter(freq2) < 0.08
+
+
 def test_1d_k_cut():
     ps = PowerSpectrum()
     ps._box_len = np.array([10, 10, 10]) * np.pi
@@ -1208,3 +1445,32 @@ def test_grid_field_to_sky_map_healpix(average):
             ValueError, match="field shape .* does not match expected shape"
         ):
             mock.grid_field_to_sky_map(bad_field)
+
+
+def test_sync_k_skip():
+    ps = PowerSpectrum(model_k_from_field=False)
+    assert ps._sync_model_k_from_field() is None
+
+
+def test_gen_random_poisson_galaxy_error():
+    ps = PowerSpectrum(
+        survey="meerklass_2021",
+        band="L",
+        num_particle_per_pixel=1,
+    )
+    ps._ra_gal = np.ones(1000)
+    ps._dec_gal = np.ones(1000)
+    ps._z_gal = np.ones(1000)
+    # negative number of galaxies
+    with pytest.raises(ValueError, match="num_g_rand must be non-negative"):
+        ps.gen_random_poisson_galaxy(num_g_rand=-1)
+    # dndz array shape mismatch
+    with pytest.raises(
+        ValueError, match="dndz array must match frequency-channel redshift shape"
+    ):
+        ps.gen_random_poisson_galaxy(dndz=np.ones(10))
+    # dndz is negative
+    with pytest.raises(
+        ValueError, match="dndz weights are zero everywhere in the survey range"
+    ):
+        ps.gen_random_poisson_galaxy(dndz=lambda z: -np.ones(len(z)))

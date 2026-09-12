@@ -16,6 +16,9 @@ __all__ = [
     "CosmologyCalculator",
     "PowerSpectrum",
     "MockSimulation",
+    "SmoothWindowEstimator",
+    "WindowedMultipoleModel",
+    "DiscreteShellWindowMatrix",
 ]
 
 
@@ -24,6 +27,12 @@ _LAZY_ATTRS = {
     "CosmologyCalculator": ("meer21cm.cosmology", "CosmologyCalculator"),
     "PowerSpectrum": ("meer21cm.power", "PowerSpectrum"),
     "MockSimulation": ("meer21cm.mock", "MockSimulation"),
+    "SmoothWindowEstimator": ("meer21cm.multipole_model", "SmoothWindowEstimator"),
+    "WindowedMultipoleModel": ("meer21cm.multipole_model", "WindowedMultipoleModel"),
+    "DiscreteShellWindowMatrix": (
+        "meer21cm.smooth_window",
+        "DiscreteShellWindowMatrix",
+    ),
 }
 
 

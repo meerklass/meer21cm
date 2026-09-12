@@ -3,16 +3,36 @@ Releases
 
 dev
 ------
+
+v0.9.0
+------
 Features
 ++++++++
+* add opt-in multipole survey-window path (global plane-parallel): ``SmoothWindowEstimator``,
+  ``DiscreteShellWindowMatrix``, and ``WindowedMultipoleModel``
+* measure HI window multipoles from the selection / weight field; galaxy windows from Poisson randoms
+* support continuous kernels ``smooth`` (Hankel / Wigner) and ``identity`` (discrete FFT ``μ``-selection only)
+* add continuous theory multipoles via ``ModelPowerSpectrum.get_theory_multipoles_kmu`` /
+  ``power_kmu`` hierarchy (beam / sampling / MAS deferred to the window path)
+* add ``fftlog`` Hankel utilities for smooth-window transforms
+* add multipole shell map / LOS stubs on ``FieldPowerSpectrum`` for future Yamamoto estimators
+* add window-matrix plotting helpers ``plot_discrete_shell_window_row`` and
+  ``plot_discrete_shell_window_matrix``
 * optimize PR CI by running test/coverage only when source-impacting files change
 * add Codecov carryforward configuration for flagged test coverage uploads
 * switch CI change detection to latest-commit scope for docs-only follow-up commits
 
+Enhancements
+++++++++++++
+* refactor power-spectrum code into ``estimator``, ``model``, ``grid``, and ``power_ops`` modules
+* clarify ``power_kmu`` vs 3D ``get_modelpk_conv`` modelling paths for future multipole compatibility
+* improve Poisson random galaxy generation for window / randoms workflows
+* add explicit typing on the estimator module
+
 Fixes
 +++++
-* remove a stray debug print from `util._ra_range_is_subset_of`
-* clarify that CI change detection checks only the latest commit diff (`HEAD^..HEAD`), so docs-only follow-up commits skip tests
+* remove a stray debug print from ``util._ra_range_is_subset_of``
+* clarify that CI change detection checks only the latest commit diff (``HEAD^..HEAD``), so docs-only follow-up commits skip tests
 * include workflow file changes in CI change detection so workflow edits trigger tests
 
 v0.8.0

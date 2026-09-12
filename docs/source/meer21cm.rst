@@ -17,10 +17,26 @@ meer21cm.dataanalysis module
    :undoc-members:
    :show-inheritance:
 
+meer21cm.fftlog module
+----------------------
+
+.. automodule:: meer21cm.fftlog
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 meer21cm.fg module
 ------------------
 
 .. automodule:: meer21cm.fg
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+meer21cm.estimator module
+-------------------------
+
+.. automodule:: meer21cm.estimator
    :members:
    :undoc-members:
    :show-inheritance:
@@ -65,10 +81,34 @@ meer21cm.mock module
    :undoc-members:
    :show-inheritance:
 
+meer21cm.model module
+---------------------
+
+.. automodule:: meer21cm.model
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+meer21cm.multipole_model module
+-------------------------------
+
+.. automodule:: meer21cm.multipole_model
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 meer21cm.power module
 ---------------------
 
 .. automodule:: meer21cm.power
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+meer21cm.smooth_window module
+-----------------------------
+
+.. automodule:: meer21cm.smooth_window
    :members:
    :undoc-members:
    :show-inheritance:

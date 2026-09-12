@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 from meer21cm.grid import *
+from meer21cm.grid import _random_radec_in_healpix_pixels
 import pytest
 from meer21cm import PowerSpectrum
 
@@ -341,3 +342,8 @@ def test_shot_noise_correction_from_gridding(window):
     )
     ratio = ps3d_rand / sn_rand
     assert np.allclose(ratio.mean(), 1, atol=3.0e-1)
+
+
+def test_random_radec_in_healpix_pixels_raise_error():
+    with pytest.raises(ValueError, match="hp_nside must be a power of 2, got 1023"):
+        _random_radec_in_healpix_pixels(1023, 0, 42)

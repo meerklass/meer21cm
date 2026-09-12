@@ -29,4 +29,5 @@ Extensive tutorials and examples can be found in :doc:`cookbook`.
    cookbook
    contributors
    changelog
+   citation
    meer21cm

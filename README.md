@@ -1,6 +1,7 @@
 # **meer21cm**
 [![codecov](https://codecov.io/gh/meerklass/meer21cm/graph/badge.svg?token=BEE45774LQ)](https://codecov.io/gh/meerklass/meer21cm)
 [![docs](https://app.readthedocs.org/projects/meer21cm/badge/?version=latest)](https://meer21cm.readthedocs.io/en/latest)
+[![arXiv](https://img.shields.io/badge/arXiv-2607.01864-<COLOR>.svg)](https://arxiv.org/abs/2607.01864)
 
 `meer21cm` deals with single dish 21cm intensity mapping using MeerKAT.
 It is used by [the MeerKLASS collaboration](https://meerklass.org/) for performing power spectrum analysis for the UHF band data.
@@ -22,3 +23,7 @@ pip install -e .
 ```
 
 For more detailed instruction check [the documentation website](https://meer21cm.readthedocs.io).
+
+## Citation
+If you use `meer21cm` in your own work, please cite [Chen & Cunnington et al. (2026)](https://arxiv.org/abs/2607.01864).
+The preferred citation form is `Chen & Cunnington et al. (2026)`, and we appreciate if you take the time to define your `latex` citation alias to reflect that. See [here](https://meer21cm.readthedocs.io/en/latest/citation.html) for more details.
