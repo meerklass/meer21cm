@@ -5,7 +5,6 @@ Note that, the defined class, :py:class:`Specification`, is the base class for r
 It is typically used as a base class for other classes that inherit from it, and not used directly.
 """
 
-
 import numpy as np
 from numpy.typing import NDArray
 from astropy.io import fits
@@ -291,9 +290,11 @@ class Specification:
         if hp_nside is not None:
             self.skymap = HealpixSkyMap(
                 hp_nside,
-                pixel_id=None
-                if healpix_pixel_id is None
-                else np.asarray(healpix_pixel_id, dtype=np.int64),
+                pixel_id=(
+                    None
+                    if healpix_pixel_id is None
+                    else np.asarray(healpix_pixel_id, dtype=np.int64)
+                ),
                 ra_range=self.ra_range if healpix_pixel_id is None else None,
                 dec_range=self.dec_range if healpix_pixel_id is None else None,
             )
@@ -715,6 +716,10 @@ class Specification:
     @weights_map_pixel.setter
     def weights_map_pixel(self, value):
         self._weights_map_pixel = np.asarray(value, dtype=self.real_dtype)
+        # counts_in_box is a cached property of PowerSpectrum that grids w_HI;
+        # leave it stale and a later read uses the pre-mask counts.
+        if getattr(self, "_counts_in_box", None) is not None:
+            self._counts_in_box = None
 
     w_HI = weights_map_pixel
 

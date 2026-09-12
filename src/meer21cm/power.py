@@ -9,6 +9,7 @@ The class :py:class:`PowerSpectrum` coherently combines the two classes above,
 and provides an interface for gridding the intensity mapping data as well as the galaxy catalogue to perform
 power spectrum estimation and for auto-correlation and cross-correlation.
 """
+
 import numpy as np
 from .cosmology import CosmologyCalculator
 from .grid import (
@@ -1361,6 +1362,7 @@ class FieldPowerSpectrum(Specification):
             weights=self.weights_1,
             mean_center=self.mean_center_1,
             unitless=self.unitless_1,
+            field_mean=getattr(self, "field_mean_1", None),
         )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
@@ -1390,6 +1392,7 @@ class FieldPowerSpectrum(Specification):
             weights=self.weights_2,
             mean_center=self.mean_center_2,
             unitless=self.unitless_2,
+            field_mean=getattr(self, "field_mean_2", None),
         )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
@@ -1511,6 +1514,7 @@ def get_renormed_field(
     weights=None,
     mean_center=False,
     unitless=False,
+    field_mean=None,
 ):
     """
     Mean center the field and renormalise it by dividing the mean.
@@ -1525,6 +1529,9 @@ def get_renormed_field(
         Whether to mean center the field.
     unitless: bool, default False
         Whether to make the field unitless.
+    field_mean: float, default None
+        If given, use this mean instead of the weighted mean of ``real_field``.
+        Ignored when both ``mean_center`` and ``unitless`` are False.
 
     Returns
     -------
@@ -1538,7 +1545,10 @@ def get_renormed_field(
         weights = np.ones_like(field, dtype=real_dtype)
     weights = np.asarray(weights, dtype=real_dtype)
     if mean_center or unitless:
-        field_mean = np.sum(weights * field) / np.sum(weights)
+        if field_mean is None:
+            field_mean = np.sum(weights * field) / np.sum(weights)
+        else:
+            field_mean = np.asarray(field_mean, dtype=real_dtype)
     else:
         return real_field
     if mean_center:
@@ -1554,6 +1564,7 @@ def get_fourier_density(
     mean_center=False,
     unitless=False,
     norm="forward",
+    field_mean=None,
 ):
     """
     Perform Fourier transform of a density field in real space. Note that
@@ -1575,6 +1586,9 @@ def get_fourier_density(
         Whether to make the field unitless.
     norm: str, default "forward"
         The normalization of the Fourier transform. Naming is the same as np.fft.
+    field_mean: float, default None
+        If given, forwarded to :func:`get_renormed_field` so the mean used
+        for centering / unitless conversion is not recomputed from the field.
 
     Returns
     -------
@@ -1586,6 +1600,7 @@ def get_fourier_density(
         weights=weights,
         mean_center=mean_center,
         unitless=unitless,
+        field_mean=field_mean,
     )
     if weights is None:
         weights = np.ones_like(field, dtype=real_dtype_from_array(field))
