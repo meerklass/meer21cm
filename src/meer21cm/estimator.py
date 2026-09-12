@@ -477,6 +477,7 @@ class FieldPowerSpectrum(Specification):
             weights=self.weights_1,
             mean_center=self.mean_center_1,
             unitless=self.unitless_1,
+            field_mean=getattr(self, "field_mean_1", None),
         )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
@@ -502,6 +503,7 @@ class FieldPowerSpectrum(Specification):
             weights=self.weights_2,
             mean_center=self.mean_center_2,
             unitless=self.unitless_2,
+            field_mean=getattr(self, "field_mean_2", None),
         )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "

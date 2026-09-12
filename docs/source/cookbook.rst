@@ -30,6 +30,7 @@ Data Analysis Recipes
     cookbook/2021_Lband_gama_cross
     cookbook/2019_Lband
     cookbook/check_noiselike
+    cookbook/jackknife
 
 Mock Recipes
 ------------

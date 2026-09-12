@@ -5,8 +5,8 @@ Note that, the defined class, :py:class:`Specification`, is the base class for r
 It is typically used as a base class for other classes that inherit from it, and not used directly.
 """
 
-
 import numpy as np
+from numpy.typing import NDArray
 from astropy.io import fits
 from .util import (
     check_unit_equiv,
@@ -290,9 +290,11 @@ class Specification:
         if hp_nside is not None:
             self.skymap = HealpixSkyMap(
                 hp_nside,
-                pixel_id=None
-                if healpix_pixel_id is None
-                else np.asarray(healpix_pixel_id, dtype=np.int64),
+                pixel_id=(
+                    None
+                    if healpix_pixel_id is None
+                    else np.asarray(healpix_pixel_id, dtype=np.int64)
+                ),
                 ra_range=self.ra_range if healpix_pixel_id is None else None,
                 dec_range=self.dec_range if healpix_pixel_id is None else None,
             )
@@ -714,6 +716,10 @@ class Specification:
     @weights_map_pixel.setter
     def weights_map_pixel(self, value):
         self._weights_map_pixel = np.asarray(value, dtype=self.real_dtype)
+        # counts_in_box is a cached property of PowerSpectrum that grids w_HI;
+        # leave it stale and a later read uses the pre-mask counts.
+        if getattr(self, "_counts_in_box", None) is not None:
+            self._counts_in_box = None
 
     w_HI = weights_map_pixel
 
@@ -1377,6 +1383,117 @@ class Specification:
                     )[None, None, :]
                     mask_arr[i, j, k] = W_ijk
         return mask_arr
+
+    def get_gal_patch_labels(
+        self,
+        ra_patch_num: int,
+        dec_patch_num: int,
+        nu_patch_num: int,
+        ra_range: tuple[float, float] | None = None,
+        dec_range: tuple[float, float] | None = None,
+        nu_range: tuple[float, float] | None = None,
+    ) -> NDArray[np.integer]:
+        """
+        Assign a jackknife patch label to each galaxy in the catalogue.
+
+        The patches are defined identically to :meth:`get_jackknife_patches`,
+        so that galaxies and map pixels belonging to the same patch are always
+        removed together in a jackknife realisation.
+
+        Note that the galaxy positions along the line-of-sight are stored as
+        redshifts, while the map channels (and therefore the patch splits,
+        which are linear in frequency) are defined in frequency.
+        For consistency, the 21cm line frequency of each galaxy,
+        :math:`\\nu_g = f_{21} / (1 + z_g)` (see :attr:`freq_gal`), is
+        digitized into the same frequency bins used for the map patches.
+        This automatically handles the inversion of the radial direction
+        (redshift decreases as frequency increases): the line-of-sight patch
+        index ``k`` corresponds to the frequency interval
+        ``[nu_bins[k], nu_bins[k+1]]``, i.e. to the redshift interval
+        ``[f_21/nu_bins[k+1] - 1, f_21/nu_bins[k] - 1]``.
+        Binning the redshifts linearly in z would **not** match the map
+        patches, since bins linear in frequency are not linear in redshift.
+
+        The flattened label follows the C-ordering of the patch mask array,
+        ``label = ra_indx * dec_patch_num * nu_patch_num + dec_indx * nu_patch_num + nu_indx``,
+        consistent with reshaping the output of :meth:`get_jackknife_patches`
+        to ``(num_patches,) + self.W_HI.shape``.
+
+        Parameters
+        ----------
+        ra_patch_num: int
+            The number of patch grids in the right ascension direction.
+        dec_patch_num: int
+            The number of patch grids in the declination direction.
+        nu_patch_num: int
+            The number of patch grids in the frequency direction.
+        ra_range: tuple, default None
+            The range of the right ascension of the map data in degrees.
+            Default uses ``self.ra_range``.
+        dec_range: tuple, default None
+            The range of the declination of the map data in degrees.
+            Default uses ``self.dec_range``.
+        nu_range: tuple, default None
+            The range of the frequency of the map data in Hz.
+            Default uses ``[self.nu.min() - self.freq_resol/2, self.nu.max() + self.freq_resol/2]``.
+
+        Returns
+        -------
+        label: ndarray of int
+            Patch index for each galaxy.
+            Galaxies outside the requested ranges have ``label = -1``
+            (and are therefore never removed by any patch, mirroring the
+            behaviour of the map pixels outside the ranges).
+        """
+        if ra_range is None:
+            ra_range = self.ra_range
+        if dec_range is None:
+            dec_range = self.dec_range
+        assert (
+            dec_range[0] < dec_range[1]
+        ), "dec_range[0] must be less than dec_range[1]"
+        assert dec_range[0] >= -90, "dec must be between -90 and 90"
+        assert dec_range[1] <= 90, "dec must be between -90 and 90"
+        if nu_range is None:
+            nu_range = [
+                self.nu.min() - self.freq_resol / 2,
+                self.nu.max() + self.freq_resol / 2,
+            ]
+        assert nu_range[0] < nu_range[1], "nu_range[0] must be less than nu_range[1]"
+        assert not (
+            ra_range[0] == 0 and ra_range[1] == 360
+        ), "ra_range is whole sky 0-360, check if you have passed a value to it"
+        freq_gal = self.freq_gal
+        ra_delta = (self.ra_gal - ra_range[0]) % 360
+        ra_delta_bins = np.linspace(
+            0, (ra_range[1] - ra_range[0]) % 360, ra_patch_num + 1
+        )
+        dec_bins = np.linspace(dec_range[0], dec_range[1], dec_patch_num + 1)
+        nu_bins = np.linspace(nu_range[0], nu_range[1], nu_patch_num + 1)
+        ra_indx = np.digitize(ra_delta, ra_delta_bins)
+        ra_indx[ra_indx == 0] = len(ra_delta_bins)
+        dec_indx = np.digitize(self.dec_gal, dec_bins)
+        dec_indx[dec_indx == 0] = len(dec_bins)
+        nu_indx = np.digitize(freq_gal, nu_bins)
+        nu_indx[nu_indx == 0] = len(nu_bins)
+        ra_indx -= 1
+        dec_indx -= 1
+        nu_indx -= 1
+        inside = (
+            (ra_indx >= 0)
+            & (ra_indx < ra_patch_num)
+            & (dec_indx >= 0)
+            & (dec_indx < dec_patch_num)
+            & (nu_indx >= 0)
+            & (nu_indx < nu_patch_num)
+        )
+        label = np.full(self.ra_gal.size, -1, dtype=int)
+        label[inside] = (
+            ra_indx[inside] * dec_patch_num * nu_patch_num
+            + dec_indx[inside] * nu_patch_num
+            + nu_indx[inside]
+        )
+        return label
 
     def create_white_noise_map(self, sigma_N, counts=None, seed=None, inf_to_zero=True):
         """

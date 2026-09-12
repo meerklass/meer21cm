@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from meer21cm.estimator import FieldPowerSpectrum
+from meer21cm.power_ops import get_fourier_density
 
 
 def test_k_para_reserved_and_unhandled_los():
@@ -60,3 +61,30 @@ def test_multipole_bin_index_map_requires_k1dbins():
     fps.los = "bogus"
     with pytest.raises(ValueError, match="Unhandled los"):
         fps.measure_multipoles(k1dbins=k1dbins)
+
+
+def test_fourier_field_uses_frozen_field_mean():
+    field = np.arange(27, dtype=float).reshape(3, 3, 3) + 1.0
+    frozen = 2.0
+    box_len = np.array([3.0, 3.0, 3.0])
+    fps = FieldPowerSpectrum(
+        field,
+        box_len,
+        field_2=2.0 * field,
+        mean_center_1=True,
+        unitless_1=True,
+        mean_center_2=True,
+        unitless_2=True,
+    )
+    fps.field_mean_1 = frozen
+    fps.field_mean_2 = 2.0 * frozen
+    expected_1 = get_fourier_density(
+        field, mean_center=True, unitless=True, field_mean=frozen
+    )
+    expected_2 = get_fourier_density(
+        2.0 * field, mean_center=True, unitless=True, field_mean=2.0 * frozen
+    )
+    default_1 = get_fourier_density(field, mean_center=True, unitless=True)
+    np.testing.assert_allclose(fps.fourier_field_1, expected_1)
+    np.testing.assert_allclose(fps.fourier_field_2, expected_2)
+    assert not np.allclose(fps.fourier_field_1, default_1)
