@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from meer21cm.estimator import FieldPowerSpectrum
+from meer21cm.power_ops import get_fourier_density
 
 
 def _smooth_gaussian_field(ndim, box_len, seed=42, k_smooth=0.12):
@@ -241,3 +242,28 @@ def test_no_rsd_discrete_mu_yamamoto_matches_global():
     for ell in (0, 2, 4):
         rel = _median_rel_diff(meas_g.P_ell[ell], meas_f.P_ell[ell])
         assert rel < 1e-3, f"ell={ell} median rel diff {rel}"
+def test_fourier_field_uses_frozen_field_mean():
+    field = np.arange(27, dtype=float).reshape(3, 3, 3) + 1.0
+    frozen = 2.0
+    box_len = np.array([3.0, 3.0, 3.0])
+    fps = FieldPowerSpectrum(
+        field,
+        box_len,
+        field_2=2.0 * field,
+        mean_center_1=True,
+        unitless_1=True,
+        mean_center_2=True,
+        unitless_2=True,
+    )
+    fps.field_mean_1 = frozen
+    fps.field_mean_2 = 2.0 * frozen
+    expected_1 = get_fourier_density(
+        field, mean_center=True, unitless=True, field_mean=frozen
+    )
+    expected_2 = get_fourier_density(
+        2.0 * field, mean_center=True, unitless=True, field_mean=2.0 * frozen
+    )
+    default_1 = get_fourier_density(field, mean_center=True, unitless=True)
+    np.testing.assert_allclose(fps.fourier_field_1, expected_1)
+    np.testing.assert_allclose(fps.fourier_field_2, expected_2)
+    assert not np.allclose(fps.fourier_field_1, default_1)

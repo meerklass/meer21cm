@@ -519,6 +519,33 @@ def test_get_jackknife_patches():
     assert nu_pixel.std() / nu_pixel.mean() < 1e-2
 
 
+def test_get_gal_patch_labels_default_ranges():
+    ps = Specification(
+        survey="meerklass_2021",
+        band="L",
+    )
+    ps.ra_range = (334, 357)
+    ps.dec_range = (-35, -26.5)
+    ps._ra_gal = np.array([345.5, 340.0])
+    ps._dec_gal = np.array([-30.0, -32.0])
+    ps._z_gal = f_21 / ps.nu[[0, -1]] - 1
+    default = ps.get_gal_patch_labels(8, 4, 2)
+    explicit = ps.get_gal_patch_labels(
+        8,
+        4,
+        2,
+        ra_range=ps.ra_range,
+        dec_range=ps.dec_range,
+        nu_range=[
+            ps.nu.min() - ps.freq_resol / 2,
+            ps.nu.max() + ps.freq_resol / 2,
+        ],
+    )
+    assert np.array_equal(default, explicit)
+    assert default.shape == (2,)
+    assert np.all(default >= 0)
+
+
 def test_create_white_noise_map():
     ra_range_MK = (334, 357)
     dec_range_MK = (-35, -26.5)

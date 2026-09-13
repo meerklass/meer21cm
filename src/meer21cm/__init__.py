@@ -23,6 +23,7 @@ __all__ = [
     "predict_windowed_multipoles",
     "build_mesh_window_matrix",
     "propose_mesh_k_in",
+    "Stacking",
 ]
 
 
@@ -50,6 +51,7 @@ _LAZY_ATTRS = {
         "meer21cm.window",
         "propose_mesh_k_in",
     ),
+    "Stacking": ("meer21cm.stack", "Stacking"),
 }
 
 
