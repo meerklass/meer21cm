@@ -1,5 +1,20 @@
+import logging
+
 import numpy as np
+
+from .model import ModelPowerSpectrum
 from .util import radec_to_indx, find_ch_id, redshift_to_freq
+
+logger = logging.getLogger(__name__)
+
+_STACK_NOT_RUN = (
+    "Stacked cubelet has not been computed. Call run_stack() or "
+    "get_arg_list_for_galaxy_chunks() then accumulate_stack_chunks() "
+    "before reading stack_3d / stack_weight."
+)
+_STACK_SPACES = ("angular", "config")
+_WEIGHTINGS = ("conventional", "quadratic")
+_STACK_CHUNK_WORKER: dict | None = None
 
 
 def stack_cubelet(
@@ -233,6 +248,27 @@ def stack_cubelet(
     return stack_3D_map, stack_3D_weight
 
 
+def galaxy_pixel_indices(sp):
+    """
+    WCS pixel and frequency-channel indices of the galaxy catalogue on ``sp``.
+
+    Parameters
+    ----------
+    sp : :class:`meer21cm.dataanalysis.Specification`
+        Object with ``ra_gal``, ``dec_gal``, ``z_gal``, ``wproj``, and ``nu``.
+
+    Returns
+    -------
+    indx_0_g, indx_1_g, indx_z_g : ndarray
+        Angular pixel indices and channel index of each source.
+    """
+    indx_0_g, indx_1_g = radec_to_indx(
+        np.asarray(sp.ra_gal), np.asarray(sp.dec_gal), sp.wproj
+    )
+    indx_z_g = find_ch_id(redshift_to_freq(np.asarray(sp.z_gal)), sp.nu)
+    return indx_0_g, indx_1_g, indx_z_g
+
+
 def stack(
     sp,
     weights_gal=None,
@@ -274,16 +310,11 @@ def stack(
     See Also
     --------
     stack_cubelet : The underlying ``sp``-independent stacking routine.
+    galaxy_pixel_indices : RA/Dec/z to map pixel and channel indices.
     """
     map_in = sp.data.copy()
     w_map_in = sp.w_HI.copy()
-    ra_g_in = sp.ra_gal.copy()
-    dec_g_in = sp.dec_gal.copy()
-    z_g_in = sp.z_gal.copy()
-    wproj = sp.wproj
-    # retrive the centre pixel positions
-    indx_0_g, indx_1_g = radec_to_indx(ra_g_in, dec_g_in, wproj)
-    indx_z_g = find_ch_id(redshift_to_freq(z_g_in), sp.nu)
+    indx_0_g, indx_1_g, indx_z_g = galaxy_pixel_indices(sp)
     return stack_cubelet(
         map_in,
         w_map_in,
@@ -295,6 +326,108 @@ def stack(
         stack_angular_num_nearby_pix=stack_angular_num_nearby_pix,
         symmetrize=symmetrize,
     )
+
+
+def init_stack_chunk_worker(kwargs):
+    """
+    Pool initializer: cache shared map arrays for :func:`run_stack_chunk`.
+
+    Use with ``get_arg_list_for_galaxy_chunks(..., use_worker_object=True)``
+    so each worker pickles the intensity map once instead of once per chunk.
+    """
+    global _STACK_CHUNK_WORKER
+    _STACK_CHUNK_WORKER = dict(kwargs)
+
+
+def run_stack_chunk(kwargs, chunk):
+    """
+    Pickleable worker for one galaxy-index chunk.
+
+    ``kwargs`` is the first element of a tuple from
+    :meth:`Stacking.get_arg_list_for_galaxy_chunks`.  ``chunk`` is
+    ``(indx_0, indx_1, indx_z, weights_gal)``.
+
+    Returns an un-normalised ``(numerator, weight_map, q0)`` so chunks
+    combine exactly.  For ``conventional``, ``q0`` is unused (``0.0``).
+    For ``quadratic``, ``q0`` is the chunk's scalar :math:`Q_0`.
+    """
+    if kwargs.get("use_worker_object"):
+        if _STACK_CHUNK_WORKER is None:
+            raise RuntimeError(
+                "run_stack_chunk needs init_stack_chunk_worker(kwargs) "
+                "when use_worker_object is True"
+            )
+        kw = _STACK_CHUNK_WORKER
+    else:
+        kw = kwargs
+    indx_0, indx_1, indx_z, weights_gal = chunk
+    weighting = kw["weighting"]
+    symmetrize = bool(kw["symmetrize"])
+    stack_map, stack_weight = stack_cubelet(
+        kw["map_in"],
+        kw["w_map_in"],
+        indx_0,
+        indx_1,
+        indx_z,
+        weights_gal=weights_gal,
+        weighting=weighting,
+        stack_angular_num_nearby_pix=kw["stack_angular_num_nearby_pix"],
+        symmetrize=symmetrize,
+    )
+    if weighting == "conventional":
+        return stack_map * stack_weight, stack_weight, 0.0
+    w_map = np.asarray(kw["w_map_in"])
+    q0 = float(
+        np.sum(np.asarray(weights_gal, dtype=float) * w_map[indx_0, indx_1, indx_z])
+    )
+    if symmetrize:
+        q0 = 2.0 * q0
+    if q0 != 0:
+        return stack_map * q0, stack_weight, q0
+    return stack_map, stack_weight, q0
+
+
+def accumulate_stack_chunk_results(results, weighting):
+    """
+    Combine :func:`run_stack_chunk` outputs into one cubelet.
+
+    Parameters
+    ----------
+    results : sequence of (numerator, weight_map, q0)
+        Worker returns.
+    weighting : {'conventional', 'quadratic'}
+        Same scheme used for the chunks.
+
+    Returns
+    -------
+    stack_3d : ndarray
+        Normalised cubelet (same convention as :func:`stack_cubelet`).
+    stack_weight : ndarray
+        Sum of per-voxel accumulated weights.
+    """
+    if weighting not in _WEIGHTINGS:
+        raise ValueError(
+            f"weighting must be 'conventional' or 'quadratic', got '{weighting}'"
+        )
+    results = list(results)
+    if len(results) == 0:
+        raise ValueError("accumulate_stack_chunk_results needs at least one chunk")
+    numerator = np.zeros_like(results[0][0], dtype=float)
+    stack_weight = np.zeros_like(results[0][1], dtype=float)
+    q0 = 0.0
+    for num, weight, q0_i in results:
+        numerator = numerator + num
+        stack_weight = stack_weight + weight
+        q0 = q0 + float(q0_i)
+    stack_3d = np.zeros_like(numerator)
+    if weighting == "conventional":
+        mask = stack_weight > 0
+        stack_3d[mask] = numerator[mask] / stack_weight[mask]
+    elif q0 != 0:
+        stack_3d = numerator / q0
+    else:
+        stack_3d = numerator
+    return stack_3d, stack_weight
 
 
 def sum_3d_stack(stack_3D_map, vel_ch_avg=5, ang_sum_dist=3.0):
@@ -338,3 +471,319 @@ def sum_3d_stack(stack_3D_map, vel_ch_avg=5, ang_sum_dist=3.0):
     ].sum(axis=-1)
     spectral_stack_map = stack_3D_map[pix_sel].sum(axis=0)
     return angular_stack_map, spectral_stack_map
+
+
+class Stacking(ModelPowerSpectrum):
+    """
+    Combined stacking estimator with survey / cosmology / ``power_kmu``
+    from :class:`~meer21cm.model.ModelPowerSpectrum`.
+
+    This class does **not** inherit
+    :class:`~meer21cm.estimator.FieldPowerSpectrum` or
+    :class:`~meer21cm.grid.LightconeGriddingMixin` and never calls
+    ``get_enclosing_box()``.  The data estimator is the existing angular
+    :func:`stack` / :func:`stack_cubelet` kernel.
+
+    Call :meth:`run_stack` to fill :attr:`stack_3d` / :attr:`stack_weight`,
+    or split the catalogue with :meth:`get_arg_list_for_galaxy_chunks`,
+    map :func:`run_stack_chunk` externally, and
+    :meth:`accumulate_stack_chunks`.  There is no in-library pool.
+    Accessing the cubelet before either path warns and returns ``None``.
+    ``stack_space='config'`` is not implemented.
+
+    .. code-block:: python
+
+        >>> from multiprocessing import Pool
+        >>> from meer21cm.stack import (
+        ...     init_stack_chunk_worker,
+        ...     run_stack_chunk,
+        ... )
+        >>> args = st.get_arg_list_for_galaxy_chunks(
+        ...     n_chunks, use_worker_object=True
+        ... )
+        >>> with Pool(
+        ...     n_chunks,
+        ...     initializer=init_stack_chunk_worker,
+        ...     initargs=(st.stack_chunk_worker_kwargs(),),
+        ... ) as pool:
+        ...     results = pool.starmap(run_stack_chunk, args)
+        >>> st.accumulate_stack_chunks(results)
+
+    Parameters
+    ----------
+    stack_space : {'angular', 'config'}, default 'angular'
+        Coordinate system of the stacked cubelet.  Only ``'angular'`` is
+        implemented.
+    stack_angular_num_nearby_pix : int, default 10
+        Map pixels on each side of the source centre (angular path).
+    weighting : {'conventional', 'quadratic'}, default 'conventional'
+        Cubelet normalisation passed to :func:`stack`.  Stored as
+        :attr:`stack_weighting` so it does not override
+        :attr:`~meer21cm.dataanalysis.Specification.weighting` (map
+        hit-count scheme).
+    symmetrize : bool, default False
+        180° flip in :math:`\\Delta\\nu` (Sinigaglia et al. 2022).
+    weights_gal : array, optional
+        Per-source weights.  If None, uniform weights are used.
+    mean_amp_1 : float or str, default 'average_hi_temp'
+        HI mean amplitude for the cross-correlation model.
+    include_sky_sampling : list, default [False, False]
+        Off by default: survey-box sampling is not a stack operator.
+    compensate : list, default [False, False]
+        Off by default: MAS compensation is not a stack operator.
+    **params
+        Forwarded to :class:`~meer21cm.model.ModelPowerSpectrum`
+        (and therefore :class:`~meer21cm.dataanalysis.Specification`).
+    """
+
+    def __init__(
+        self,
+        stack_space="angular",
+        stack_angular_num_nearby_pix=10,
+        weighting="conventional",
+        symmetrize=False,
+        weights_gal=None,
+        mean_amp_1="average_hi_temp",
+        include_sky_sampling=None,
+        compensate=None,
+        **params,
+    ):
+        if include_sky_sampling is None:
+            include_sky_sampling = [False, False]
+        if compensate is None:
+            compensate = [False, False]
+        super().__init__(
+            mean_amp_1=mean_amp_1,
+            include_sky_sampling=include_sky_sampling,
+            compensate=compensate,
+            **params,
+        )
+        self.stack_space = stack_space
+        self.stack_angular_num_nearby_pix = int(stack_angular_num_nearby_pix)
+        self.stack_weighting = weighting
+        self.symmetrize = bool(symmetrize)
+        self.weights_gal = weights_gal
+        self._stack_3d = None
+        self._stack_weight = None
+
+    @property
+    def stack_space(self):
+        """``'angular'`` or ``'config'``.  Only ``'angular'`` is implemented."""
+        return self._stack_space
+
+    @stack_space.setter
+    def stack_space(self, value):
+        space = str(value).lower()
+        if space not in _STACK_SPACES:
+            raise ValueError(
+                f"stack_space must be 'angular' or 'config', got '{value}'"
+            )
+        if space == "config":
+            raise NotImplementedError(
+                "stack_space='config' is not implemented yet; use 'angular'."
+            )
+        self._stack_space = space
+
+    @property
+    def stack_weighting(self):
+        """``'conventional'`` or ``'quadratic'`` cubelet normalisation."""
+        return self._stack_weighting
+
+    @stack_weighting.setter
+    def stack_weighting(self, value):
+        weighting = str(value).lower()
+        if weighting not in _WEIGHTINGS:
+            raise ValueError(
+                f"weighting must be 'conventional' or 'quadratic', got '{value}'"
+            )
+        self._stack_weighting = weighting
+
+    def _warn_stack_status(self):
+        """Warn if :meth:`run_stack` has not been called; do not compute."""
+        if self._stack_3d is None:
+            logger.warning(_STACK_NOT_RUN)
+
+    @property
+    def stack_3d(self):
+        """
+        Normalised stacked cubelet, or ``None`` if :meth:`run_stack` has
+        not been called.
+        """
+        self._warn_stack_status()
+        return self._stack_3d
+
+    @property
+    def stack_weight(self):
+        """
+        Accumulated per-voxel stack weights, or ``None`` if
+        :meth:`run_stack` has not been called.
+        """
+        self._warn_stack_status()
+        return self._stack_weight
+
+    def run_stack(self):
+        """
+        Stack the intensity map around the stored galaxy catalogue.
+
+        Angular path only: delegates to :func:`stack` and stores
+        :attr:`stack_3d` / :attr:`stack_weight`.  For external
+        chunk-parallel stacking use
+        :meth:`get_arg_list_for_galaxy_chunks` + :func:`run_stack_chunk`
+        + :meth:`accumulate_stack_chunks`.
+
+        Returns
+        -------
+        stack_3d : ndarray
+            Normalised cubelet.
+        stack_weight : ndarray
+            Accumulated per-voxel effective weights.
+        """
+        if self.stack_space != "angular":
+            raise NotImplementedError(
+                f"run_stack for stack_space={self.stack_space!r} "
+                "is not implemented yet."
+            )
+        stack_3d, stack_weight = stack(
+            self,
+            weights_gal=self.weights_gal,
+            weighting=self.stack_weighting,
+            stack_angular_num_nearby_pix=self.stack_angular_num_nearby_pix,
+            symmetrize=self.symmetrize,
+        )
+        self._stack_3d = stack_3d
+        self._stack_weight = stack_weight
+        return stack_3d, stack_weight
+
+    def stack_chunk_worker_kwargs(self):
+        """
+        Shared arrays and knobs for :func:`run_stack_chunk`.
+
+        Pass to :func:`init_stack_chunk_worker` when mapping with
+        ``use_worker_object=True``.
+        """
+        if self.stack_space != "angular":
+            raise NotImplementedError(
+                f"galaxy chunks for stack_space={self.stack_space!r} "
+                "are not implemented yet."
+            )
+        return {
+            "map_in": np.asarray(self.data),
+            "w_map_in": np.asarray(self.w_HI),
+            "stack_angular_num_nearby_pix": int(self.stack_angular_num_nearby_pix),
+            "weighting": self.stack_weighting,
+            "symmetrize": bool(self.symmetrize),
+        }
+
+    def get_arg_list_for_galaxy_chunks(self, n_chunks=1, use_worker_object=False):
+        """
+        Pickleable ``(kwargs, chunk)`` tuples for external mapping.
+
+        Splits the galaxy catalogue into ``n_chunks`` index batches.
+        Map with :func:`run_stack_chunk`, then
+        :meth:`accumulate_stack_chunks`.  Does **not** start a pool.
+
+        Parameters
+        ----------
+        n_chunks : int, default 1
+            Number of galaxy batches.  Empty splits are dropped, so the
+            returned list may be shorter than ``n_chunks``.
+        use_worker_object : bool, default False
+            If True, ``kwargs`` is ``{"use_worker_object": True}`` and
+            the pool must be started with
+            :func:`init_stack_chunk_worker` and
+            :meth:`stack_chunk_worker_kwargs`.  If False, each tuple
+            carries the map arrays (serial ``starmap`` without an
+            initializer).
+
+        Returns
+        -------
+        args : list of (dict, tuple)
+            Each ``chunk`` is ``(indx_0, indx_1, indx_z, weights_gal)``.
+        """
+        n_chunks = int(n_chunks)
+        if n_chunks < 1:
+            raise ValueError(f"n_chunks must be >= 1, got {n_chunks}")
+        shared = self.stack_chunk_worker_kwargs()
+        indx_0, indx_1, indx_z = galaxy_pixel_indices(self)
+        num_g = int(np.asarray(indx_0).size)
+        if self.weights_gal is None:
+            weights_gal = np.ones(num_g, dtype=float)
+        else:
+            weights_gal = np.asarray(self.weights_gal, dtype=float)
+            if weights_gal.size != num_g:
+                raise ValueError(
+                    "weights_gal length must match the galaxy catalogue, "
+                    f"got {weights_gal.size} vs {num_g}"
+                )
+        chunk_ids = np.array_split(np.arange(num_g), n_chunks)
+        chunks = []
+        for ids in chunk_ids:
+            if ids.size == 0:
+                continue
+            chunks.append(
+                (
+                    np.asarray(indx_0)[ids],
+                    np.asarray(indx_1)[ids],
+                    np.asarray(indx_z)[ids],
+                    weights_gal[ids],
+                )
+            )
+        if use_worker_object:
+            kw = {"use_worker_object": True}
+            return [(kw, chunk) for chunk in chunks]
+        return [(dict(shared), chunk) for chunk in chunks]
+
+    def accumulate_stack_chunks(self, results):
+        """
+        Sum galaxy-chunk numerators and attach :attr:`stack_3d`.
+
+        Parameters
+        ----------
+        results : sequence of (numerator, weight_map, q0)
+            Outputs of :func:`run_stack_chunk`.
+
+        Returns
+        -------
+        stack_3d : ndarray
+            Normalised cubelet.
+        stack_weight : ndarray
+            Accumulated per-voxel weights.
+        """
+        stack_3d, stack_weight = accumulate_stack_chunk_results(
+            results, self.stack_weighting
+        )
+        self._stack_3d = stack_3d
+        self._stack_weight = stack_weight
+        return stack_3d, stack_weight
+
+    def stack_image(self, vel_ch_avg=5, ang_sum_dist=3.0):
+        """
+        Collapse :attr:`stack_3d` to a stacked image.
+
+        See :func:`sum_3d_stack`.  Requires :meth:`run_stack`.
+        """
+        cube = self.stack_3d
+        if cube is None:
+            raise RuntimeError(
+                "stack_image requires run_stack(); the cubelet is not set."
+            )
+        image, _spectrum = sum_3d_stack(
+            cube, vel_ch_avg=vel_ch_avg, ang_sum_dist=ang_sum_dist
+        )
+        return image
+
+    def stack_spectrum(self, vel_ch_avg=5, ang_sum_dist=3.0):
+        """
+        Collapse :attr:`stack_3d` to a stacked spectrum.
+
+        See :func:`sum_3d_stack`.  Requires :meth:`run_stack`.
+        """
+        cube = self.stack_3d
+        if cube is None:
+            raise RuntimeError(
+                "stack_spectrum requires run_stack(); the cubelet is not set."
+            )
+        _image, spectrum = sum_3d_stack(
+            cube, vel_ch_avg=vel_ch_avg, ang_sum_dist=ang_sum_dist
+        )
+        return spectrum

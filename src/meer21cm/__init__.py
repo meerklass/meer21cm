@@ -19,6 +19,7 @@ __all__ = [
     "SmoothWindowEstimator",
     "WindowedMultipoleModel",
     "DiscreteShellWindowMatrix",
+    "Stacking",
 ]
 
 
@@ -33,6 +34,7 @@ _LAZY_ATTRS = {
         "meer21cm.smooth_window",
         "DiscreteShellWindowMatrix",
     ),
+    "Stacking": ("meer21cm.stack", "Stacking"),
 }
 
 
