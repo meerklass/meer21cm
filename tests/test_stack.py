@@ -283,6 +283,63 @@ def test_galaxy_chunks_n_chunks_and_worker_error():
         run_stack_chunk({"use_worker_object": True}, args[0][1])
     with pytest.raises(ValueError, match="at least one"):
         accumulate_stack_chunk_results([], "conventional")
+    with pytest.raises(ValueError, match="weighting"):
+        accumulate_stack_chunk_results([(np.zeros(1), np.zeros(1), 0.0)], "random")
+
+
+def test_run_stack_chunk_quadratic_symmetrize_and_q0_zero():
+    map_in = np.zeros((3, 3, 1))
+    map_in[1, 1, 0] = 1.0
+    w_map = np.ones((3, 3, 1))
+    kwargs = {
+        "map_in": map_in,
+        "w_map_in": w_map,
+        "stack_angular_num_nearby_pix": 1,
+        "weighting": "quadratic",
+        "symmetrize": True,
+    }
+    chunk = (np.array([1]), np.array([1]), np.array([0]), np.array([1.0]))
+    num, weight, q0 = run_stack_chunk(kwargs, chunk)
+    assert q0 == 2.0
+    out, _w = accumulate_stack_chunk_results([(num, weight, q0)], "quadratic")
+    assert np.allclose(out[1, 1, 0], 1.0)
+
+    kwargs_zero = dict(kwargs)
+    kwargs_zero["w_map_in"] = np.zeros((3, 3, 1))
+    kwargs_zero["symmetrize"] = False
+    num0, weight0, q0_zero = run_stack_chunk(kwargs_zero, chunk)
+    assert q0_zero == 0.0
+    out0, _w0 = accumulate_stack_chunk_results([(num0, weight0, q0_zero)], "quadratic")
+    assert np.array_equal(out0, num0)
+
+
+def test_stack_image_and_spectrum():
+    st = Stacking(**_meerklass_lband_kwargs())
+    with pytest.raises(RuntimeError, match="stack_image"):
+        st.stack_image()
+    with pytest.raises(RuntimeError, match="stack_spectrum"):
+        st.stack_spectrum()
+    _two_source_maps(st)
+    st.run_stack()
+    ref_img, ref_spec = sum_3d_stack(st._stack_3d)
+    assert np.array_equal(st.stack_image(), ref_img)
+    assert np.array_equal(st.stack_spectrum(), ref_spec)
+
+
+def test_weights_gal_length_and_defensive_stack_space():
+    st = Stacking(**_meerklass_lband_kwargs())
+    _two_source_maps(st)
+    st.weights_gal = np.ones(1)
+    with pytest.raises(ValueError, match="weights_gal length"):
+        st.get_arg_list_for_galaxy_chunks()
+    st.weights_gal = np.ones(2)
+    args = st.get_arg_list_for_galaxy_chunks(n_chunks=1)
+    assert args[0][1][3].size == 2
+    st._stack_space = "config"
+    with pytest.raises(NotImplementedError, match="run_stack"):
+        st.run_stack()
+    with pytest.raises(NotImplementedError, match="galaxy chunks"):
+        st.stack_chunk_worker_kwargs()
 
 
 # def test_weight_source_peaks(test_wproj, test_W, test_nu):
