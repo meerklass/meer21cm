@@ -4,6 +4,36 @@ Releases
 dev
 ------
 
+v0.10.0
+-------
+Features
+++++++++
+* build the FKP field ``F = D - alpha R`` in ``grid_gal_to_field(construct_fkp=True)``,
+  keeping the painted data, randoms and alpha on ``field_i_D``, ``field_i_R`` and
+  ``field_i_alpha`` when ``field_i_has_random`` is set
+* add ``get_shot_noise_counts`` and expose it as ``shot_noise_1`` / ``shot_noise_2``,
+  including the mass-assignment factor, for both a count field and an FKP field
+* read a separable selection ``A(theta) n_w(z)`` from random catalogues
+  (``selection_from_random_files``, ``PowerSpectrum.read_random_selection``) and evaluate it
+  on the simulation box (``MockSimulation.sky_selection_density``, ``galaxy_selection``)
+* add galaxy jackknife patches, one weighting convention across jackknife schemes, and
+  reuse of a gridded field under a different mask
+
+Enhancements
+++++++++++++
+* cache the enclosed source count and normalise ``dndz_renorm`` to that count
+* refactor the stacking helpers
+* add the jackknife cookbook, the multipole-k cookbook and citation metadata
+* cover the FKP field, shot noise and selection with physics tests
+
+Fixes
++++++
+* pass ``field_mean`` through the observed-power renormalisation
+* stop the real FFT from overweighting the ``k_z = 0`` mode in the lognormal variance
+* correct the galaxy-window normalisation
+* rename the smooth-window helpers and test tapering weights
+* replace the deprecated Matplotlib ``get_cmap`` call
+
 v0.9.0
 ------
 Features
