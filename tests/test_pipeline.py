@@ -30,7 +30,7 @@ def test_gaussian_field_map_grid():
     ps.downres_factor_radial = 1 / 2.0
     ps.downres_factor_transverse = 1 / 2.0
     ps.get_enclosing_box()
-    pos_value = np.random.normal(size=ps.box_ndim)
+    pos_value = np.random.default_rng(0).normal(size=ps.box_ndim)
     k1dedges = np.geomspace(0.05, 1.5, 20)
     ps.k1dbins = k1dedges
     # ps.propagate_field_k_to_model()
@@ -98,7 +98,7 @@ def test_poisson_field_map_grid():
     k1dedges = np.geomspace(0.05, 1.5, 20)
     ps.k1dbins = k1dedges
     num_g = 10000
-    gal_pix_indx = np.random.choice(
+    gal_pix_indx = np.random.default_rng(0).choice(
         np.arange(pos_value.size), size=num_g, replace=False
     )
     pos_value[gal_pix_indx] += 1
@@ -176,6 +176,7 @@ def test_mock_field_map_grid(beam):
         # make sure kmax is higher than your simulation resolution
         kmax=10.0,
         box_buffkick=40,
+        seed=3,
     )
     if beam:
         D_dish = 13.5

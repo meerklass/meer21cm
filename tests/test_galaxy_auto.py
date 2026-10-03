@@ -11,8 +11,8 @@ from meer21cm.mock import selection_sampling_weight
 from meer21cm.io import read_catalogue_fits
 from meer21cm.grid import shot_noise_correction_from_gridding
 from meer21cm.power import get_shot_noise_galaxy
-from meer21cm.power_ops import fkp_count_field
-from meer21cm.util import f_21, freq_to_redshift, redshift_to_freq
+from meer21cm.power_ops import fkp_count_field, get_shot_noise_counts
+from meer21cm.util import angle_in_range, f_21, freq_to_redshift, redshift_to_freq
 
 
 def _survey_ps(test_gal_fits, test_W):
@@ -85,12 +85,21 @@ def test_trim_slices_weights(test_gal_fits):
     sp._z_gal[0] = 10.0
     sp.weights_gal = np.arange(n_in, dtype=float)
     dropped = float(sp.weights_gal[0])
+    sp.ra_rand = np.array(sp.ra_gal[:2], copy=True)
+    sp.dec_rand = np.array(sp.dec_gal[:2], copy=True)
+    sp.z_rand = np.array([10.0, sp.z_gal[1]])
+    sp.weights_rand = np.array([3.0, 4.0])
     sp.trim_gal_to_range()
     assert sp.weights_gal.size == sp.ra_gal.size == n_in - 1
     assert dropped not in sp.weights_gal
+    assert sp.ra_rand.size == sp.dec_rand.size == sp.z_rand.size == 1
+    assert sp.weights_rand[0] == pytest.approx(4.0)
+    assert sp.z_rand[0] == pytest.approx(sp.z_gal[0])
+    sp.weights_gal = None
+    assert sp.weights_gal is None
 
 
-def test_read_catalogue_list_and_fkp_field(tmp_path):
+def test_read_catalogue_list_keeps_weights(tmp_path):
     data_path = tmp_path / "data.fits"
     rand_path = tmp_path / "rand.fits"
     Table(
@@ -98,7 +107,7 @@ def test_read_catalogue_list_and_fkp_field(tmp_path):
             "RA": [150.0, 151.0],
             "DEC": [0.0, 1.0],
             "Z": [0.4, 0.5],
-            "WEIGHT": [1.0, 1.0],
+            "WEIGHT": [2.0, 0.5],
         }
     ).write(data_path, overwrite=True)
     Table(
@@ -106,20 +115,21 @@ def test_read_catalogue_list_and_fkp_field(tmp_path):
             "RA": [150.0, 151.0, 152.0, 153.0],
             "DEC": [0.0, 1.0, 0.5, -0.5],
             "Z": [0.4, 0.5, 0.45, 0.55],
-            "WEIGHT": [1.0, 1.0, 1.0, 1.0],
+            "WEIGHT": [1.0, 1.0, 1.0, 3.0],
         }
     ).write(rand_path, overwrite=True)
-    ra, dec, z, weight = read_catalogue_fits([data_path, rand_path])
+    ra, dec, z, weight = read_catalogue_fits(
+        [data_path, rand_path], weight_col="WEIGHT"
+    )
     assert ra.size == 6
-    assert np.allclose(weight, 1.0)
+    assert np.allclose(weight, [2.0, 0.5, 1.0, 1.0, 1.0, 3.0])
+    empty = read_catalogue_fits([])
+    assert all(column.size == 0 for column in empty)
+    unit = read_catalogue_fits([data_path], weight_col=None)
+    assert np.allclose(unit[3], 1.0)
     sp = Specification(survey="meerklass_2021", band="L", gal_file=str(data_path))
     sp.read_gal_cat(weight_col="WEIGHT", trim=False)
-    assert np.allclose(sp.weights_gal, 1.0)
-    data_counts = np.array([1.0, 3.0])
-    random_counts = np.array([4.0, 4.0])
-    field, alpha = fkp_count_field(data_counts, random_counts)
-    assert alpha == pytest.approx(4.0 / 8.0)
-    assert np.allclose(field, data_counts - alpha * random_counts)
+    assert np.allclose(sp.weights_gal, [2.0, 0.5])
     with fits.open(data_path) as hdul:
         assert "WEIGHT_FKP" not in hdul[1].columns.names
 
@@ -298,16 +308,92 @@ def test_shot_noise_attribute_matches_legacy_and_fkp():
     assert ps.mean_center_2 is True
     assert ps.unitless_2 is True
 
+    assert ps.field_1_R == 0.0
+    assert ps.field_1_has_random is False
     ps.field_1_D = counts
     ps.field_1_R = random_counts
     ps.field_1_alpha = alpha
     ps.field_1_has_random = True
+    assert ps.field_1_has_random is True
     ps.weights_field_1 = alpha * random_counts
     ps.weights_1 = grid_w
     assert np.allclose(ps.field_1, counts - alpha * random_counts)
     assert ps.mean_center_1 is False
     assert ps.unitless_1 is False
     assert np.allclose(ps.shot_noise_1, amplitude * correction)
+
+
+def test_flat_fkp_shot_noise_is_one_plus_alpha_over_nbar():
+    counts = np.full((4, 4, 4), 2.0)
+    random_counts = np.full_like(counts, 8.0)
+    box_len = np.array([40.0, 40.0, 40.0])
+    field, alpha = fkp_count_field(counts, random_counts)
+    assert alpha == pytest.approx(0.25)
+    assert field.sum() == pytest.approx(0.0, abs=1e-8)
+    cell_volume = np.prod(box_len) / counts.size
+    expected = (1.0 + alpha) / (2.0 / cell_volume)
+    amplitude = get_shot_noise_counts(
+        counts,
+        box_len,
+        weights_field=alpha * random_counts,
+        random_counts=random_counts,
+        alpha=alpha,
+    )
+    assert amplitude == pytest.approx(expected)
+    ps = PowerSpectrum(
+        np.ones_like(counts),
+        box_len,
+        field_2=counts,
+        grid_scheme="cic",
+        compensate=[False, False],
+        include_beam=[False, False],
+        include_sky_sampling=[False, False],
+    )
+    ps.field_2_D = counts
+    ps.field_2_R = random_counts
+    ps.field_2_alpha = alpha
+    ps.field_2_has_random = True
+    ps.weights_field_2 = alpha * random_counts
+    ps.weights_grid_2 = np.ones_like(counts)
+    correction = shot_noise_correction_from_gridding(ps.box_ndim, "cic")
+    assert correction[0, 0, 0] == pytest.approx(1.0)
+    assert np.allclose(ps.shot_noise_2, expected * correction)
+
+    ps.field_2_R = None
+    ps.field_2_alpha = 3.0
+    ps.weights_field_2 = np.ones_like(counts)
+    assert ps.field_2_R == 0.0
+    assert np.allclose(ps.field_2, counts)
+    data_only = 2.0 * cell_volume
+    assert get_shot_noise_counts(
+        counts,
+        box_len,
+        random_counts=ps.field_2_R,
+        alpha=ps.field_2_alpha,
+    ) == pytest.approx(data_only)
+    assert np.allclose(ps.shot_noise_2, data_only * correction)
+
+
+def test_fkp_inputs_are_required():
+    with pytest.raises(ValueError, match="random counts"):
+        fkp_count_field(np.ones(4), np.zeros(4))
+    ps = PowerSpectrum(
+        np.ones((3, 3, 3)),
+        np.array([9.0, 9.0, 9.0]),
+        grid_scheme="nnb",
+        compensate=[False, False],
+        include_beam=[False, False],
+        include_sky_sampling=[False, False],
+    )
+    assert ps.shot_noise_2 is None
+    ps.field_2_has_random = True
+    with pytest.raises(ValueError, match="field_2_D"):
+        ps.field_2
+    ps.field_1_has_random = True
+    with pytest.raises(ValueError, match="field_1"):
+        ps.field_1 = np.ones((3, 3, 3))
+    with pytest.raises(ValueError, match="tracer"):
+        ps._shot_noise_tracer(0)
 
 
 def test_grid_gal(test_gal_fits, test_W):
@@ -376,11 +462,12 @@ def test_poisson_gal_gen():
         kmax=10.0,
         num_particle_per_pixel=2,
         box_buffkick=[5, 5, 5],
+        seed=1,
     )
     ps._ra_gal = np.ones(40000)
     ps._dec_gal = np.ones(40000)
     ps._z_gal = np.ones(40000)
-    radecfreq = ps.gen_random_poisson_galaxy()
+    radecfreq = ps.gen_random_poisson_galaxy(seed=1)
     ps.compensate = False
     ps.grid_gal_to_field(radecfreq)
     volume = (
@@ -425,12 +512,13 @@ def test_poisson_gal_gen_chi2_radial():
         kmax=10.0,
         num_particle_per_pixel=2,
         box_buffkick=[5, 5, 5],
+        seed=2,
     )
     ps._ra_gal = np.ones(400000)
     ps._dec_gal = np.ones(400000)
     ps._z_gal = np.ones(400000)
     dndz_func = lambda z: 0.01 * np.exp(-((z - 0.7) ** 2) / 0.01)
-    radecfreq = ps.gen_random_poisson_galaxy(dndz=dndz_func(ps.z_ch))
+    radecfreq = ps.gen_random_poisson_galaxy(dndz=dndz_func(ps.z_ch), seed=2)
     ps.compensate = False
     gal_count, _, _ = ps.grid_gal_to_field(radecfreq)
     volume = (
@@ -501,6 +589,7 @@ def test_flat_sky():
         kmax=10.0,
         flat_sky=True,
         mean_amp_1="average_hi_temp",
+        seed=1,
     )
     mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
     mock.grid_data_to_field()
@@ -543,6 +632,7 @@ def test_mock_tracer_grid():
             discrete_base_field=2,
             k1dbins=k1dedges,
             target_relative_to_num_g=2.0,
+            seed=i,
         )
         mock.data = np.ones(mock.W_HI.shape)
         mock.w_HI = np.ones(mock.W_HI.shape)
@@ -602,65 +692,250 @@ def test_galaxy_selection_count_and_legacy_ratio():
     weight, total = selection_sampling_weight(density, mock.box_resol)
     assert np.allclose(weight, 1.0)
     assert total == pytest.approx(1.0e-4 * np.prod(mock.box_resol) * density.size)
+    zeros, zero_total = selection_sampling_weight(
+        np.zeros_like(density), mock.box_resol
+    )
+    assert zero_total == 0.0
+    assert np.all(zeros == 0.0)
+    step = np.array([1.0, 3.0])
+    step_weight, step_total = selection_sampling_weight(step, np.array([2.0]))
+    assert step_total == pytest.approx(8.0)
+    assert np.allclose(step_weight, step / step.mean())
     mock.galaxy_selection = density
     assert mock.tot_num_source_in_box == pytest.approx(total)
+    weight, enclosed = mock._selection_weight()
+    assert np.allclose(weight, 1.0)
+    assert enclosed == pytest.approx(total)
+    with pytest.raises(ValueError, match="galaxy_selection shape"):
+        mock._selection_weight(np.ones(2))
     mock.galaxy_selection = None
     assert mock.tot_num_source_in_box == pytest.approx(legacy)
 
 
-def test_random_selection_cache(tmp_path):
-    from astropy.cosmology import Planck18
-    from astropy.table import Table
+def _small_lightcone():
+    redshift = np.linspace(0.6, 0.8, 6)
+    return MockSimulation(
+        nu=redshift_to_freq(redshift[::-1]),
+        hp_nside=16,
+        ra_range=(0.0, 20.0),
+        dec_range=(-10.0, 10.0),
+        downres_factor_transverse=4,
+        downres_factor_radial=2,
+        num_discrete_source=20,
+        grid_scheme="nnb",
+    )
 
-    from meer21cm.io import selection_from_random_files
+
+def _write_selection_catalogues(tmp_path):
+    from astropy.table import Table
 
     random_path = tmp_path / "random.fits"
     data_path = tmp_path / "data.fits"
     Table(
         {
-            "RA": [10.0, 10.0, 10.2],
-            "DEC": [0.0, 0.1, 0.0],
-            "Z": [0.61, 0.72, 0.68],
-            "WEIGHT": [1.0, 1.0, 2.0],
+            "RA": [9.83, 9.83, 9.83, 100.0],
+            "DEC": [0.0, 0.0, 0.0, 0.0],
+            "Z": [0.62, 0.69, 0.76, 0.65],
+            "WEIGHT": [1.0, 2.0, 1.0, 5.0],
+            "WEIGHT_COMP": [2.0, 2.0, 1.0, 1.0],
+            "WEIGHT_SYS": [1.0, 2.0, 1.0, 1.0],
+            "WEIGHT_ZFAIL": [0.5, 0.5, 1.0, 1.0],
         }
     ).write(random_path)
     Table(
         {
-            "RA": [10.0],
-            "DEC": [0.0],
-            "Z": [0.65],
-            "WEIGHT": [4.0],
+            "RA": [9.83, 100.0, 9.83],
+            "DEC": [0.0, 0.0, 0.0],
+            "Z": [0.65, 0.65, 0.2],
+            "WEIGHT": [8.0, 9.0, 7.0],
         }
     ).write(data_path)
+    return random_path, data_path
+
+
+def _selection_integral(angular, n_w, z_edges, nside, cosmo):
+    import healpy as hp
+
+    n_pix = int(np.sum(np.asarray(angular) > 0))
+    omega = n_pix * float(hp.nside2pixarea(int(nside)))
+    chi = np.asarray(cosmo.comoving_distance(np.asarray(z_edges)).value, dtype=float)
+    volume = omega / 3.0 * (chi[1:] ** 3 - chi[:-1] ** 3)
+    dvol = volume / max(n_pix, 1)
+    return float(np.sum(np.asarray(n_w) * dvol * np.sum(angular)))
+
+
+def test_selection_weight_changes_the_sampled_counts():
+    mock = _small_lightcone()
+    mock.get_enclosing_box()
+    shape = tuple(int(n) for n in mock.box_ndim)
+    density = np.full(shape, 1.0e-6)
+    density[..., -1] = 3.0e-6
+    mock.galaxy_selection = density
+    mock.seed = 0
+    mock.get_mock_tracer_position_in_box(2, density_field=np.zeros(shape, dtype=float))
+    positions = mock._mock_tracer_position_in_box
+    edges = np.linspace(0.0, mock.box_len[2], shape[2] + 1)
+    counts, _bins = np.histogram(positions[:, 2], bins=edges)
+    expected = np.array([1.0, 1.0, 3.0])
+    expected = expected / expected.sum() * counts.sum()
+    chi2 = float(np.sum((counts - expected) ** 2 / expected))
+    assert counts.sum() == pytest.approx(
+        float(np.sum(density) * np.prod(mock.box_resol)), rel=0.15
+    )
+    assert chi2 < 20.0
+
+
+def test_constant_random_weight_rescales_alpha_and_keeps_F():
+    mock = _small_lightcone()
+    mock.get_enclosing_box()
+    data_ra, data_dec, data_z = _interior_radecz(mock, [[0, 0, 0]])
+    rand_ra, rand_dec, rand_z = _interior_radecz(mock, [[0, 0, 1]] * 4)
+    freq = redshift_to_freq(data_z)
+    field_unit, _, _ = mock.grid_gal_to_field(
+        radecfreq=(data_ra, data_dec, freq),
+        weights=np.ones(1),
+        construct_fkp=True,
+        random_radecz=(rand_ra, rand_dec, rand_z),
+        random_weights=np.ones(4),
+    )
+    alpha_unit = float(mock.field_2_alpha)
+    field_weighted, _, _ = mock.grid_gal_to_field(
+        radecfreq=(data_ra, data_dec, freq),
+        weights=np.ones(1),
+        construct_fkp=True,
+        random_radecz=(rand_ra, rand_dec, rand_z),
+        random_weights=np.full(4, 2.0),
+    )
+    assert mock.field_2_alpha == pytest.approx(alpha_unit / 2.0)
+    assert np.allclose(mock.weights_rand, 2.0)
+    assert np.allclose(field_weighted, field_unit)
+    assert field_weighted.sum() == pytest.approx(0.0, abs=1e-8)
+    positions = mock._sky_positions_in_box(
+        rand_ra, rand_dec, redshift_to_freq(rand_z), mock.flat_sky
+    )
+    weights = np.full(4, 2.0)
+    painted = mock._cached_random_paint(positions, weights)
+    assert mock._cached_random_paint(positions, weights) is painted
+    assert painted.sum() == pytest.approx(8.0)
+
+
+def test_selection_normalises_to_the_data_and_paints_cell_centres(tmp_path):
+    import healpy as hp
+    from astropy.cosmology import Planck18
+
+    from meer21cm.io import selection_from_random_files
+
+    random_path, data_path = _write_selection_catalogues(tmp_path)
+    z_edges = np.array([0.6, 0.67, 0.74, 0.8])
+    ra_range = (0.0, 20.0)
+    dec_range = (-10.0, 10.0)
+    columns = ("WEIGHT_COMP", "WEIGHT_SYS", "WEIGHT_ZFAIL")
     result = selection_from_random_files(
         [random_path],
-        ra_range=(0.0, 20.0),
-        dec_range=(-5.0, 5.0),
-        z_edges=np.linspace(0.6, 0.8, 5),
+        ra_range=ra_range,
+        dec_range=dec_range,
+        z_edges=z_edges,
         cosmo=Planck18,
         data_path=data_path,
         nside=8,
         random_density_deg2=1.0,
+        source_weight_columns=columns,
     )
-    assert result["angular"].shape == (hp_npix(8),)
-    assert result["n_w"].shape == (4,)
-    assert result["data_weight"] == pytest.approx(4.0)
+    pix = hp.ang2pix(8, 9.83, 0.0, lonlat=True)
+    omega_deg = float(hp.nside2pixarea(8, degrees=True))
+    assert result["angular"][pix] == pytest.approx(3.0 / omega_deg)
+    assert result["angular"].sum() == pytest.approx(3.0 / omega_deg)
+    assert result["data_weight"] == pytest.approx(8.0)
     assert result["random_weight"] == pytest.approx(4.0)
-    assert np.sum(result["angular"]) > 0
-    mock = MockSimulation(
-        survey="meerklass_2021",
-        band="L",
-        ra_range=(334, 357),
-        dec_range=(-35, -26.5),
-        num_discrete_source=10,
+    assert result["scale"] == pytest.approx(2.0)
+    assert _selection_integral(
+        result["angular"], result["n_w"], z_edges, 8, Planck18
+    ) == pytest.approx(8.0)
+    unnormalised = selection_from_random_files(
+        [random_path],
+        ra_range=ra_range,
+        dec_range=dec_range,
+        z_edges=z_edges,
+        cosmo=Planck18,
+        nside=8,
+        random_density_deg2=1.0,
+        source_weight_columns=columns,
     )
+    assert unnormalised["data_weight"] == pytest.approx(unnormalised["random_weight"])
+    assert _selection_integral(
+        unnormalised["angular"], unnormalised["n_w"], z_edges, 8, Planck18
+    ) == pytest.approx(4.0)
+    bare = selection_from_random_files(
+        [random_path],
+        ra_range=ra_range,
+        dec_range=dec_range,
+        z_edges=z_edges,
+        cosmo=Planck18,
+        nside=8,
+        random_density_deg2=1.0,
+        source_weight_columns=("NOT_A_COLUMN",),
+    )
+    assert bare["angular"][pix] == pytest.approx(4.0 / omega_deg)
+
+    mock = _small_lightcone()
+    assert mock.random_selection is None
+    assert mock.sky_selection_density is None
+    uniform = mock.selection_density_from_sky(lambda z: np.full(np.shape(z), 1.0e-4))
     mock._sky_selection_density = np.zeros(3)
-    mock._store_random_selection(result)
+    stored = mock.read_random_selection(
+        [random_path],
+        data_path=data_path,
+        nside=8,
+        z_edges=z_edges,
+        random_density_deg2=1.0,
+        source_weight_columns=columns,
+    )
     assert mock._sky_selection_density is None
-    assert mock.random_selection["nside"] == 8
+    assert mock.random_selection is stored
+    assert stored["data_weight"] == pytest.approx(8.0)
     assert "_sky_selection_density" in mock.selection_dep_attr
-    assert "_sky_selection_density" in mock.box_dep_attr
-
-
-def hp_npix(nside):
-    return 12 * int(nside) ** 2
+    density = np.asarray(mock.sky_selection_density)
+    assert mock.sky_selection_density is density
+    xx, yy, zz = np.meshgrid(mock.x_vec[0], mock.x_vec[1], mock.x_vec[2], indexing="ij")
+    centres = np.stack((xx.ravel(), yy.ravel(), zz.ravel()), axis=1)
+    ra, dec, redshift, _distance = mock.ra_dec_z_for_coord_in_box(centres)
+    expected = mock._selection_n_of_z()(redshift) * mock._selection_angular_at()(
+        ra, dec
+    )
+    assert np.allclose(density.ravel(), expected)
+    assert np.all(expected > 0)
+    sky_total = float(np.sum(density) * np.prod(mock.box_resol))
+    assert mock.galaxy_selection is None
+    assert mock.tot_num_source_in_box == pytest.approx(sky_total)
+    weight, enclosed = mock._selection_weight()
+    assert enclosed == pytest.approx(sky_total)
+    assert np.allclose(weight * np.mean(density), density)
+    window = np.asarray(angle_in_range(ra, ra_range[0], ra_range[1]), dtype=float)
+    window *= (dec > dec_range[0]) & (dec < dec_range[1])
+    assert np.allclose(uniform.ravel(), 1.0e-4 * window)
+    default_shells = mock.read_random_selection(
+        [random_path],
+        data_path=data_path,
+        nside=8,
+        random_density_deg2=1.0,
+        source_weight_columns=columns,
+    )
+    assert default_shells["z_edges"].size == 21
+    assert _selection_integral(
+        default_shells["angular"],
+        default_shells["n_w"],
+        default_shells["z_edges"],
+        8,
+        mock.astropy_cosmo_true,
+    ) == pytest.approx(8.0)
+    mock._random_selection = None
+    mock._selection_z_edges = None
+    rebuilt = mock.random_selection
+    assert rebuilt["z_edges"].size == 21
+    assert _selection_integral(
+        rebuilt["angular"],
+        rebuilt["n_w"],
+        rebuilt["z_edges"],
+        rebuilt["nside"],
+        mock.astropy_cosmo_true,
+    ) == pytest.approx(rebuilt["data_weight"])

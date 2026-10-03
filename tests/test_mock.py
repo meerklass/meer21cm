@@ -109,6 +109,7 @@ def test_rsd_from_field(parallel_plane):
         rsd_from_field=True,
         k1dbins=np.linspace(0.01, 0.2, 21),
         kmax=20,
+        seed=1,
     )
     mock.nu = np.linspace(5.8e8, 1e9, 100)
     mock.field_2 = mock.mock_tracer_field_2
@@ -162,6 +163,7 @@ def test_matter_mock(test_W, density):
         model_k_from_field=True,
         upgrade_sampling_from_gridding=True,
         kaiser_rsd=False,
+        seed=1,
     )
     mock.map_has_sampling = (test_W * np.ones_like(mock.nu)[None, None, :]) > 0
     mock.get_enclosing_box()
@@ -221,6 +223,7 @@ def test_tracer_mock(tracer_i, kaiser_rsd, parallel_plane):
         tracer_bias_1=1.5,
         tracer_bias_2=1.5,
         rsd_from_field=True,
+        seed=1,
     )
     mock.ones_func = 1
     setattr(mock, f"mean_amp_{tracer_i}", "ones_func")
