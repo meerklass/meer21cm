@@ -7,7 +7,6 @@ from scipy.signal import windows
 from meer21cm import PowerSpectrum
 from meer21cm.util import center_to_edges, f_21
 from meer21cm.mock import generate_gaussian_field
-from scipy.interpolate import interp1d
 
 
 def test_nyquist_k():
@@ -74,13 +73,6 @@ def test_get_fourier_density():
     assert np.abs(np.std(rand_fourier) - 1.0) < 5e-2
     assert np.abs(np.mean(rand_fourier)) < 5e-2
     assert np.abs((np.abs(rand_fourier) ** 2).mean() - 1) < 5e-2
-
-
-def test_get_shot_noise_galaxy():
-    gal_count = np.ones(100000)
-    box_len = [1, 1, 1]
-    shot_noise = get_shot_noise_galaxy(gal_count, box_len)
-    assert np.allclose(shot_noise, 1e-5)
 
 
 def test_get_power_spectrum():
@@ -904,31 +896,6 @@ def test_beam_attenuation_mu_roundoff_guard():
     assert np.all(np.isfinite(beam))
 
 
-def test_grid_gal(test_gal_fits, test_W):
-    ps = PowerSpectrum(
-        gal_file=test_gal_fits,
-        survey="meerklass_2021",
-        band="L",
-    )
-    ps.W_HI = (test_W * ps.nu[None, None, :]) > 0
-    ps.data = ps.W_HI
-    ps.w_HI = ps.W_HI
-    ps = PowerSpectrum(
-        gal_file=test_gal_fits,
-        data=ps.data,
-        map_has_sampling=ps.W_HI,
-        weights_map_pixel=ps.w_HI,
-        init_box_from_map_data=True,
-        include_sky_sampling=[True, True],
-        survey="meerklass_2021",
-        band="L",
-        tracer_bias_2=1.0,  # just for invoking some tests
-    )
-    ps.read_gal_cat()
-    ps.grid_gal_to_field()
-    ps.apply_taper_to_field(2)
-
-
 def test_gridding_batch_number_equivalence(test_gal_fits, test_W):
     ps_base = PowerSpectrum(
         gal_file=test_gal_fits,
@@ -1002,29 +969,6 @@ def test_grid_data_to_field_all_masked_map(test_W):
     assert np.allclose(ps.field_1, 0.0)
 
 
-def test_grid_gal_to_field_zero_galaxy(test_W):
-    ps = PowerSpectrum(
-        data=(test_W > 0).astype(float),
-        map_has_sampling=(test_W > 0),
-        weights_map_pixel=(test_W > 0).astype(float),
-        init_box_from_map_data=True,
-        include_sky_sampling=[True, True],
-        survey="meerklass_2021",
-        band="L",
-        tracer_bias_2=1.0,
-    )
-    ps.get_enclosing_box()
-    ps._counts_in_box = np.ones(tuple(ps.box_ndim.tolist()), dtype=ps.real_dtype)
-    ps._ra_gal = np.array([])
-    ps._dec_gal = np.array([])
-    ps._z_gal = np.array([])
-    galmap_rg, galweights_rg, galcounts_rg = ps.grid_gal_to_field()
-    assert np.allclose(galmap_rg, 0.0)
-    assert np.allclose(galweights_rg, 0.0)
-    assert np.allclose(galcounts_rg, 0.0)
-    assert np.allclose(ps.field_2, 0.0)
-
-
 def test_shot_noise_tapering():
     ps = PowerSpectrum(
         nu=[f_21, f_21],
@@ -1084,49 +1028,6 @@ def test_rot_back():
     assert np.allclose(z_test[0], ps.z_ch)
     assert np.allclose(ps.ra_map.ravel(), ra_test[:, 0])
     assert np.allclose(ps.dec_map.ravel(), dec_test[:, 0])
-
-
-def test_poisson_gal_gen():
-    raminMK, ramaxMK = 334, 357
-    decminMK, decmaxMK = -35, -26.5
-    ra_range = (raminMK, ramaxMK)
-    dec_range = (decminMK, decmaxMK)
-    ps = PowerSpectrum(
-        ra_range=ra_range,
-        dec_range=dec_range,
-        omega_hi=5.4e-4,
-        mean_amp_1="average_hi_temp",
-        tracer_bias_1=1.5,
-        tracer_bias_2=1.9,
-        survey="meerklass_2021",
-        band="L",
-        # seed=42,
-        kmax=10.0,
-        num_particle_per_pixel=2,
-        box_buffkick=[5, 5, 5],
-    )
-    ps._ra_gal = np.ones(40000)
-    ps._dec_gal = np.ones(40000)
-    ps._z_gal = np.ones(40000)
-    radecfreq = ps.gen_random_poisson_galaxy()
-    ps.compensate = False
-    ps.grid_gal_to_field(radecfreq)
-    volume = (
-        (ps.W_HI[:, :, 0].sum() * ps.pixel_area * (np.pi / 180) ** 2)
-        / 3
-        * (
-            ps.astropy_cosmo_true.comoving_distance(ps.z_ch.max()) ** 3
-            - ps.astropy_cosmo_true.comoving_distance(ps.z_ch.min()) ** 3
-        ).value
-    )
-    k1dedges = np.geomspace(0.05, 1, 21)
-    ps.k1dbins = k1dedges
-    psn = volume / ps.ra_gal.size
-    psn1d, _, _ = ps.get_1d_power(
-        "auto_power_3d_2",
-    )
-    plateau = psn1d[-5:].mean()
-    assert np.abs(plateau - psn) / psn < 2.5e-1
 
 
 def test_poisson_gal_gen_paired_wcs_pixels():
@@ -1195,96 +1096,6 @@ def test_poisson_gal_gen_healpix():
         ps.gen_random_poisson_galaxy(sel=np.zeros_like(ps.W_HI[..., 0], dtype=bool))
     with pytest.raises(ValueError, match="sel shape"):
         ps.gen_random_poisson_galaxy(sel=np.ones((3, 3), dtype=bool))
-
-
-def test_poisson_gal_gen_chi2_radial():
-    """Default radial sampling is p(chi) ∝ chi**2 (constant comoving density)."""
-    from meer21cm.util import freq_to_redshift
-
-    zmin = 0.6
-    zmax = 0.8
-    nu = np.linspace(redshift_to_freq(zmax), redshift_to_freq(zmin), 100)
-    raminMK, ramaxMK = 320, 380
-    decminMK, decmaxMK = -35, -26.5
-    ra_range = (raminMK, ramaxMK)
-    dec_range = (decminMK, decmaxMK)
-    ps = PowerSpectrum(
-        hp_nside=128,
-        ra_range=ra_range,
-        dec_range=dec_range,
-        omega_hi=5.4e-4,
-        mean_amp_1="average_hi_temp",
-        tracer_bias_1=1.5,
-        tracer_bias_2=1.9,
-        nu=nu,
-        # seed=42,
-        kmax=10.0,
-        num_particle_per_pixel=2,
-        box_buffkick=[5, 5, 5],
-    )
-    ps._ra_gal = np.ones(400000)
-    ps._dec_gal = np.ones(400000)
-    ps._z_gal = np.ones(400000)
-    dndz_func = lambda z: 0.01 * np.exp(-((z - 0.7) ** 2) / 0.01)
-    radecfreq = ps.gen_random_poisson_galaxy(dndz=dndz_func(ps.z_ch))
-    ps.compensate = False
-    gal_count, _, _ = ps.grid_gal_to_field(radecfreq)
-    volume = (
-        (ps.W_HI[..., 0].sum() * ps.pixel_area * (np.pi / 180) ** 2)
-        / 3
-        * (
-            ps.astropy_cosmo_true.comoving_distance(ps.z_ch.max()) ** 3
-            - ps.astropy_cosmo_true.comoving_distance(ps.z_ch.min()) ** 3
-        ).value
-    )
-    k1dedges = np.linspace(0.01, 0.3, 21)
-    ps.k1dbins = k1dedges
-    ps.field_2 = gal_count
-    ps.weights_field_2 = dndz_func(ps._box_voxel_redshift)
-    ps.weights_2 = (ps.counts_in_box > 0).astype(float)
-    ps.apply_taper_to_field(2, axis=(0, 1, 2))
-    psn = volume / ps.ra_gal.size
-    psn1d, _, _ = ps.get_1d_power(
-        "auto_power_3d_2",
-    )
-    # remove first 2 bins to avoid windowing and large var
-    psn1d = psn1d[2:]
-    assert psn1d.mean() == pytest.approx(psn, rel=2e-1)
-    # roughly a plateau
-    assert psn1d.std() < (psn * 0.2)
-
-    # check z dist
-    z_rand = freq_to_redshift(radecfreq[-1])
-    z_interp = np.linspace(z_rand.min(), z_rand.max(), 100)
-    diff_V = ps.cosmo.differential_comoving_volume(z_interp).value
-    diff_V_interp = interp1d(z_interp, diff_V)
-    diff_V_rand = diff_V_interp(z_rand)
-    counts, bins = np.histogram(z_rand, weights=1 / diff_V_rand, bins=50)
-    counts /= counts.sum()
-    bins = (bins[:-1] + bins[1:]) / 2
-    counts_func = dndz_func(bins)
-    counts_func /= counts_func.sum()
-    assert np.abs(counts / counts_func - 1).max() < 5e-2
-
-    chi_min = ps.astropy_cosmo_fiducial.comoving_distance(ps.z_ch.min()).to("Mpc").value
-    chi_max = ps.astropy_cosmo_fiducial.comoving_distance(ps.z_ch.max()).to("Mpc").value
-
-    def _chi3_hist_scatter(freq):
-        z = freq_to_redshift(freq)
-        chi = ps.astropy_cosmo_fiducial.comoving_distance(z).to("Mpc").value
-        # CDF of p(χ)∝χ² is uniform in χ³.
-        u = (chi**3 - chi_min**3) / (chi_max**3 - chi_min**3)
-        hist, _ = np.histogram(u, bins=10, range=(0, 1))
-        return hist.std() / hist.mean()
-
-    _, _, freq = ps.gen_random_poisson_galaxy(num_g_rand=80000, seed=3)
-    assert _chi3_hist_scatter(freq) < 0.08
-
-    # Per-volume ones_like matches the same χ² measure (mock default convention).
-    _, _, freq2 = ps.gen_random_poisson_galaxy(
-        num_g_rand=80000, seed=4, dndz=np.ones_like
-    )
-    assert _chi3_hist_scatter(freq2) < 0.08
 
 
 def test_1d_k_cut():

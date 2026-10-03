@@ -331,6 +331,11 @@ class Specification:
         self.soft_filter_los = soft_filter_los
         self.filter_los_threshold = filter_los_threshold
         self.gal_file = gal_file
+        self._weights_gal = None
+        self._ra_rand = None
+        self._dec_rand = None
+        self._z_rand = None
+        self._weights_rand = None
         self.weighting = weighting
         self._sigma_beam_ch_in_mpc = None
         if data is None:
@@ -745,6 +750,62 @@ class Specification:
         return self._z_gal
 
     @property
+    def weights_gal(self):
+        """
+        Per-galaxy weights for the catalogue.
+
+        ``None`` means every galaxy has unit weight.
+        """
+        return self._weights_gal
+
+    @weights_gal.setter
+    def weights_gal(self, value):
+        if value is None:
+            self._weights_gal = None
+            return
+        self._weights_gal = np.asarray(value, dtype=float)
+
+    @property
+    def ra_rand(self):
+        """Right ascension of the random catalogue, in degrees."""
+        return self._ra_rand
+
+    @ra_rand.setter
+    def ra_rand(self, value):
+        self._ra_rand = None if value is None else np.asarray(value, dtype=float)
+
+    @property
+    def dec_rand(self):
+        """Declination of the random catalogue, in degrees."""
+        return self._dec_rand
+
+    @dec_rand.setter
+    def dec_rand(self, value):
+        self._dec_rand = None if value is None else np.asarray(value, dtype=float)
+
+    @property
+    def z_rand(self):
+        """Redshift of the random catalogue."""
+        return self._z_rand
+
+    @z_rand.setter
+    def z_rand(self, value):
+        self._z_rand = None if value is None else np.asarray(value, dtype=float)
+
+    @property
+    def weights_rand(self):
+        """
+        Per-object weights of the random catalogue.
+
+        ``None`` means every random has unit weight.
+        """
+        return self._weights_rand
+
+    @weights_rand.setter
+    def weights_rand(self, value):
+        self._weights_rand = None if value is None else np.asarray(value, dtype=float)
+
+    @property
     def freq_gal(self):
         """
         The 21cm line frequency for each galaxy in Hz.
@@ -765,6 +826,7 @@ class Specification:
         ra_col="RA",
         dec_col="DEC",
         z_col="Z",
+        weight_col=None,
         trim=True,
     ):
         """
@@ -780,6 +842,9 @@ class Specification:
             The column name of the declination in the galaxy catalogue.
         z_col: str, default "Z"
             The column name of the redshift in the galaxy catalogue.
+        weight_col: str, default None
+            Optional column of per-galaxy weights. ``None`` leaves
+            ``weights_gal`` unset, which is unit weight.
         trim: bool, default True
             Whether to trim the galaxy catalogue to the ra,dec,z range of the map.
             See :meth:`meer21cm.dataanalysis.Specification.trim_gal_to_range`.
@@ -794,6 +859,11 @@ class Specification:
         self._ra_gal = ra_g
         self._dec_gal = dec_g
         self._z_gal = z_g
+        if weight_col is None:
+            self._weights_gal = None
+        else:
+            self._weights_gal = np.asarray(hdu[1].data[weight_col], dtype=float)
+        hdu.close()
         if trim:
             self.trim_gal_to_range()
 
@@ -952,7 +1022,48 @@ class Specification:
         self._ra_gal = self.ra_gal[gal_sel]
         self._dec_gal = self.dec_gal[gal_sel]
         self._z_gal = self.z_gal[gal_sel]
+        if self.weights_gal is not None:
+            self._weights_gal = np.asarray(self.weights_gal)[gal_sel]
+        if (
+            self.ra_rand is not None
+            and self.dec_rand is not None
+            and self.z_rand is not None
+        ):
+            rand_sel = self._objects_in_survey(self.ra_rand, self.dec_rand, self.z_rand)
+            self._ra_rand = np.asarray(self.ra_rand)[rand_sel]
+            self._dec_rand = np.asarray(self.dec_rand)[rand_sel]
+            self._z_rand = np.asarray(self.z_rand)[rand_sel]
+            if self.weights_rand is not None:
+                self._weights_rand = np.asarray(self.weights_rand)[rand_sel]
         return gal_sel
+
+    def _objects_in_survey(self, ra, dec, z):
+        """Boolean mask of objects inside the survey window.
+
+        Parameters
+        ----------
+        ra, dec, z : array
+            Right ascension and declination in degrees, and redshift.
+
+        Returns
+        -------
+        ndarray
+            True where the object lies inside the RA, Dec and redshift limits,
+            including the half-channel buffer on redshift.
+        """
+        ra_range = np.asarray(self.ra_range)
+        dec_range = np.asarray(self.dec_range)
+        z_edges = freq_to_redshift(center_to_edges(self.nu))
+        ra = np.asarray(ra)
+        dec = np.asarray(dec)
+        z = np.asarray(z)
+        return (
+            angle_in_range(ra, ra_range[0], ra_range[1])
+            * (dec > dec_range[0])
+            * (dec < dec_range[1])
+            * (z > z_edges.min())
+            * (z < z_edges.max())
+        )
 
     @property
     @tagging("beam", "nu")

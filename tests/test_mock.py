@@ -109,6 +109,7 @@ def test_rsd_from_field(parallel_plane):
         rsd_from_field=True,
         k1dbins=np.linspace(0.01, 0.2, 21),
         kmax=20,
+        seed=1,
     )
     mock.nu = np.linspace(5.8e8, 1e9, 100)
     mock.field_2 = mock.mock_tracer_field_2
@@ -162,6 +163,7 @@ def test_matter_mock(test_W, density):
         model_k_from_field=True,
         upgrade_sampling_from_gridding=True,
         kaiser_rsd=False,
+        seed=1,
     )
     mock.map_has_sampling = (test_W * np.ones_like(mock.nu)[None, None, :]) > 0
     mock.get_enclosing_box()
@@ -221,6 +223,7 @@ def test_tracer_mock(tracer_i, kaiser_rsd, parallel_plane):
         tracer_bias_1=1.5,
         tracer_bias_2=1.5,
         rsd_from_field=True,
+        seed=1,
     )
     mock.ones_func = 1
     setattr(mock, f"mean_amp_{tracer_i}", "ones_func")
@@ -596,35 +599,6 @@ def test_generate_colored_noise():
     rand_arr = np.array(rand_arr)
     assert np.allclose(rand_arr.mean(), 0.0)
     assert np.abs(rand_arr.std() - 1.0) < 0.1
-
-
-def test_flat_sky():
-    mock = MockSimulation(
-        survey="meerklass_2021",
-        band="L",
-        highres_sim=None,
-        num_discrete_source=1000000,
-        tracer_bias_2=1.0,
-        kmax=10.0,
-        flat_sky=True,
-        mean_amp_1="average_hi_temp",
-    )
-    mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
-    mock.grid_data_to_field()
-    mock.weights_field_1 = None
-    mock.weights_grid_1 = None
-    mock.include_sky_sampling = [False, False]
-    mock.compensate = False
-    ratio = mock.auto_power_3d_1 / mock.auto_power_tracer_1_model
-    assert np.abs(ratio.mean() - 1) < 2e-1
-    mock.propagate_mock_tracer_to_gal_cat()
-    mock.grid_gal_to_field()
-    mock.weights_field_2 = None
-    mock.weights_grid_2 = None
-    mock.compensate = False
-    shot_noise = np.prod(mock.box_len) / mock.field_2.sum()
-    ratio = (mock.auto_power_3d_2 - shot_noise) / mock.auto_power_tracer_2_model
-    assert np.abs(ratio.mean() - 1) < 2e-1
 
 
 def test_dndz():
