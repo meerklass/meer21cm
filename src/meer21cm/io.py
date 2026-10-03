@@ -309,6 +309,20 @@ def read_catalogue_fits(
 
     ``weight_col=None`` assigns unit weight to every row. ``WEIGHT_FKP`` is
     not read.
+
+    Parameters
+    ----------
+    paths : sequence of path
+        FITS tables. Each must have a binary table in HDU 1.
+    ra_col, dec_col, z_col : str
+        Column names for right ascension, declination and redshift.
+    weight_col : str, optional
+        Column of per-object weights. ``None`` uses unit weight.
+
+    Returns
+    -------
+    ra, dec, z, weight : ndarray
+        Concatenated columns. All four are empty if ``paths`` is empty.
     """
     ra_parts = []
     dec_parts = []

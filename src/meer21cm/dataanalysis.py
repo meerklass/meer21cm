@@ -1041,7 +1041,19 @@ class Specification:
         return gal_sel
 
     def _objects_in_survey(self, ra, dec, z):
-        """Boolean mask of objects inside the survey RA, Dec and redshift window."""
+        """Boolean mask of objects inside the survey window.
+
+        Parameters
+        ----------
+        ra, dec, z : array
+            Right ascension and declination in degrees, and redshift.
+
+        Returns
+        -------
+        ndarray
+            True where the object lies inside the RA, Dec and redshift limits,
+            including the half-channel buffer on redshift.
+        """
         ra_range = np.asarray(self.ra_range)
         dec_range = np.asarray(self.dec_range)
         z_edges = freq_to_redshift(center_to_edges(self.nu))

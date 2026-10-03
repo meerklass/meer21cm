@@ -186,10 +186,29 @@ def get_vec_mode(vecarr):
 
 def fkp_count_field(data_counts, random_counts):
     """
-    Count field ``F = D - alpha R`` with ``alpha = sum(D) / sum(R)``.
+    Count field :math:`F = D - \\alpha R` with :math:`\\alpha = \\sum D / \\sum R`.
 
-    ``D`` and ``R`` are painted catalogue counts. Unit weights make ``alpha``
-    the ratio of the two painted totals.
+    :math:`D` and :math:`R` are painted catalogue counts. For unit weights,
+    :math:`\\alpha` is the ratio of the two painted totals.
+
+    Parameters
+    ----------
+    data_counts : array
+        Painted data counts :math:`D`.
+    random_counts : array
+        Painted random counts :math:`R`, same shape as ``data_counts``.
+
+    Returns
+    -------
+    field : ndarray
+        :math:`F = D - \\alpha R`.
+    alpha : float
+        :math:`\\sum D / \\sum R`.
+
+    Raises
+    ------
+    ValueError
+        If ``random_counts`` sums to zero.
     """
     data_counts = np.asarray(data_counts, dtype=float)
     random_counts = np.asarray(random_counts, dtype=float)

@@ -1227,6 +1227,34 @@ class LightconeGriddingMixin:
         from the object, a set ``weights_gal`` is used. Random positions and
         weights follow the same rule: arguments override ``ra_rand``,
         ``dec_rand``, ``z_rand`` and ``weights_rand``.
+
+        Parameters
+        ----------
+        radecfreq : tuple of array, optional
+            Data ``(RA, Dec, frequency)``. Frequencies are in Hz.
+            ``None`` uses ``ra_gal``, ``dec_gal`` and ``freq_gal``.
+        flat_sky : bool, optional
+            Use the flat-sky pixel grid. ``None`` uses ``flat_sky`` on the object.
+        weights : array, optional
+            Per-galaxy weights. ``None`` is unit mass, or ``weights_gal`` when
+            the positions also come from the object.
+        construct_fkp : bool, default False
+            If True, store :math:`F = D - \\alpha R` instead of the data counts.
+        random_radecz : tuple of array, optional
+            Random ``(RA, Dec, redshift)``. ``None`` uses the random attributes.
+        random_weights : array, optional
+            Per-random weights. ``None`` is unit mass, or ``weights_rand`` when
+            the random positions also come from the object.
+
+        Returns
+        -------
+        field : ndarray
+            Painted counts :math:`D`, or :math:`F` when ``construct_fkp`` is True.
+        weights : ndarray
+            Painter weights for the count path, or :math:`\\alpha R` for :math:`F`.
+        counts : ndarray
+            Particle counts on the count path, or the painted data counts
+            :math:`D` when ``construct_fkp`` is True.
         """
         if self.box_origin is None:
             self.get_enclosing_box()
@@ -1266,6 +1294,19 @@ class LightconeGriddingMixin:
         return self.field_2, self.weights_field_2, self.fkp_data_counts
 
     def _store_galaxy_counts(self, gal_map_rg, gal_weights_rg):
+        """Store painted galaxy counts as tracer 2.
+
+        Parameters
+        ----------
+        gal_map_rg : ndarray
+            Painted counts :math:`D`.
+        gal_weights_rg : ndarray
+            Unused painter weights. The field weight is the lightcone mask.
+
+        Returns
+        -------
+        None
+        """
         real_dtype = self.real_dtype
         self.field_2 = gal_map_rg
         weights_g = (self.counts_in_box > 0).astype(real_dtype)
@@ -1276,6 +1317,12 @@ class LightconeGriddingMixin:
         self._disable_galaxy_observational_weights()
 
     def _disable_galaxy_observational_weights(self):
+        """Turn beam and sky-sampling off for tracer 2.
+
+        Returns
+        -------
+        None
+        """
         include_beam = np.array(self.include_beam)
         include_beam[1] = False
         self.include_beam = include_beam
@@ -1284,6 +1331,21 @@ class LightconeGriddingMixin:
         self.include_sky_sampling = include_sky_sampling
 
     def _resolve_random_catalogue(self, random_radecz, random_weights):
+        """Take random coordinates from the arguments or from the object.
+
+        Parameters
+        ----------
+        random_radecz : tuple of array or None
+            ``(RA, Dec, redshift)``. ``None`` uses the stored attributes.
+        random_weights : array or None
+            Per-random weights. ``None`` is unit mass, or ``weights_rand``
+            when the positions also come from the object.
+
+        Returns
+        -------
+        ra, dec, freq, weights : ndarray or None
+            Sky coordinates, frequency in Hz, and weights.
+        """
         if random_radecz is None:
             if self.ra_rand is None or self.dec_rand is None or self.z_rand is None:
                 raise ValueError(
@@ -1311,6 +1373,20 @@ class LightconeGriddingMixin:
         return ra, dec, freq, random_weights
 
     def _cached_random_paint(self, positions, weights):
+        """Paint randoms, reusing the result when the catalogue is unchanged.
+
+        Parameters
+        ----------
+        positions : ndarray
+            Box coordinates, shape ``(n, 3)``.
+        weights : array or None
+            Per-object weights. ``None`` is unit mass.
+
+        Returns
+        -------
+        ndarray
+            Painted counts :math:`R`.
+        """
         weight_key = None if weights is None else int(np.asarray(weights).ctypes.data)
         key = (
             positions.shape,
@@ -1327,6 +1403,22 @@ class LightconeGriddingMixin:
         return painted
 
     def _sky_positions_in_box(self, ra_gal, dec_gal, freq_gal, flat_sky):
+        """Convert sky coordinates to Cartesian box coordinates.
+
+        Parameters
+        ----------
+        ra_gal, dec_gal : array
+            Right ascension and declination in degrees.
+        freq_gal : array
+            21 cm frequency in Hz.
+        flat_sky : bool
+            Use the flat-sky pixel grid instead of the lightcone.
+
+        Returns
+        -------
+        ndarray
+            Positions in the box, shape ``(n, 3)``.
+        """
         real_dtype = self.real_dtype
         ra_gal = np.asarray(ra_gal)
         dec_gal = np.asarray(dec_gal)
@@ -1367,6 +1459,20 @@ class LightconeGriddingMixin:
         return gal_pos_in_box
 
     def _paint_positions(self, gal_pos_in_box, weights):
+        """Sum the mass-assignment paint of one set of box positions.
+
+        Parameters
+        ----------
+        gal_pos_in_box : ndarray
+            Positions, shape ``(n, 3)``.
+        weights : array or None
+            Per-object weights. ``None`` is unit mass.
+
+        Returns
+        -------
+        painted, weights, counts : ndarray
+            Mass, weight and particle-count fields.
+        """
         real_dtype = self.real_dtype
         all_sel = np.arange(gal_pos_in_box.shape[0])
         gal_sel_batches = np.array_split(all_sel, self.batch_number)
@@ -1401,7 +1507,18 @@ class LightconeGriddingMixin:
         """
         Paint one sky catalogue onto the current box.
 
-        Uses :meth:`grid_gal_to_field`. ``weights=None`` is unit mass.
+        Parameters
+        ----------
+        ra, dec, z : array
+            Right ascension and declination in degrees, and redshift.
+        weights : array, optional
+            Per-object weights. ``None`` is unit mass.
+
+        Returns
+        -------
+        counts : ndarray
+            Painted counts on the rectangular box. The same array is stored
+            in ``field_2``.
         """
         freq = f_21 / (1.0 + np.asarray(z, dtype=float))
         counts, _, _ = self.grid_gal_to_field(

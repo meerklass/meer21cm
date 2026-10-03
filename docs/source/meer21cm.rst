@@ -105,6 +105,14 @@ meer21cm.power module
    :undoc-members:
    :show-inheritance:
 
+meer21cm.power_ops module
+-------------------------
+
+.. automodule:: meer21cm.power_ops
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 meer21cm.smooth_window module
 -----------------------------
 
