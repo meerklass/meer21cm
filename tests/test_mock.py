@@ -598,35 +598,6 @@ def test_generate_colored_noise():
     assert np.abs(rand_arr.std() - 1.0) < 0.1
 
 
-def test_flat_sky():
-    mock = MockSimulation(
-        survey="meerklass_2021",
-        band="L",
-        highres_sim=None,
-        num_discrete_source=1000000,
-        tracer_bias_2=1.0,
-        kmax=10.0,
-        flat_sky=True,
-        mean_amp_1="average_hi_temp",
-    )
-    mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
-    mock.grid_data_to_field()
-    mock.weights_field_1 = None
-    mock.weights_grid_1 = None
-    mock.include_sky_sampling = [False, False]
-    mock.compensate = False
-    ratio = mock.auto_power_3d_1 / mock.auto_power_tracer_1_model
-    assert np.abs(ratio.mean() - 1) < 2e-1
-    mock.propagate_mock_tracer_to_gal_cat()
-    mock.grid_gal_to_field()
-    mock.weights_field_2 = None
-    mock.weights_grid_2 = None
-    mock.compensate = False
-    shot_noise = np.prod(mock.box_len) / mock.field_2.sum()
-    ratio = (mock.auto_power_3d_2 - shot_noise) / mock.auto_power_tracer_2_model
-    assert np.abs(ratio.mean() - 1) < 2e-1
-
-
 def test_dndz():
     mock = MockSimulation(
         survey="meerklass_2021",

@@ -15,6 +15,7 @@ import numpy as np
 from astropy import units
 from astropy.cosmology import Planck18
 
+from .power_ops import fkp_count_field
 from .util import (
     angle_in_range,
     f_21,
@@ -1196,15 +1197,36 @@ class LightconeGriddingMixin:
         hi_weights_rg = np.asarray(hi_weights_rg, dtype=real_dtype)
         return hi_map_rg, hi_weights_rg, pixel_counts_hi_rg
 
-    def grid_gal_to_field(self, radecfreq=None, flat_sky=None):
+    def grid_gal_to_field(
+        self,
+        radecfreq=None,
+        flat_sky=None,
+        weights=None,
+        construct_fkp=False,
+        random_radecz=None,
+        random_weights=None,
+    ):
         """
-        Grid the galaxy catalogue to a rectangular grid field.
+        Paint galaxies onto the rectangular box.
 
-        If flat_sky is True, no gridding is performed. Instead, the map cube
-        dimensions are taken to be a rectangular grid, with the grid length
-        corresponding to the pixel resolution on x/y and los frequency resolution
-        as z.
+        With ``construct_fkp=False`` the stored field is the painted data
+        counts :math:`D`. With ``construct_fkp=True`` it is the
+        Feldman–Kaiser–Peacock field
 
+        .. math::
+
+            F = D - \\alpha R, \\qquad \\alpha = \\sum D / \\sum R,
+
+        where :math:`R` is the painted random catalogue. ``field_2`` is
+        :math:`F`. The selection passed to the power spectrum is
+        ``weights_field_2`` :math:`= \\alpha R` and ``weights_grid_2``
+        :math:`= 1`, with no mean subtraction, so the transform is of
+        :math:`F` and the normalisation divides by :math:`\\sum (\\alpha R)^2`.
+
+        ``weights=None`` paints unit mass. When the data positions are taken
+        from the object, a set ``weights_gal`` is used. Random positions and
+        weights follow the same rule: arguments override ``ra_rand``,
+        ``dec_rand``, ``z_rand`` and ``weights_rand``.
         """
         if self.box_origin is None:
             self.get_enclosing_box()
@@ -1216,7 +1238,99 @@ class LightconeGriddingMixin:
             freq_gal = self.freq_gal
         else:
             ra_gal, dec_gal, freq_gal = radecfreq
+        if weights is None and radecfreq is None:
+            weights = self.weights_gal
+        data_pos = self._sky_positions_in_box(ra_gal, dec_gal, freq_gal, flat_sky)
+        gal_map_rg, gal_weights_rg, pixel_counts_gal_rg = self._paint_positions(
+            data_pos, weights
+        )
+        if not construct_fkp:
+            self._store_galaxy_counts(gal_map_rg, gal_weights_rg)
+            return gal_map_rg, gal_weights_rg, pixel_counts_gal_rg
+        rand_ra, rand_dec, rand_freq, rand_weights = self._resolve_random_catalogue(
+            random_radecz, random_weights
+        )
+        rand_pos = self._sky_positions_in_box(rand_ra, rand_dec, rand_freq, flat_sky)
+        random_counts = self._cached_random_paint(rand_pos, rand_weights)
+        field, alpha = fkp_count_field(gal_map_rg, random_counts)
         real_dtype = self.real_dtype
+        self.field_2 = np.asarray(field, dtype=real_dtype)
+        self.fkp_alpha = float(alpha)
+        self.fkp_data_counts = np.asarray(gal_map_rg, dtype=real_dtype)
+        self.fkp_random_counts = np.asarray(random_counts, dtype=real_dtype)
+        self.weights_field_2 = np.asarray(alpha * random_counts, dtype=real_dtype)
+        self.weights_grid_2 = np.ones_like(self.field_2, dtype=real_dtype)
+        self.mean_center_2 = False
+        self.unitless_2 = False
+        self._disable_galaxy_observational_weights()
+        return self.field_2, self.weights_field_2, self.fkp_data_counts
+
+    def _store_galaxy_counts(self, gal_map_rg, gal_weights_rg):
+        real_dtype = self.real_dtype
+        self.field_2 = gal_map_rg
+        weights_g = (self.counts_in_box > 0).astype(real_dtype)
+        self.weights_field_2 = weights_g
+        self.weights_grid_2 = np.ones_like(self.field_2, dtype=real_dtype)
+        self.mean_center_2 = True
+        self.unitless_2 = True
+        self._disable_galaxy_observational_weights()
+
+    def _disable_galaxy_observational_weights(self):
+        include_beam = np.array(self.include_beam)
+        include_beam[1] = False
+        self.include_beam = include_beam
+        include_sky_sampling = np.array(self.include_sky_sampling)
+        include_sky_sampling[1] = False
+        self.include_sky_sampling = include_sky_sampling
+
+    def _resolve_random_catalogue(self, random_radecz, random_weights):
+        if random_radecz is None:
+            if self.ra_rand is None or self.dec_rand is None or self.z_rand is None:
+                raise ValueError(
+                    "A random catalogue is required to form F = D - alpha R."
+                )
+            ra = np.asarray(self.ra_rand, dtype=float)
+            dec = np.asarray(self.dec_rand, dtype=float)
+            z = np.asarray(self.z_rand, dtype=float)
+            if random_weights is None:
+                random_weights = self.weights_rand
+        else:
+            ra, dec, z = random_radecz
+            ra = np.asarray(ra, dtype=float)
+            dec = np.asarray(dec, dtype=float)
+            z = np.asarray(z, dtype=float)
+            self.ra_rand = ra
+            self.dec_rand = dec
+            self.z_rand = z
+            if random_weights is None:
+                self.weights_rand = None
+            else:
+                random_weights = np.asarray(random_weights, dtype=float)
+                self.weights_rand = random_weights
+        freq = f_21 / (1.0 + z)
+        return ra, dec, freq, random_weights
+
+    def _cached_random_paint(self, positions, weights):
+        weight_key = None if weights is None else int(np.asarray(weights).ctypes.data)
+        key = (
+            positions.shape,
+            int(np.asarray(positions).ctypes.data),
+            weight_key,
+            self.grid_scheme,
+            tuple(int(n) for n in self.box_ndim),
+        )
+        if getattr(self, "_fkp_random_key", None) == key:
+            return self._fkp_random_paint
+        painted, _, _ = self._paint_positions(positions, weights)
+        self._fkp_random_paint = painted
+        self._fkp_random_key = key
+        return painted
+
+    def _sky_positions_in_box(self, ra_gal, dec_gal, freq_gal, flat_sky):
+        real_dtype = self.real_dtype
+        ra_gal = np.asarray(ra_gal)
+        dec_gal = np.asarray(dec_gal)
+        freq_gal = np.asarray(freq_gal)
         if ra_gal.size == 0:
             gal_pos_in_box = np.zeros((0, 3), dtype=real_dtype)
         if flat_sky:
@@ -1250,6 +1364,10 @@ class LightconeGriddingMixin:
                 gal_pos_in_box = (gal_pos_arr - self.box_origin[None, :]).astype(
                     real_dtype, copy=False
                 )
+        return gal_pos_in_box
+
+    def _paint_positions(self, gal_pos_in_box, weights):
+        real_dtype = self.real_dtype
         all_sel = np.arange(gal_pos_in_box.shape[0])
         gal_sel_batches = np.array_split(all_sel, self.batch_number)
         gal_sel_batches = [sel for sel in gal_sel_batches if sel.size > 0]
@@ -1264,7 +1382,7 @@ class LightconeGriddingMixin:
             pixel_counts_gal_rg = None
             for sel in gal_sel_batches:
                 gal_map_i, gal_weights_i, pixel_counts_i = self._grid_gal_to_field(
-                    gal_pos_in_box, sel
+                    gal_pos_in_box, sel, weights
                 )
                 if gal_map_rg is None:
                     gal_map_rg = np.zeros_like(gal_map_i)
@@ -1273,27 +1391,34 @@ class LightconeGriddingMixin:
                 gal_map_rg += gal_map_i
                 gal_weights_rg += gal_weights_i
                 pixel_counts_gal_rg += pixel_counts_i
-        gal_map_rg = np.asarray(gal_map_rg, dtype=real_dtype)
-        gal_weights_rg = np.asarray(gal_weights_rg, dtype=real_dtype)
-        pixel_counts_gal_rg = np.asarray(pixel_counts_gal_rg, dtype=real_dtype)
-        self.field_2 = gal_map_rg
-        # only pixels sampled by the lightcone is used
-        weights_g = (self.counts_in_box > 0).astype(real_dtype)
-        self.weights_field_2 = weights_g
-        self.weights_grid_2 = np.ones_like(self.field_2, dtype=real_dtype)
-        self.mean_center_2 = True
-        self.unitless_2 = True
-        include_beam = np.array(self.include_beam)
-        include_beam[1] = False
-        self.include_beam = include_beam
-        include_sky_sampling = np.array(self.include_sky_sampling)
-        include_sky_sampling[1] = False
-        self.include_sky_sampling = include_sky_sampling
+        return (
+            np.asarray(gal_map_rg, dtype=real_dtype),
+            np.asarray(gal_weights_rg, dtype=real_dtype),
+            np.asarray(pixel_counts_gal_rg, dtype=real_dtype),
+        )
 
-        return gal_map_rg, gal_weights_rg, pixel_counts_gal_rg
+    def paint_catalogue_counts(self, ra, dec, z, weights=None):
+        """
+        Paint one sky catalogue onto the current box.
 
-    def _grid_gal_to_field(self, gal_pos_in_box, partial_sel):
+        Uses :meth:`grid_gal_to_field`. ``weights=None`` is unit mass.
+        """
+        freq = f_21 / (1.0 + np.asarray(z, dtype=float))
+        counts, _, _ = self.grid_gal_to_field(
+            radecfreq=(
+                np.asarray(ra, dtype=float),
+                np.asarray(dec, dtype=float),
+                freq,
+            ),
+            weights=weights,
+        )
+        return counts
+
+    def _grid_gal_to_field(self, gal_pos_in_box, partial_sel, weights=None):
         gal_pos_i = gal_pos_in_box[partial_sel]
+        mass = (
+            None if weights is None else np.asarray(weights, dtype=float)[partial_sel]
+        )
         (
             gal_map_rg,
             gal_weights_rg,
@@ -1303,6 +1428,7 @@ class LightconeGriddingMixin:
             self.box_len,
             self.box_ndim,
             grid_scheme=self.grid_scheme,
+            particle_mass=mass,
             compensate=False,  # compensate should be at model level
             average=False,
         )
@@ -1311,6 +1437,7 @@ class LightconeGriddingMixin:
             self.box_len,
             self.box_ndim,
             grid_scheme=self.grid_scheme,
+            particle_mass=mass,
             compensate=False,  # compensate should be at model level
             average=False,
             shift=self.interlace_shift,

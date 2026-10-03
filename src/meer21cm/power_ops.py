@@ -184,6 +184,22 @@ def get_vec_mode(vecarr):
     return result
 
 
+def fkp_count_field(data_counts, random_counts):
+    """
+    Count field ``F = D - alpha R`` with ``alpha = sum(D) / sum(R)``.
+
+    ``D`` and ``R`` are painted catalogue counts. Unit weights make ``alpha``
+    the ratio of the two painted totals.
+    """
+    data_counts = np.asarray(data_counts, dtype=float)
+    random_counts = np.asarray(random_counts, dtype=float)
+    random_sum = float(random_counts.sum())
+    if random_sum == 0.0:
+        raise ValueError("random counts sum to zero")
+    alpha = float(data_counts.sum()) / random_sum
+    return data_counts - alpha * random_counts, alpha
+
+
 def get_shot_noise_galaxy(
     gal_count,
     box_len,

@@ -295,3 +295,42 @@ def read_map(
     )
     ra, dec = get_wcs_coor(wproj, xx, yy)
     return map_data, counts, map_has_sampling, ra, dec, nu, wproj
+
+
+def read_catalogue_fits(
+    paths,
+    ra_col="RA",
+    dec_col="DEC",
+    z_col="Z",
+    weight_col=None,
+):
+    """
+    Read a list of catalogue FITS files and concatenate them.
+
+    ``weight_col=None`` assigns unit weight to every row. ``WEIGHT_FKP`` is
+    not read.
+    """
+    ra_parts = []
+    dec_parts = []
+    z_parts = []
+    w_parts = []
+    for path in paths:
+        with fits.open(path, memmap=True) as hdul:
+            table = hdul[1].data
+            ra_i = np.asarray(table[ra_col], dtype=float)
+            ra_parts.append(ra_i)
+            dec_parts.append(np.asarray(table[dec_col], dtype=float))
+            z_parts.append(np.asarray(table[z_col], dtype=float))
+            if weight_col is None:
+                w_parts.append(np.ones(ra_i.size, dtype=float))
+            else:
+                w_parts.append(np.asarray(table[weight_col], dtype=float))
+    if not ra_parts:
+        empty = np.zeros(0, dtype=float)
+        return empty, empty, empty, empty
+    return (
+        np.concatenate(ra_parts),
+        np.concatenate(dec_parts),
+        np.concatenate(z_parts),
+        np.concatenate(w_parts),
+    )
