@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d
 
 from meer21cm import MockSimulation, PowerSpectrum, Specification
 from meer21cm.io import read_catalogue_fits
+from meer21cm.grid import shot_noise_correction_from_gridding
 from meer21cm.power import get_shot_noise_galaxy
 from meer21cm.power_ops import fkp_count_field
 from meer21cm.util import f_21, freq_to_redshift, redshift_to_freq
@@ -162,7 +163,10 @@ def test_construct_fkp_is_data_minus_alpha_randoms(test_gal_fits, test_W):
     assert np.allclose(field, field_ref)
     assert np.allclose(ps.field_2, field_ref)
     assert np.allclose(data_paint, data_counts)
-    assert ps.fkp_alpha == pytest.approx(alpha_ref)
+    assert ps.field_2_has_random is True
+    assert ps.field_2_alpha == pytest.approx(alpha_ref)
+    assert np.allclose(ps.field_2_D, data_counts)
+    assert np.allclose(ps.field_2_R, random_counts)
     assert np.allclose(window, alpha_ref * random_counts)
     assert np.allclose(ps.weights_field_2, alpha_ref * random_counts)
     assert np.allclose(ps.weights_grid_2, 1.0)
@@ -219,6 +223,90 @@ def test_get_shot_noise_galaxy():
     box_len = [1, 1, 1]
     shot_noise = get_shot_noise_galaxy(gal_count, box_len)
     assert np.allclose(shot_noise, 1e-5)
+
+
+def test_shot_noise_attribute_matches_legacy_and_fkp():
+    counts = np.array(
+        [
+            [[1.0, 0.0, 2.0], [0.0, 1.0, 0.0], [2.0, 1.0, 0.0]],
+            [[0.0, 2.0, 1.0], [1.0, 0.0, 1.0], [0.0, 0.0, 2.0]],
+            [[1.0, 1.0, 0.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
+        ]
+    )
+    box_len = np.array([10.0, 20.0, 30.0])
+    grid_w = np.array(
+        [
+            [[1.0, 0.5, 1.0], [0.8, 1.0, 0.4], [1.0, 0.7, 1.0]],
+            [[0.6, 1.0, 0.9], [1.0, 0.3, 1.0], [0.5, 1.0, 0.8]],
+            [[1.0, 0.2, 1.0], [0.9, 1.0, 0.6], [1.0, 0.4, 1.0]],
+        ]
+    )
+    field_w = np.array(
+        [
+            [[1.0, 1.0, 0.5], [1.0, 0.2, 1.0], [0.7, 1.0, 1.0]],
+            [[1.0, 0.4, 1.0], [0.8, 1.0, 1.0], [1.0, 0.6, 1.0]],
+            [[0.3, 1.0, 1.0], [1.0, 1.0, 0.9], [1.0, 1.0, 0.5]],
+        ]
+    )
+    ps = PowerSpectrum(
+        np.ones_like(counts),
+        box_len,
+        field_2=counts,
+        weights_grid_2=grid_w,
+        weights_field_2=field_w,
+        mean_center_2=True,
+        unitless_2=True,
+        grid_scheme="cic",
+        compensate=[False, False],
+        include_beam=[False, False],
+        include_sky_sampling=[False, False],
+    )
+    correction = shot_noise_correction_from_gridding(ps.box_ndim, "cic")
+    legacy = get_shot_noise_galaxy(counts, box_len, grid_w, field_w) * correction
+    assert np.allclose(ps.shot_noise_2, legacy)
+
+    random_counts = np.array(
+        [
+            [[4.0, 5.0, 4.0], [6.0, 4.0, 5.0], [4.0, 7.0, 4.0]],
+            [[5.0, 4.0, 6.0], [4.0, 5.0, 4.0], [8.0, 4.0, 5.0]],
+            [[4.0, 6.0, 4.0], [5.0, 4.0, 7.0], [4.0, 5.0, 4.0]],
+        ]
+    )
+    alpha = float(counts.sum() / random_counts.sum())
+    ps.field_2_D = counts
+    ps.field_2_R = random_counts
+    ps.field_2_alpha = alpha
+    ps.field_2_has_random = True
+    ps.weights_field_2 = alpha * random_counts
+    ps.weights_grid_2 = grid_w
+    ps.set_corr_type("gal", 2)
+    assert ps.mean_center_2 is False
+    assert ps.unitless_2 is False
+    assert np.allclose(ps.field_2, counts - alpha * random_counts)
+    with pytest.raises(ValueError, match="field_2_D"):
+        ps.field_2 = counts
+    window = grid_w * (alpha * random_counts)
+    amplitude = (
+        np.prod(box_len)
+        / counts.size
+        * np.sum(grid_w**2 * (counts + alpha**2 * random_counts))
+        / np.sum(window**2)
+    )
+    assert np.allclose(ps.shot_noise_2, amplitude * correction)
+    ps.field_2_has_random = False
+    assert ps.mean_center_2 is True
+    assert ps.unitless_2 is True
+
+    ps.field_1_D = counts
+    ps.field_1_R = random_counts
+    ps.field_1_alpha = alpha
+    ps.field_1_has_random = True
+    ps.weights_field_1 = alpha * random_counts
+    ps.weights_1 = grid_w
+    assert np.allclose(ps.field_1, counts - alpha * random_counts)
+    assert ps.mean_center_1 is False
+    assert ps.unitless_1 is False
+    assert np.allclose(ps.shot_noise_1, amplitude * correction)
 
 
 def test_grid_gal(test_gal_fits, test_W):

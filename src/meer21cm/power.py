@@ -25,6 +25,7 @@ from .grid import (
     interlace_two_fields,
     minimum_enclosing_box_of_lightcone,
     project_particle_to_regular_grid,
+    shot_noise_correction_from_gridding,
 )
 from .model import ModelPowerSpectrum
 from .power_ops import (
@@ -38,6 +39,7 @@ from .power_ops import (
     get_power_spectrum,
     get_renormed_field,
     get_shot_noise,
+    get_shot_noise_counts,
     get_shot_noise_galaxy,
     get_vec_mode,
     get_x_vector,
@@ -81,6 +83,7 @@ __all__ = [
     "get_power_spectrum",
     "get_renormed_field",
     "get_shot_noise",
+    "get_shot_noise_counts",
     "get_shot_noise_galaxy",
     "get_vec_mode",
     "get_x_vector",
@@ -637,6 +640,76 @@ class PowerSpectrum(LightconeGriddingMixin, FieldPowerSpectrum, ModelPowerSpectr
             * step_window_attenuation(k_para, sampling_resol[2], p)
         )
         return B_sampling
+
+    def _shot_noise_tracer(self, tracer):
+        """Poisson shot noise of one tracer, including the mass-assignment factor.
+
+        Parameters
+        ----------
+        tracer : int
+            ``1`` or ``2``.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`P_{\\rm shot}(\\mathbf{k})` on the Fourier grid. None when
+            that tracer has no field. The zero mode is the white amplitude,
+            because :math:`C_{\\rm MAS}(0) = 1`.
+        """
+        if tracer not in (1, 2):
+            raise ValueError("tracer must be 1 or 2")
+        data = getattr(self, f"field_{tracer}_D")
+        if data is None:
+            data = getattr(self, f"field_{tracer}")
+        if data is None:
+            return None
+        amplitude = get_shot_noise_counts(
+            data,
+            self.box_len,
+            weights_grid=self.get_weights_none_to_one(f"weights_{tracer}"),
+            weights_field=self.get_weights_none_to_one(f"weights_field_{tracer}"),
+            random_counts=getattr(self, f"field_{tracer}_R"),
+            alpha=getattr(self, f"field_{tracer}_alpha"),
+            unitless=bool(getattr(self, f"unitless_{tracer}")),
+        )
+        correction = shot_noise_correction_from_gridding(
+            np.asarray(self.box_ndim), self.grid_scheme
+        )
+        return amplitude * correction
+
+    @property
+    def shot_noise_1(self):
+        """Poisson shot noise of tracer 1 on the Fourier grid.
+
+        Uses ``field_1_D`` when it is set, otherwise ``field_1``, together
+        with ``weights_1``, ``weights_field_1``, ``field_1_R`` and
+        ``field_1_alpha``. ``unitless_1`` selects the mean-divided count
+        formula. The result includes :math:`C_{\\rm MAS}(\\mathbf{k})`.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`P_{\\rm shot}(\\mathbf{k})`. None when tracer 1 has no field.
+        """
+        return self._shot_noise_tracer(1)
+
+    @property
+    def shot_noise_2(self):
+        """Poisson shot noise of tracer 2 on the Fourier grid.
+
+        Uses ``field_2_D`` when it is set, otherwise ``field_2``, together
+        with ``weights_2``, ``weights_field_2``, ``field_2_R`` and
+        ``field_2_alpha``. ``unitless_2`` selects the mean-divided count
+        formula. With ``field_2_has_random`` True the amplitude is that of
+        :math:`F = D - \\alpha R`. The result includes
+        :math:`C_{\\rm MAS}(\\mathbf{k})`.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`P_{\\rm shot}(\\mathbf{k})`. None when tracer 2 has no field.
+        """
+        return self._shot_noise_tracer(2)
 
     def gridding_compensation(self):
         """

@@ -219,6 +219,86 @@ def fkp_count_field(data_counts, random_counts):
     return data_counts - alpha * random_counts, alpha
 
 
+def get_shot_noise_counts(
+    data_counts,
+    box_len,
+    weights_grid=None,
+    weights_field=None,
+    random_counts=None,
+    alpha=0.0,
+    unitless=False,
+):
+    """
+    Poisson shot-noise amplitude of a painted count field.
+
+    .. math::
+
+        P_{\\rm shot}
+        = \\frac{V}{N}
+        \\frac{\\sum_c g_c^2 (D_c + \\alpha^2 R_c)}{\\sum_c W_c^2}
+        \\left(\\frac{\\bar\\mu_g^2}{m^2}\\right)^{u}
+
+    with :math:`W = g w_f`, :math:`m = \\sum g D / \\sum g`,
+    :math:`\\bar\\mu_g = \\sum W / \\sum g`, and :math:`u = 1` when
+    ``unitless`` is true. :math:`u = 0` leaves the amplitude matched to a
+    field that is not divided by its mean, including :math:`F = D - \\alpha R`
+    with :math:`w_f = \\alpha R`. The mass-assignment factor
+    :math:`C_{\\rm MAS}(\\mathbf{k})` is not included.
+
+    Parameters
+    ----------
+    data_counts : array
+        Painted data counts :math:`D`.
+    box_len : array
+        Comoving box lengths. Their product is :math:`V`.
+    weights_grid : array, optional
+        Grid weight :math:`g`. ``None`` is 1.
+    weights_field : array, optional
+        Field weight :math:`w_f`. ``None`` is 1.
+    random_counts : array, optional
+        Painted random counts :math:`R`. ``None`` contributes 0.
+    alpha : float, default 0
+        :math:`\\alpha = \\sum D / \\sum R`.
+    unitless : bool, default False
+        True applies the factor from dividing the counts by their mean.
+
+    Returns
+    -------
+    amplitude : float
+        The scalar :math:`P_{\\rm shot}` before :math:`C_{\\rm MAS}(\\mathbf{k})`.
+    """
+    data_counts = np.asarray(data_counts)
+    real_dtype = real_dtype_from_array(data_counts)
+    data_counts = data_counts.astype(real_dtype, copy=False)
+    if weights_grid is None:
+        weights_grid = np.ones(data_counts.shape, dtype=real_dtype)
+    if weights_field is None:
+        weights_field = np.ones(data_counts.shape, dtype=real_dtype)
+    weights_grid = np.asarray(weights_grid, dtype=real_dtype)
+    weights_field = np.asarray(weights_field, dtype=real_dtype)
+    if random_counts is None:
+        random_counts = np.zeros((), dtype=real_dtype)
+    else:
+        random_counts = np.asarray(random_counts, dtype=real_dtype)
+    alpha = np.asarray(alpha, dtype=real_dtype)
+    window = weights_grid * weights_field
+    poisson = data_counts + (alpha**2) * random_counts
+    numer = np.sum(weights_grid**2 * poisson)
+    denom = np.sum(window**2)
+    amplitude = (
+        np.prod(np.asarray(box_len, dtype=real_dtype))
+        / data_counts.size
+        * numer
+        / denom
+    )
+    if unitless:
+        grid_sum = np.sum(weights_grid)
+        mean_count = np.sum(weights_grid * data_counts) / grid_sum
+        mean_window = np.sum(window) / grid_sum
+        amplitude = amplitude * (mean_window**2) / (mean_count**2)
+    return amplitude
+
+
 def get_shot_noise_galaxy(
     gal_count,
     box_len,
@@ -226,28 +306,37 @@ def get_shot_noise_galaxy(
     weights_field=None,
 ):
     """
-    Calculate the shot noise of a galaxy number count field.
+    Shot-noise amplitude of a mean-divided galaxy count field.
+
+    This is :func:`get_shot_noise_counts` with ``unitless=True``,
+    ``alpha=0`` and no random catalogue. It does not include
+    :math:`C_{\\rm MAS}(\\mathbf{k})`.
+
+    Parameters
+    ----------
+    gal_count : array
+        Painted galaxy counts :math:`D`.
+    box_len : array
+        Comoving box lengths.
+    weights_grid : array, optional
+        Grid weight :math:`g`. ``None`` is 1.
+    weights_field : array, optional
+        Field weight :math:`w_f`. ``None`` is 1.
+
+    Returns
+    -------
+    amplitude : float
+        Scalar :math:`P_{\\rm shot}` of the unitless count estimator.
     """
-    gal_count = np.asarray(gal_count)
-    real_dtype = real_dtype_from_array(gal_count)
-    if weights_grid is None:
-        weights_grid = np.ones(gal_count.shape, dtype=real_dtype)
-    if weights_field is None:
-        weights_field = np.ones(gal_count.shape, dtype=real_dtype)
-    weights_grid = np.asarray(weights_grid, dtype=real_dtype)
-    weights_field = np.asarray(weights_field, dtype=real_dtype)
-    w_g_n = (weights_grid * gal_count).sum() / gal_count.sum()
-    w_2_g_n = (weights_grid**2 * gal_count).sum() / gal_count.sum()
-    wfwg_2_v = ((weights_field * weights_grid) ** 2).mean()
-    wfwg_v = (weights_field * weights_grid).mean()
-    shot_noise = (
-        np.prod(box_len)
-        / gal_count.sum()
-        * w_2_g_n
-        / w_g_n**2
-        * (wfwg_v**2 / wfwg_2_v)
+    return get_shot_noise_counts(
+        gal_count,
+        box_len,
+        weights_grid=weights_grid,
+        weights_field=weights_field,
+        random_counts=None,
+        alpha=0.0,
+        unitless=True,
     )
-    return shot_noise
 
 
 def get_shot_noise(

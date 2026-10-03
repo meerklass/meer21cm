@@ -336,9 +336,6 @@ class Specification:
         self._dec_rand = None
         self._z_rand = None
         self._weights_rand = None
-        self.fkp_alpha = None
-        self.fkp_data_counts = None
-        self.fkp_random_counts = None
         self.weighting = weighting
         self._sigma_beam_ch_in_mpc = None
         if data is None:

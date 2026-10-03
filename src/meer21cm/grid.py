@@ -1210,18 +1210,18 @@ class LightconeGriddingMixin:
         Paint galaxies onto the rectangular box.
 
         With ``construct_fkp=False`` the stored field is the painted data
-        counts :math:`D`. With ``construct_fkp=True`` it is the
-        Feldman–Kaiser–Peacock field
+        counts :math:`D`. With ``construct_fkp=True``, ``field_2_has_random``
+        is set and ``field_2`` returns
 
         .. math::
 
             F = D - \\alpha R, \\qquad \\alpha = \\sum D / \\sum R,
 
-        where :math:`R` is the painted random catalogue. ``field_2`` is
-        :math:`F`. The selection passed to the power spectrum is
-        ``weights_field_2`` :math:`= \\alpha R` and ``weights_grid_2``
-        :math:`= 1`, with no mean subtraction, so the transform is of
-        :math:`F` and the normalisation divides by :math:`\\sum (\\alpha R)^2`.
+        from ``field_2_D``, ``field_2_R`` and ``field_2_alpha``. The selection
+        passed to the power spectrum is ``weights_field_2`` :math:`= \\alpha R`
+        and ``weights_grid_2`` :math:`= 1`, with no mean subtraction, so the
+        transform is of :math:`F` and the normalisation divides by
+        :math:`\\sum (\\alpha R)^2`.
 
         ``weights=None`` paints unit mass. When the data positions are taken
         from the object, a set ``weights_gal`` is used. Random positions and
@@ -1280,18 +1280,20 @@ class LightconeGriddingMixin:
         )
         rand_pos = self._sky_positions_in_box(rand_ra, rand_dec, rand_freq, flat_sky)
         random_counts = self._cached_random_paint(rand_pos, rand_weights)
-        field, alpha = fkp_count_field(gal_map_rg, random_counts)
         real_dtype = self.real_dtype
-        self.field_2 = np.asarray(field, dtype=real_dtype)
-        self.fkp_alpha = float(alpha)
-        self.fkp_data_counts = np.asarray(gal_map_rg, dtype=real_dtype)
-        self.fkp_random_counts = np.asarray(random_counts, dtype=real_dtype)
+        data_counts = np.asarray(gal_map_rg, dtype=real_dtype)
+        random_counts = np.asarray(random_counts, dtype=real_dtype)
+        _field, alpha = fkp_count_field(data_counts, random_counts)
+        self.field_2_D = data_counts
+        self.field_2_R = random_counts
+        self.field_2_alpha = float(alpha)
+        self.field_2_has_random = True
         self.weights_field_2 = np.asarray(alpha * random_counts, dtype=real_dtype)
-        self.weights_grid_2 = np.ones_like(self.field_2, dtype=real_dtype)
+        self.weights_grid_2 = np.ones(data_counts.shape, dtype=real_dtype)
         self.mean_center_2 = False
         self.unitless_2 = False
         self._disable_galaxy_observational_weights()
-        return self.field_2, self.weights_field_2, self.fkp_data_counts
+        return self.field_2, self.weights_field_2, self.field_2_D
 
     def _store_galaxy_counts(self, gal_map_rg, gal_weights_rg):
         """Store painted galaxy counts as tracer 2.
@@ -1308,6 +1310,10 @@ class LightconeGriddingMixin:
         None
         """
         real_dtype = self.real_dtype
+        self.field_2_has_random = False
+        self.field_2_D = None
+        self.field_2_R = None
+        self.field_2_alpha = 0.0
         self.field_2 = gal_map_rg
         weights_g = (self.counts_in_box > 0).astype(real_dtype)
         self.weights_field_2 = weights_g
