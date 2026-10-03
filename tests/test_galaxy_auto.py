@@ -7,6 +7,7 @@ from astropy.table import Table
 from scipy.interpolate import interp1d
 
 from meer21cm import MockSimulation, PowerSpectrum, Specification
+from meer21cm.mock import selection_sampling_weight
 from meer21cm.io import read_catalogue_fits
 from meer21cm.grid import shot_noise_correction_from_gridding
 from meer21cm.power import get_shot_noise_galaxy
@@ -582,3 +583,84 @@ def test_mock_tracer_grid():
     avg_deviation = ((pmap_1d.mean(0) - pmod_1d.mean(0)) / pmap_1d.std(0)).mean()
     # 3 sigma
     assert np.abs(avg_deviation) < 3
+
+
+def test_galaxy_selection_count_and_legacy_ratio():
+    mock = MockSimulation(
+        survey="meerklass_2021",
+        band="L",
+        ra_range=(334, 357),
+        dec_range=(-35, -26.5),
+        tracer_bias_1=1.5,
+        num_discrete_source=100,
+    )
+    mock.get_enclosing_box()
+    assert mock.galaxy_selection is None
+    legacy = mock.num_discrete_source * np.prod(mock.box_len) / mock.survey_volume
+    assert mock.tot_num_source_in_box == pytest.approx(legacy)
+    density = np.full(tuple(int(n) for n in mock.box_ndim), 1.0e-4)
+    weight, total = selection_sampling_weight(density, mock.box_resol)
+    assert np.allclose(weight, 1.0)
+    assert total == pytest.approx(1.0e-4 * np.prod(mock.box_resol) * density.size)
+    mock.galaxy_selection = density
+    assert mock.tot_num_source_in_box == pytest.approx(total)
+    mock.galaxy_selection = None
+    assert mock.tot_num_source_in_box == pytest.approx(legacy)
+
+
+def test_random_selection_cache(tmp_path):
+    from astropy.cosmology import Planck18
+    from astropy.table import Table
+
+    from meer21cm.io import selection_from_random_files
+
+    random_path = tmp_path / "random.fits"
+    data_path = tmp_path / "data.fits"
+    Table(
+        {
+            "RA": [10.0, 10.0, 10.2],
+            "DEC": [0.0, 0.1, 0.0],
+            "Z": [0.61, 0.72, 0.68],
+            "WEIGHT": [1.0, 1.0, 2.0],
+        }
+    ).write(random_path)
+    Table(
+        {
+            "RA": [10.0],
+            "DEC": [0.0],
+            "Z": [0.65],
+            "WEIGHT": [4.0],
+        }
+    ).write(data_path)
+    result = selection_from_random_files(
+        [random_path],
+        ra_range=(0.0, 20.0),
+        dec_range=(-5.0, 5.0),
+        z_edges=np.linspace(0.6, 0.8, 5),
+        cosmo=Planck18,
+        data_path=data_path,
+        nside=8,
+        random_density_deg2=1.0,
+    )
+    assert result["angular"].shape == (hp_npix(8),)
+    assert result["n_w"].shape == (4,)
+    assert result["data_weight"] == pytest.approx(4.0)
+    assert result["random_weight"] == pytest.approx(4.0)
+    assert np.sum(result["angular"]) > 0
+    mock = MockSimulation(
+        survey="meerklass_2021",
+        band="L",
+        ra_range=(334, 357),
+        dec_range=(-35, -26.5),
+        num_discrete_source=10,
+    )
+    mock._sky_selection_density = np.zeros(3)
+    mock._store_random_selection(result)
+    assert mock._sky_selection_density is None
+    assert mock.random_selection["nside"] == 8
+    assert "_sky_selection_density" in mock.selection_dep_attr
+    assert "_sky_selection_density" in mock.box_dep_attr
+
+
+def hp_npix(nside):
+    return 12 * int(nside) ** 2
