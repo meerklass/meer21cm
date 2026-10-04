@@ -38,6 +38,34 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def selection_sampling_weight(density_mpc3, box_resol):
+    """Dimensionless sampling weight of a comoving selection density.
+
+    Parameters
+    ----------
+    density_mpc3 : array
+        Selection density :math:`S` in :math:`\\mathrm{Mpc}^{-3}`.
+    box_resol : array
+        Simulation cell size along each axis, in Mpc.
+
+    Returns
+    -------
+    weight : ndarray
+        :math:`S/\\langle S\\rangle`. Zero when the mean density is zero.
+    total : float
+        Expected count :math:`\\sum_c S_c\\,\\Delta V`.
+    """
+    density = np.asarray(density_mpc3, dtype=float)
+    cell_volume = float(np.prod(np.asarray(box_resol, dtype=float)))
+    total = float(np.sum(density) * cell_volume)
+    mean_density = float(np.mean(density))
+    if mean_density == 0.0:
+        weight = np.zeros(density.shape, dtype=float)
+    else:
+        weight = density / mean_density
+    return weight, total
+
+
 class MockSimulation(PowerSpectrum):
     """
     The class for generating mock intensity mapping data cube and galaxy catalogues for cross-correlation.
@@ -114,6 +142,8 @@ class MockSimulation(PowerSpectrum):
             "_mock_amp_2",
             "_tot_num_source_in_box",
             "_dndz_renorm",
+            "_galaxy_selection",
+            "_sky_selection_density",
         ]
         for attr in init_attr:
             setattr(self, attr, None)
@@ -252,6 +282,8 @@ class MockSimulation(PowerSpectrum):
         :meth:`get_tot_num_source_in_box` and only recomputed when one of its
         dependencies (tagged ``cosmo_model``, ``nu``, ``box`` or ``discrete``) changes.
         The companion redshift sampling weight is :attr:`dndz_renorm`.
+        When :attr:`galaxy_selection` is set, the value is instead
+        :math:`\\sum_c S_c\\,\\Delta V`.
         """
         if self._tot_num_source_in_box is None:
             self.get_tot_num_source_in_box()
@@ -264,6 +296,11 @@ class MockSimulation(PowerSpectrum):
         logger.info(
             f"invoking {inspect.currentframe().f_code.co_name} to set _tot_num_source_in_box"
         )
+        selection = self._active_selection()
+        if selection is not None:
+            _weight, total = self._selection_weight(selection)
+            self._tot_num_source_in_box = total
+            return
         if self.flat_sky:
             ratio = (
                 np.prod(np.array(self.data.shape) + 2 * np.array(self.flat_sky_padding))
@@ -439,6 +476,191 @@ class MockSimulation(PowerSpectrum):
             f"cleaning cache of {self.discrete_dep_attr} due to resetting discrete_source_dndz"
         )
         self.clean_cache(self.discrete_dep_attr)
+
+    @property
+    def galaxy_selection(self):
+        """Comoving selection density on the simulation box.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`S(\\mathbf{x})` in :math:`\\mathrm{Mpc}^{-3}`, with the shape of the
+            simulation box. ``None`` samples with ``discrete_source_dndz`` and
+            ``num_discrete_source``.
+        """
+        return self._galaxy_selection
+
+    @galaxy_selection.setter
+    def galaxy_selection(self, value):
+        if value is not None:
+            value = np.asarray(value, dtype=float)
+        self._galaxy_selection = value
+        logger.debug(
+            "cleaning cache of %s due to resetting galaxy_selection",
+            self.discrete_dep_attr,
+        )
+        self.clean_cache(self.discrete_dep_attr)
+
+    def _active_selection(self):
+        """Selection density used for sampling, or ``None``.
+
+        An array assigned to ``galaxy_selection`` wins. Otherwise the
+        density is painted from the stored HEALPix selection when one has
+        been read.
+
+        Returns
+        -------
+        ndarray or None
+            Comoving density on the simulation box, in :math:`\\mathrm{Mpc}^{-3}`.
+        """
+        if self._galaxy_selection is not None:
+            return self._galaxy_selection
+        if getattr(self, "_selection_angular", None) is not None:
+            return self.sky_selection_density
+        return None
+
+    @property
+    @tagging("box", "selection", "nu", "cosmo_model")
+    def sky_selection_density(self):
+        """:math:`n_w(z)\\,A(\\theta)` on the simulation-cell centres.
+
+        The HEALPix value is read at the centre of each cell. Nothing is
+        deposited on the intensity-mapping pixels. The array is dropped when
+        the box, the frequency axis, the cosmology or the stored selection
+        changes.
+
+        Returns
+        -------
+        ndarray or None
+            Comoving density in :math:`\\mathrm{Mpc}^{-3}`. ``None`` when no
+            random selection has been stored.
+        """
+        if self._selection_angular is None:
+            return None
+        if self._sky_selection_density is None:
+            self._sky_selection_density = self.selection_density_from_sky(
+                self._selection_n_of_z(),
+                angular=self._selection_angular_at(),
+            )
+        return self._sky_selection_density
+
+    def _selection_n_of_z(self):
+        """Step function :math:`n_w(z)` from the stored shells.
+
+        Returns
+        -------
+        callable
+            Density in :math:`\\mathrm{Mpc}^{-3}`. Zero outside the shells.
+        """
+        edges = np.asarray(self._selection_z_edges, dtype=float)
+        values = np.asarray(self._selection_n_w, dtype=float)
+
+        def n_of_z(redshift):
+            redshift = np.asarray(redshift, dtype=float)
+            index = np.digitize(redshift, edges) - 1
+            out = np.zeros(redshift.shape, dtype=float)
+            ok = (index >= 0) & (index < values.size)
+            out[ok] = values[index[ok]]
+            return out
+
+        return n_of_z
+
+    def _selection_angular_at(self):
+        """HEALPix lookup of the stored angular factor.
+
+        Returns
+        -------
+        callable
+            :math:`A` at right ascension and declination, in degrees.
+        """
+        import healpy as hp
+
+        nside = int(self._selection_nside)
+        amap = np.asarray(self._selection_angular, dtype=float)
+
+        def angular(ra, dec):
+            pix = hp.ang2pix(nside, ra, dec, lonlat=True)
+            return amap[pix]
+
+        return angular
+
+    def _selection_weight(self, selection=None):
+        """Sampling weight and enclosed count of a selection density.
+
+        Parameters
+        ----------
+        selection : array, optional
+            Comoving density. ``None`` uses :meth:`_active_selection`.
+
+        Returns
+        -------
+        weight : ndarray
+            :math:`S/\\langle S\\rangle` on the simulation box.
+        total : float
+            :math:`\\sum_c S_c\\,\\Delta V`.
+
+        Raises
+        ------
+        ValueError
+            If the density does not have the simulation-box shape.
+        """
+        if selection is None:
+            selection = self._active_selection()
+        selection = np.asarray(selection, dtype=float)
+        expected = tuple(int(n) for n in np.asarray(self.box_ndim))
+        if selection.shape != expected:
+            raise ValueError(
+                f"galaxy_selection shape {selection.shape} does not match "
+                f"the simulation box {expected}"
+            )
+        return selection_sampling_weight(selection, self.box_resol)
+
+    def selection_density_from_sky(self, n_of_z, angular=None):
+        """Paint :math:`n(z)\\,A(\\theta)` onto the simulation box.
+
+        Each cell is evaluated at its centre. ``angular`` is omitted for a
+        uniform footprint: 1 inside the survey right ascension and
+        declination window, and 0 outside.
+
+        Parameters
+        ----------
+        n_of_z : callable
+            Comoving density in :math:`\\mathrm{Mpc}^{-3}` as a function of redshift.
+        angular : callable, optional
+            Dimensionless angular factor of right ascension and declination,
+            in degrees. ``None`` is the survey window.
+
+        Returns
+        -------
+        ndarray
+            Selection density on the simulation box, in :math:`\\mathrm{Mpc}^{-3}`.
+        """
+        if self.box_origin is None:
+            self.get_enclosing_box()
+        density = np.zeros(tuple(int(n) for n in self.box_ndim), dtype=float)
+        for z_sel, _chunk in self._iter_field_los_chunks(density):
+            xx, yy, zz = np.meshgrid(
+                self.x_vec[0],
+                self.x_vec[1],
+                self.x_vec[2][z_sel],
+                indexing="ij",
+            )
+            pos = np.stack(
+                (xx.ravel(), yy.ravel(), zz.ravel()),
+                axis=1,
+            )
+            ra, dec, redshift, _distance = self.ra_dec_z_for_coord_in_box(pos)
+            if angular is None:
+                amp = np.asarray(
+                    angle_in_range(ra, self.ra_range[0], self.ra_range[1]),
+                    dtype=float,
+                )
+                amp *= (dec > self.dec_range[0]) & (dec < self.dec_range[1])
+            else:
+                amp = np.asarray(angular(ra, dec), dtype=float)
+            radial = np.asarray(n_of_z(redshift), dtype=float)
+            density[..., z_sel] = (radial * amp).reshape(xx.shape)
+        return density
 
     @property
     def discrete_base_field(self):
@@ -932,16 +1154,10 @@ class MockSimulation(PowerSpectrum):
             The tracer positions in the rectangular box.
         """
         rng = default_rng(self.seed)
-        # note that `_mock...` does not have mean amplitude so this is what
-        # we should be using instead of `mock...`, this is just to invoke
-        # the simulation
-        getattr(self, "mock_tracer_field_" + str(tracer_i))
-        # now actually getting the underlying overdensity
-        # if self.rsd_from_field:
-        # density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i) + "_r") + 1
-        # else:
-        #    density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i)) + 1
+        # `_mock_tracer_field` is the unitless contrast. Touching the public
+        # property builds it when the caller did not pass a field.
         if density_field is None:
+            getattr(self, "mock_tracer_field_" + str(tracer_i))
             density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i))
         density_field = np.array(density_field, copy=True)
         density_field += np.asarray(1.0, dtype=density_field.dtype)
@@ -960,9 +1176,18 @@ class MockSimulation(PowerSpectrum):
         else:
             density_field[:] = 0
         tracer_positions_list = []
-        dndz_renorm_fnc = self.dndz_renorm
+        active = self._active_selection()
+        if active is None:
+            dndz_renorm_fnc = self.dndz_renorm
+            selection_weight = None
+        else:
+            dndz_renorm_fnc = None
+            selection_weight, _total = self._selection_weight(active)
         for z_sel, density_chunk in self._iter_field_los_chunks(density_field):
-            dndz_prob_chunk = dndz_renorm_fnc(self.box_voxel_redshift[..., z_sel])
+            if selection_weight is None:
+                dndz_prob_chunk = dndz_renorm_fnc(self.box_voxel_redshift[..., z_sel])
+            else:
+                dndz_prob_chunk = selection_weight[..., z_sel]
             tracer_positions_i = self._sample_tracer_positions_from_density_chunk(
                 density_chunk=density_chunk,
                 dndz_prob_chunk=dndz_prob_chunk,

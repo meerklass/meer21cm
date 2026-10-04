@@ -1,10 +1,11 @@
 """
-Module for reading and pre-processing MeerKLASS maps.
+Module for reading and pre-processing MeerKLASS maps and galaxy catalogues.
 """
 
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
+import healpy as hp
 from .util import get_wcs_coor
 from . import telescope
 import pickle
@@ -295,3 +296,337 @@ def read_map(
     )
     ra, dec = get_wcs_coor(wproj, xx, yy)
     return map_data, counts, map_has_sampling, ra, dec, nu, wproj
+
+
+def read_catalogue_fits(
+    paths,
+    ra_col="RA",
+    dec_col="DEC",
+    z_col="Z",
+    weight_col=None,
+):
+    """
+    Read a list of catalogue FITS files and concatenate them.
+
+    ``weight_col=None`` assigns unit weight to every row. ``WEIGHT_FKP`` is
+    not read.
+
+    Parameters
+    ----------
+    paths : sequence of path
+        FITS tables. Each must have a binary table in HDU 1.
+    ra_col, dec_col, z_col : str
+        Column names for right ascension, declination and redshift.
+    weight_col : str, optional
+        Column of per-object weights. ``None`` uses unit weight.
+
+    Returns
+    -------
+    ra, dec, z, weight : ndarray
+        Concatenated columns. All four are empty if ``paths`` is empty.
+    """
+    ra_parts = []
+    dec_parts = []
+    z_parts = []
+    w_parts = []
+    for path in paths:
+        with fits.open(path, memmap=True) as hdul:
+            table = hdul[1].data
+            ra_i = np.asarray(table[ra_col], dtype=float)
+            ra_parts.append(ra_i)
+            dec_parts.append(np.asarray(table[dec_col], dtype=float))
+            z_parts.append(np.asarray(table[z_col], dtype=float))
+            if weight_col is None:
+                w_parts.append(np.ones(ra_i.size, dtype=float))
+            else:
+                w_parts.append(np.asarray(table[weight_col], dtype=float))
+    if not ra_parts:
+        empty = np.zeros(0, dtype=float)
+        return empty, empty, empty, empty
+    return (
+        np.concatenate(ra_parts),
+        np.concatenate(dec_parts),
+        np.concatenate(z_parts),
+        np.concatenate(w_parts),
+    )
+
+
+def _native_float(values):
+    """Copy a FITS numeric column into a native-endian float array.
+
+    Parameters
+    ----------
+    values : array
+        Column from a memory-mapped FITS table.
+
+    Returns
+    -------
+    ndarray
+        Float copy. Big-endian columns are byte-swapped.
+    """
+    values = np.asarray(values)
+    if values.dtype.byteorder == ">":
+        values = values.astype(values.dtype.newbyteorder("="))
+    return np.asarray(values, dtype=float)
+
+
+def _source_weight(table, columns):
+    """Product of the shuffled source-weight columns.
+
+    Parameters
+    ----------
+    table : FITS table
+        Rows of one catalogue.
+    columns : sequence of str
+        Column names whose product is :math:`w'_{\\rm tot}`. Missing columns
+        are skipped. If none are present the weight is 1.
+
+    Returns
+    -------
+    ndarray
+        One weight per row.
+    """
+    names = set(table.columns.names)
+    present = [name for name in columns if name in names]
+    if not present:
+        return np.ones(len(table), dtype=float)
+    weight = np.ones(len(table), dtype=float)
+    for name in present:
+        weight *= _native_float(table[name])
+    return weight
+
+
+def selection_from_random_files(
+    random_paths,
+    ra_range,
+    dec_range,
+    z_edges,
+    cosmo,
+    data_path=None,
+    nside=512,
+    random_density_deg2=2500.0,
+    source_weight_columns=("WEIGHT_COMP", "WEIGHT_SYS", "WEIGHT_ZFAIL"),
+):
+    """HEALPix angular factor and radial density from random catalogues.
+
+    :math:`A` is ``WEIGHT`` divided by the shuffled source weight, summed in
+    HEALPix pixels and divided by the nominal random density. :math:`n_w(z)`
+    is ``WEIGHT / A`` per comoving shell of the pixels where :math:`A > 0`.
+    If a data catalogue is given, :math:`n_w` is scaled so that
+    :math:`\\int n_w A\\,{\\rm d}V` equals the summed data ``WEIGHT``.
+
+    Parameters
+    ----------
+    random_paths : sequence of path
+        FITS random catalogues with ``RA``, ``DEC``, ``Z`` and ``WEIGHT``.
+    ra_range, dec_range : pair of float
+        Sky window in degrees. Rows outside it are ignored.
+    z_edges : array
+        Redshift edges of the radial shells. :math:`A` uses every redshift
+        in the sky window. :math:`n_w` uses shells inside these edges.
+    cosmo : cosmology
+        Astropy-like cosmology. Shell volumes use ``comoving_distance``.
+    data_path : path, optional
+        Data catalogue. ``None`` leaves :math:`n_w` on the random normalisation.
+    nside : int, default 512
+        HEALPix resolution of :math:`A`.
+    random_density_deg2 : float, default 2500
+        Nominal random density of one file, in deg\\(:sup:`-2`\\), before vetoes.
+    source_weight_columns : sequence of str
+        Columns multiplied to give the shuffled source weight.
+
+    Returns
+    -------
+    dict
+        ``angular`` (HEALPix), ``n_w``, ``z_edges``, ``nside``,
+        ``data_weight``, ``random_weight`` and ``scale``.
+    """
+    z_edges = np.asarray(z_edges, dtype=float)
+    n_pix = hp.nside2npix(int(nside))
+    sum_ratio = np.zeros(n_pix, dtype=float)
+    for path in random_paths:
+        _accumulate_angular(
+            sum_ratio,
+            path,
+            ra_range,
+            dec_range,
+            nside,
+            source_weight_columns,
+        )
+    omega_deg = float(hp.nside2pixarea(int(nside), degrees=True))
+    angular = sum_ratio / (
+        float(random_density_deg2) * len(list(random_paths)) * omega_deg
+    )
+    footprint = angular > 0
+    sum_over_a = np.zeros(z_edges.size - 1, dtype=float)
+    random_weight = 0.0
+    for path in random_paths:
+        shells, weight_sum = _accumulate_radial(
+            path,
+            ra_range,
+            dec_range,
+            z_edges,
+            nside,
+            angular,
+        )
+        sum_over_a += shells
+        random_weight += weight_sum
+    if data_path is None:
+        data_weight = random_weight
+    else:
+        _shells, data_weight = _accumulate_radial(
+            data_path,
+            ra_range,
+            dec_range,
+            z_edges,
+            nside,
+            np.ones(n_pix, dtype=float),
+        )
+    volume = _shell_volume(z_edges, int(footprint.sum()), cosmo, nside)
+    n_w = sum_over_a / np.maximum(volume, 1e-30)
+    dvol_pix = volume / max(int(footprint.sum()), 1)
+    integral = float(np.sum(n_w * dvol_pix * angular.sum()))
+    scale = float(data_weight) / integral if integral > 0.0 else 1.0
+    n_w = n_w * scale
+    return {
+        "angular": angular,
+        "n_w": n_w,
+        "z_edges": z_edges,
+        "nside": int(nside),
+        "data_weight": float(data_weight),
+        "random_weight": float(random_weight),
+        "scale": scale,
+    }
+
+
+def _sky_rows(table, ra_range, dec_range):
+    """Rows inside a right ascension and declination window.
+
+    Parameters
+    ----------
+    table : FITS table
+        Catalogue with ``RA`` and ``DEC``.
+    ra_range, dec_range : pair of float
+        Window in degrees.
+
+    Returns
+    -------
+    ndarray
+        Boolean mask, one entry per row.
+    """
+    ra = _native_float(table["RA"])
+    dec = _native_float(table["DEC"])
+    return (
+        (ra >= ra_range[0])
+        & (ra <= ra_range[1])
+        & (dec >= dec_range[0])
+        & (dec <= dec_range[1])
+    )
+
+
+def _accumulate_angular(sum_ratio, path, ra_range, dec_range, nside, source_columns):
+    """Add ``WEIGHT / w'_tot`` of one file into HEALPix pixels.
+
+    Parameters
+    ----------
+    sum_ratio : ndarray
+        Pixel sums, updated in place.
+    path : path
+        FITS catalogue.
+    ra_range, dec_range : pair of float
+        Sky window in degrees.
+    nside : int
+        HEALPix resolution.
+    source_columns : sequence of str
+        Columns multiplied into the shuffled source weight.
+
+    Returns
+    -------
+    None
+    """
+    with fits.open(path, memmap=True) as hdul:
+        table = hdul[1].data
+        keep = _sky_rows(table, ra_range, dec_range)
+        weight = _native_float(table["WEIGHT"])
+        source = _source_weight(table, source_columns)
+        ok = keep & np.isfinite(weight) & np.isfinite(source) & (source > 0)
+        pix = hp.ang2pix(
+            int(nside),
+            _native_float(table["RA"])[ok],
+            _native_float(table["DEC"])[ok],
+            lonlat=True,
+        )
+        np.add.at(sum_ratio, pix, weight[ok] / source[ok])
+
+
+def _accumulate_radial(path, ra_range, dec_range, z_edges, nside, angular):
+    """Sum ``WEIGHT / A`` in redshift shells for one catalogue.
+
+    Parameters
+    ----------
+    path : path
+        FITS catalogue.
+    ra_range, dec_range : pair of float
+        Sky window in degrees.
+    z_edges : array
+        Redshift shell edges.
+    nside : int
+        HEALPix resolution of ``angular``.
+    angular : ndarray
+        HEALPix :math:`A`. A value of 1 sums ``WEIGHT`` itself.
+
+    Returns
+    -------
+    shells : ndarray
+        ``WEIGHT / A`` in each shell.
+    weight_sum : float
+        Sum of ``WEIGHT`` inside the sky window and the redshift edges.
+    """
+    shells = np.zeros(len(z_edges) - 1, dtype=float)
+    with fits.open(path, memmap=True) as hdul:
+        table = hdul[1].data
+        keep = _sky_rows(table, ra_range, dec_range)
+        redshift = _native_float(table["Z"])
+        weight = _native_float(table["WEIGHT"])
+        in_z = (
+            keep
+            & (redshift >= z_edges[0])
+            & (redshift < z_edges[-1])
+            & np.isfinite(weight)
+        )
+        pix = hp.ang2pix(
+            int(nside),
+            _native_float(table["RA"])[in_z],
+            _native_float(table["DEC"])[in_z],
+            lonlat=True,
+        )
+        amp = np.asarray(angular, dtype=float)[pix]
+        use = amp > 0
+        index = np.digitize(redshift[in_z][use], z_edges) - 1
+        np.add.at(shells, index, weight[in_z][use] / amp[use])
+        weight_sum = float(weight[in_z].sum())
+    return shells, weight_sum
+
+
+def _shell_volume(z_edges, n_pix, cosmo, nside):
+    """Comoving volume of the footprint in each redshift shell.
+
+    Parameters
+    ----------
+    z_edges : array
+        Redshift edges.
+    n_pix : int
+        Number of HEALPix pixels with :math:`A > 0`.
+    cosmo : cosmology
+        Provides ``comoving_distance`` in Mpc.
+    nside : int
+        HEALPix resolution.
+
+    Returns
+    -------
+    ndarray
+        Shell volumes in Mpc\\(:sup:`3`\\).
+    """
+    omega = int(n_pix) * float(hp.nside2pixarea(int(nside)))
+    chi = np.asarray(cosmo.comoving_distance(z_edges).value, dtype=float)
+    return omega / 3.0 * (chi[1:] ** 3 - chi[:-1] ** 3)

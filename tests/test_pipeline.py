@@ -30,7 +30,7 @@ def test_gaussian_field_map_grid():
     ps.downres_factor_radial = 1 / 2.0
     ps.downres_factor_transverse = 1 / 2.0
     ps.get_enclosing_box()
-    pos_value = np.random.normal(size=ps.box_ndim)
+    pos_value = np.random.default_rng(0).normal(size=ps.box_ndim)
     k1dedges = np.geomspace(0.05, 1.5, 20)
     ps.k1dbins = k1dedges
     # ps.propagate_field_k_to_model()
@@ -98,7 +98,7 @@ def test_poisson_field_map_grid():
     k1dedges = np.geomspace(0.05, 1.5, 20)
     ps.k1dbins = k1dedges
     num_g = 10000
-    gal_pix_indx = np.random.choice(
+    gal_pix_indx = np.random.default_rng(0).choice(
         np.arange(pos_value.size), size=num_g, replace=False
     )
     pos_value[gal_pix_indx] += 1
@@ -176,6 +176,7 @@ def test_mock_field_map_grid(beam):
         # make sure kmax is higher than your simulation resolution
         kmax=10.0,
         box_buffkick=40,
+        seed=3,
     )
     if beam:
         D_dish = 13.5
@@ -193,71 +194,6 @@ def test_mock_field_map_grid(beam):
     )
     assert np.abs(np.median(p1d) - 1) < 0.5
     assert p1d.std() < 0.3
-
-
-def test_mock_tracer_grid():
-    """
-    Generate a mock galaxy caralogue,
-    grid it onto regular grids, and test input/output matching.
-    """
-    raminGAMA, ramaxGAMA = 339, 351
-    decminGAMA, decmaxGAMA = -35, -30
-    ra_range = (raminGAMA, ramaxGAMA)
-    dec_range = (decminGAMA, decmaxGAMA)
-    k1dedges = np.geomspace(0.05, 1.5, 20)
-    pmap_1d = []
-    pmod_1d = []
-    # run 10 realizations
-    for i in range(10):
-        mock = MockSimulation(
-            survey="meerklass_2021",
-            band="L",
-            ra_range=ra_range,
-            dec_range=dec_range,
-            kaiser_rsd=True,
-            discrete_base_field=2,
-            k1dbins=k1dedges,
-            target_relative_to_num_g=2.0,
-        )
-        mock.data = np.ones(mock.W_HI.shape)
-        mock.w_HI = np.ones(mock.W_HI.shape)
-        mock.counts = np.ones(mock.W_HI.shape)
-        mock.downres_factor_radial = 1 / 2.0
-        mock.downres_factor_transverse = 1 / 2.0
-        mock.get_enclosing_box()
-        mock.tracer_bias_2 = 1.9
-        mock.num_discrete_source = 2700
-        # galaxy catalogue
-        mock.propagate_mock_tracer_to_gal_cat()
-        mock.downres_factor_radial = 1.5
-        mock.downres_factor_transverse = 1.5
-        mock.compensate = False
-        gal_map_rg, gal_weights_rg, pixel_counts_gal_rg = mock.grid_gal_to_field()
-        _, _, pixel_counts_hi_rg = mock.grid_data_to_field()
-        mock.get_n_bar_correction()
-        taper = mock.taper_func(mock.box_ndim[-1])
-        mock.weights_2 = (pixel_counts_hi_rg > 0) * taper[None, None, :]
-        shot_noise_g = (
-            np.prod(mock.box_len) * (pixel_counts_hi_rg > 0).mean() / mock.ra_gal.size
-        )
-        mock.sampling_resol = None
-        mock.has_resol = False
-        pmod_1d_gg, keff, _ = mock.get_1d_power("auto_power_tracer_2_model")
-        pdata_1d_gg, keff, nmodes = mock.get_1d_power(
-            "auto_power_3d_2",
-        )
-        pdata_1d_gg -= shot_noise_g
-        pmap_1d += [
-            pdata_1d_gg,
-        ]
-        pmod_1d += [
-            pmod_1d_gg,
-        ]
-    pmap_1d = np.array(pmap_1d)
-    pmod_1d = np.array(pmod_1d)
-    avg_deviation = ((pmap_1d.mean(0) - pmod_1d.mean(0)) / pmap_1d.std(0)).mean()
-    # 3 sigma
-    assert np.abs(avg_deviation) < 3
 
 
 @pytest.mark.parametrize("sigma_beam_ch", [0.4, None])

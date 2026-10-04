@@ -25,6 +25,7 @@ from .grid import (
     interlace_two_fields,
     minimum_enclosing_box_of_lightcone,
     project_particle_to_regular_grid,
+    shot_noise_correction_from_gridding,
 )
 from .model import ModelPowerSpectrum
 from .power_ops import (
@@ -38,6 +39,7 @@ from .power_ops import (
     get_power_spectrum,
     get_renormed_field,
     get_shot_noise,
+    get_shot_noise_counts,
     get_shot_noise_galaxy,
     get_vec_mode,
     get_x_vector,
@@ -81,6 +83,7 @@ __all__ = [
     "get_power_spectrum",
     "get_renormed_field",
     "get_shot_noise",
+    "get_shot_noise_counts",
     "get_shot_noise_galaxy",
     "get_vec_mode",
     "get_x_vector",
@@ -341,6 +344,144 @@ class PowerSpectrum(LightconeGriddingMixin, FieldPowerSpectrum, ModelPowerSpectr
         self.flat_sky = flat_sky
         self.flat_sky_padding = flat_sky_padding
         self.k1dweights = k1dweights
+        self._random_paths = None
+        self._selection_data_path = None
+        self._selection_nside = None
+        self._selection_z_edges = None
+        self._selection_random_density = None
+        self._selection_source_columns = (
+            "WEIGHT_COMP",
+            "WEIGHT_SYS",
+            "WEIGHT_ZFAIL",
+        )
+        self._random_selection = None
+        self._selection_angular = None
+        self._selection_n_w = None
+
+    def read_random_selection(
+        self,
+        random_paths,
+        data_path=None,
+        nside=512,
+        z_edges=None,
+        random_density_deg2=2500.0,
+        source_weight_columns=("WEIGHT_COMP", "WEIGHT_SYS", "WEIGHT_ZFAIL"),
+    ):
+        """Store :math:`A(\\theta)` and :math:`n_w(z)` from random catalogues.
+
+        The maps are not deposited on the intensity-mapping pixels. A later
+        evaluation at simulation-cell centres is :meth:`MockSimulation.sky_selection_density`.
+
+        Parameters
+        ----------
+        random_paths : sequence of path
+            FITS random catalogues with ``RA``, ``DEC``, ``Z`` and ``WEIGHT``.
+        data_path : path, optional
+            Data catalogue used to normalise :math:`\\int n_w A\\,{\\rm d}V`.
+        nside : int, default 512
+            HEALPix resolution of :math:`A`.
+        z_edges : array, optional
+            Redshift shell edges. ``None`` uses 21 edges from the survey
+            redshift range.
+        random_density_deg2 : float, default 2500
+            Nominal density of one random file, in deg\\(:sup:`-2`\\).
+        source_weight_columns : sequence of str
+            Columns multiplied into the shuffled source weight.
+
+        Returns
+        -------
+        dict
+            ``angular``, ``n_w``, ``z_edges``, ``nside``, ``data_weight``,
+            ``random_weight`` and ``scale``.
+        """
+        from .io import selection_from_random_files
+
+        if z_edges is None:
+            z_edges = np.linspace(float(self.z_ch.min()), float(self.z_ch.max()), 21)
+        self._random_paths = tuple(random_paths)
+        self._selection_data_path = data_path
+        self._selection_nside = int(nside)
+        self._selection_z_edges = np.asarray(z_edges, dtype=float)
+        self._selection_random_density = float(random_density_deg2)
+        self._selection_source_columns = tuple(source_weight_columns)
+        result = selection_from_random_files(
+            self._random_paths,
+            ra_range=self.ra_range,
+            dec_range=self.dec_range,
+            z_edges=self._selection_z_edges,
+            cosmo=self.astropy_cosmo_true,
+            data_path=data_path,
+            nside=self._selection_nside,
+            random_density_deg2=self._selection_random_density,
+            source_weight_columns=self._selection_source_columns,
+        )
+        self._store_random_selection(result)
+        return result
+
+    def _store_random_selection(self, result):
+        """Cache a selection dictionary and drop derived tracer fields.
+
+        Parameters
+        ----------
+        result : dict
+            Output of :func:`meer21cm.io.selection_from_random_files`.
+
+        Returns
+        -------
+        None
+        """
+        self._random_selection = result
+        self._selection_angular = np.asarray(result["angular"], dtype=float)
+        self._selection_n_w = np.asarray(result["n_w"], dtype=float)
+        self._selection_z_edges = np.asarray(result["z_edges"], dtype=float)
+        self._selection_nside = int(result["nside"])
+        if "selection_dep_attr" in dir(self):
+            self.clean_cache(self.selection_dep_attr)
+        if "discrete_dep_attr" in dir(self):
+            self.clean_cache(self.discrete_dep_attr)
+
+    @property
+    @tagging("cosmo_model", "nu")
+    def random_selection(self):
+        """Angular map and radial density of the stored random catalogues.
+
+        Recomputed when the selection inputs, the cosmology or the frequency
+        axis change. The HEALPix map is not a function of the simulation box.
+
+        Returns
+        -------
+        dict or None
+            ``None`` until :meth:`read_random_selection` has been called.
+            Otherwise the cached angular map, :math:`n_w` and shell edges.
+        """
+        if self._random_selection is not None:
+            return self._random_selection
+        if self._random_paths is None:
+            return None
+        if self._random_selection is None:
+            from .io import selection_from_random_files
+
+            z_edges = self._selection_z_edges
+            if z_edges is None:
+                z_edges = np.linspace(
+                    float(self.z_ch.min()), float(self.z_ch.max()), 21
+                )
+            self._random_selection = selection_from_random_files(
+                self._random_paths,
+                ra_range=self.ra_range,
+                dec_range=self.dec_range,
+                z_edges=z_edges,
+                cosmo=self.astropy_cosmo_true,
+                data_path=self._selection_data_path,
+                nside=self._selection_nside,
+                random_density_deg2=self._selection_random_density,
+                source_weight_columns=self._selection_source_columns,
+            )
+            stored = self._random_selection
+            self._selection_angular = np.asarray(stored["angular"], dtype=float)
+            self._selection_n_w = np.asarray(stored["n_w"], dtype=float)
+            self._selection_z_edges = np.asarray(stored["z_edges"], dtype=float)
+        return self._random_selection
 
     def _sync_model_k_from_field(self):
         """Propagate field k-modes to the model when both box geometry attrs exist."""
@@ -644,6 +785,76 @@ class PowerSpectrum(LightconeGriddingMixin, FieldPowerSpectrum, ModelPowerSpectr
             * step_window_attenuation(k_para, sampling_resol[2], p)
         )
         return B_sampling
+
+    def _shot_noise_tracer(self, tracer):
+        """Poisson shot noise of one tracer, including the mass-assignment factor.
+
+        Parameters
+        ----------
+        tracer : int
+            ``1`` or ``2``.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`P_{\\rm shot}(\\mathbf{k})` on the Fourier grid. None when
+            that tracer has no field. The zero mode is the white amplitude,
+            because :math:`C_{\\rm MAS}(0) = 1`.
+        """
+        if tracer not in (1, 2):
+            raise ValueError("tracer must be 1 or 2")
+        data = getattr(self, f"field_{tracer}_D")
+        if data is None:
+            data = getattr(self, f"field_{tracer}")
+        if data is None:
+            return None
+        amplitude = get_shot_noise_counts(
+            data,
+            self.box_len,
+            weights_grid=self.get_weights_none_to_one(f"weights_{tracer}"),
+            weights_field=self.get_weights_none_to_one(f"weights_field_{tracer}"),
+            random_counts=getattr(self, f"field_{tracer}_R"),
+            alpha=getattr(self, f"field_{tracer}_alpha"),
+            unitless=bool(getattr(self, f"unitless_{tracer}")),
+        )
+        correction = shot_noise_correction_from_gridding(
+            np.asarray(self.box_ndim), self.grid_scheme
+        )
+        return amplitude * correction
+
+    @property
+    def shot_noise_1(self):
+        """Poisson shot noise of tracer 1 on the Fourier grid.
+
+        Uses ``field_1_D`` when it is set, otherwise ``field_1``, together
+        with ``weights_1``, ``weights_field_1``, ``field_1_R`` and
+        ``field_1_alpha``. ``unitless_1`` selects the mean-divided count
+        formula. The result includes :math:`C_{\\rm MAS}(\\mathbf{k})`.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`P_{\\rm shot}(\\mathbf{k})`. None when tracer 1 has no field.
+        """
+        return self._shot_noise_tracer(1)
+
+    @property
+    def shot_noise_2(self):
+        """Poisson shot noise of tracer 2 on the Fourier grid.
+
+        Uses ``field_2_D`` when it is set, otherwise ``field_2``, together
+        with ``weights_2``, ``weights_field_2``, ``field_2_R`` and
+        ``field_2_alpha``. ``unitless_2`` selects the mean-divided count
+        formula. With ``field_2_has_random`` True the amplitude is that of
+        :math:`F = D - \\alpha R`. The result includes
+        :math:`C_{\\rm MAS}(\\mathbf{k})`.
+
+        Returns
+        -------
+        ndarray or None
+            :math:`P_{\\rm shot}(\\mathbf{k})`. None when tracer 2 has no field.
+        """
+        return self._shot_noise_tracer(2)
 
     def gridding_compensation(self):
         """

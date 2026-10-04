@@ -139,6 +139,10 @@ class FieldPowerSpectrum(Specification):
     :meth:`measure_multipoles`, with a selectable line-of-sight convention
     (``los``; ``'global'``, ``'firstpoint'``, and ``'endpoint'``).
 
+    ``field_1_has_random`` and ``field_2_has_random`` default to False. When
+    True, that tracer's field is :math:`D - \\alpha R` and its mean-centring
+    and unitless flags read back False.
+
     Parameters
     ----------
     field_1 : array_like
@@ -213,6 +217,14 @@ class FieldPowerSpectrum(Specification):
             tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]
             | None
         ) = None
+        self._field_1_has_random = False
+        self._field_2_has_random = False
+        self._field_1_D = None
+        self._field_2_D = None
+        self._field_1_R = None
+        self._field_2_R = None
+        self._field_1_alpha = 0.0
+        self._field_2_alpha = 0.0
         self.field_1 = field_1
         self.field_2 = field_2
         self.weights_1: ArrayLike | None = weights_1
@@ -354,7 +366,9 @@ class FieldPowerSpectrum(Specification):
         Currently only two types are supported, ``"Gal"`` and ``"HI"``
         (case-insensitive). For galaxies the auto power is mean-centred,
         renormalised, and then shot-noise removed; for HI none of the above
-        is performed.
+        is performed. While ``field_1_has_random`` or ``field_2_has_random``
+        is true, that tracer's mean-centring and unitless flags still read
+        back false.
 
         Parameters
         ----------
@@ -451,45 +465,278 @@ class FieldPowerSpectrum(Specification):
         """
         return self._mu_mode_for_los(self.los)
 
+    def _drop_tracer_cache(self, tracer: int, why: str) -> None:
+        """Drop the cached Fourier field of one tracer.
+
+        Parameters
+        ----------
+        tracer : int
+            ``1`` or ``2``.
+        why : str
+            Name of the attribute that changed, recorded in the debug log.
+
+        Returns
+        -------
+        None
+        """
+        name = f"field_{tracer}_dep_attr"
+        if name in dir(self):
+            logger.debug(
+                "cleaning cache of %s due to resetting %s",
+                getattr(self, name),
+                why,
+            )
+            self.clean_cache(getattr(self, name))
+
+    def _fkp_field(self, tracer: int) -> NDArray[np.floating]:
+        """Return :math:`F = D - \\alpha R` for one tracer.
+
+        Parameters
+        ----------
+        tracer : int
+            ``1`` or ``2``.
+
+        Returns
+        -------
+        ndarray
+            :math:`F`. ``field_*_R`` contributes 0 when it has not been set.
+
+        Raises
+        ------
+        ValueError
+            If ``field_*_has_random`` is True and ``field_*_D`` is missing.
+        """
+        data = getattr(self, f"_field_{tracer}_D")
+        if data is None:
+            raise ValueError(
+                f"field_{tracer}_D is required when field_{tracer}_has_random is True"
+            )
+        randoms = getattr(self, f"_field_{tracer}_R")
+        if randoms is None:
+            randoms = 0.0
+        alpha = float(getattr(self, f"_field_{tracer}_alpha"))
+        return np.asarray(data, dtype=float) - alpha * np.asarray(randoms, dtype=float)
+
     @property
     def field_1(self) -> ArrayLike:
-        """The density field of the first tracer."""
+        """Density field of tracer 1.
+
+        With ``field_1_has_random`` False this is the array assigned to
+        ``field_1``. With the flag True it is :math:`D - \\alpha R`.
+
+        Returns
+        -------
+        array_like
+            The field passed to the Fourier transform.
+        """
+        if self._field_1_has_random:
+            return self._fkp_field(1)
         return self._field_1
 
     @property
     def field_2(self) -> ArrayLike | None:
-        """The density field of the second tracer."""
+        """Density field of tracer 2.
+
+        With ``field_2_has_random`` False this is the array assigned to
+        ``field_2``, or None when tracer 2 is absent. With the flag True it
+        is :math:`D - \\alpha R`.
+
+        Returns
+        -------
+        array_like or None
+            The field passed to the Fourier transform.
+        """
+        if self._field_2_has_random:
+            return self._fkp_field(2)
         return self._field_2
 
     @field_1.setter
     def field_1(self, value: ArrayLike) -> None:
-        # if field is updated, clear fourier field
-        self._field_1 = value
-        if "field_1_dep_attr" in dir(self):
-            logger.debug(
-                f"cleaning cache of {self.field_1_dep_attr} due to resetting field_1"
+        if getattr(self, "_field_1_has_random", False):
+            raise ValueError(
+                "field_1 is D - alpha R while field_1_has_random is True; "
+                "assign field_1_D and field_1_R"
             )
-            self.clean_cache(self.field_1_dep_attr)
+        self._field_1 = value
+        self._drop_tracer_cache(1, "field_1")
 
     @field_2.setter
     def field_2(self, value: ArrayLike | None) -> None:
-        # if field is updated, clear fourier field
-        self._field_2 = value
-        if "field_2_dep_attr" in dir(self):
-            logger.debug(
-                f"cleaning cache of {self.field_2_dep_attr} due to resetting field_2"
+        if getattr(self, "_field_2_has_random", False):
+            raise ValueError(
+                "field_2 is D - alpha R while field_2_has_random is True; "
+                "assign field_2_D and field_2_R"
             )
-            self.clean_cache(self.field_2_dep_attr)
+        self._field_2 = value
+        self._drop_tracer_cache(2, "field_2")
+
+    @property
+    def field_1_has_random(self) -> bool:
+        """Whether tracer 1 is a data-minus-randoms field.
+
+        Returns
+        -------
+        bool
+            False by default. True makes ``field_1`` return
+            :math:`D - \\alpha R` and makes ``mean_center_1`` and
+            ``unitless_1`` read back False.
+        """
+        return self._field_1_has_random
+
+    @field_1_has_random.setter
+    def field_1_has_random(self, value: bool) -> None:
+        self._field_1_has_random = bool(value)
+        self._drop_tracer_cache(1, "field_1_has_random")
+
+    @property
+    def field_2_has_random(self) -> bool:
+        """Whether tracer 2 is a data-minus-randoms field.
+
+        Returns
+        -------
+        bool
+            False by default. True makes ``field_2`` return
+            :math:`D - \\alpha R` and makes ``mean_center_2`` and
+            ``unitless_2`` read back False.
+        """
+        return self._field_2_has_random
+
+    @field_2_has_random.setter
+    def field_2_has_random(self, value: bool) -> None:
+        self._field_2_has_random = bool(value)
+        self._drop_tracer_cache(2, "field_2_has_random")
+
+    @property
+    def field_1_D(self) -> ArrayLike | None:
+        """Painted data counts :math:`D` of tracer 1.
+
+        Returns
+        -------
+        array_like or None
+            None when no separate data paint is stored. The shot noise then
+            uses ``field_1``.
+        """
+        return self._field_1_D
+
+    @field_1_D.setter
+    def field_1_D(self, value: ArrayLike | None) -> None:
+        self._field_1_D = value
+        self._drop_tracer_cache(1, "field_1_D")
+
+    @property
+    def field_2_D(self) -> ArrayLike | None:
+        """Painted data counts :math:`D` of tracer 2.
+
+        Returns
+        -------
+        array_like or None
+            None when no separate data paint is stored. The shot noise then
+            uses ``field_2``.
+        """
+        return self._field_2_D
+
+    @field_2_D.setter
+    def field_2_D(self, value: ArrayLike | None) -> None:
+        self._field_2_D = value
+        self._drop_tracer_cache(2, "field_2_D")
+
+    @property
+    def field_1_R(self) -> ArrayLike | float:
+        """Painted random counts :math:`R` of tracer 1.
+
+        Returns
+        -------
+        array_like or float
+            The stored random paint, or 0 when none has been set.
+        """
+        if self._field_1_R is None:
+            return 0.0
+        return self._field_1_R
+
+    @field_1_R.setter
+    def field_1_R(self, value: ArrayLike | float | None) -> None:
+        self._field_1_R = value
+        self._drop_tracer_cache(1, "field_1_R")
+
+    @property
+    def field_2_R(self) -> ArrayLike | float:
+        """Painted random counts :math:`R` of tracer 2.
+
+        Returns
+        -------
+        array_like or float
+            The stored random paint, or 0 when none has been set.
+        """
+        if self._field_2_R is None:
+            return 0.0
+        return self._field_2_R
+
+    @field_2_R.setter
+    def field_2_R(self, value: ArrayLike | float | None) -> None:
+        self._field_2_R = value
+        self._drop_tracer_cache(2, "field_2_R")
+
+    @property
+    def field_1_alpha(self) -> float:
+        """Ratio :math:`\\alpha = \\sum D / \\sum R` for tracer 1.
+
+        Returns
+        -------
+        float
+            0 when no random catalogue is attached.
+        """
+        return float(self._field_1_alpha)
+
+    @field_1_alpha.setter
+    def field_1_alpha(self, value: float) -> None:
+        self._field_1_alpha = float(value)
+        self._drop_tracer_cache(1, "field_1_alpha")
+
+    @property
+    def field_2_alpha(self) -> float:
+        """Ratio :math:`\\alpha = \\sum D / \\sum R` for tracer 2.
+
+        Returns
+        -------
+        float
+            0 when no random catalogue is attached.
+        """
+        return float(self._field_2_alpha)
+
+    @field_2_alpha.setter
+    def field_2_alpha(self, value: float) -> None:
+        self._field_2_alpha = float(value)
+        self._drop_tracer_cache(2, "field_2_alpha")
 
     @property
     def mean_center_1(self) -> bool:
-        """Whether field_1 needs to be mean centered."""
-        return self._mean_center_1
+        """Whether the Fourier transform subtracts the mean of tracer 1.
+
+        Returns
+        -------
+        bool
+            The stored flag, or False while ``field_1_has_random`` is True.
+            The stored flag is kept and applies again if the random-catalogue
+            flag is set back to False.
+        """
+        if self._field_1_has_random:
+            return False
+        return bool(self._mean_center_1)
 
     @property
     def mean_center_2(self) -> bool:
-        """Whether field_2 needs to be mean centered."""
-        return self._mean_center_2
+        """Whether the Fourier transform subtracts the mean of tracer 2.
+
+        Returns
+        -------
+        bool
+            The stored flag, or False while ``field_2_has_random`` is True.
+            The stored flag is kept and applies again if the random-catalogue
+            flag is set back to False.
+        """
+        if self._field_2_has_random:
+            return False
+        return bool(self._mean_center_2)
 
     @mean_center_1.setter
     def mean_center_1(self, value: bool) -> None:
@@ -513,13 +760,33 @@ class FieldPowerSpectrum(Specification):
 
     @property
     def unitless_1(self) -> bool:
-        """Whether field_1 needs to be divided by its mean."""
-        return self._unitless_1
+        """Whether tracer 1 is divided by its mean before the Fourier transform.
+
+        Returns
+        -------
+        bool
+            The stored flag, or False while ``field_1_has_random`` is True.
+            The stored flag is kept and applies again if the random-catalogue
+            flag is set back to False.
+        """
+        if self._field_1_has_random:
+            return False
+        return bool(self._unitless_1)
 
     @property
     def unitless_2(self) -> bool:
-        """Whether field_2 needs to be divided by its mean."""
-        return self._unitless_2
+        """Whether tracer 2 is divided by its mean before the Fourier transform.
+
+        Returns
+        -------
+        bool
+            The stored flag, or False while ``field_2_has_random`` is True.
+            The stored flag is kept and applies again if the random-catalogue
+            flag is set back to False.
+        """
+        if self._field_2_has_random:
+            return False
+        return bool(self._unitless_2)
 
     @unitless_1.setter
     def unitless_1(self, value: bool) -> None:

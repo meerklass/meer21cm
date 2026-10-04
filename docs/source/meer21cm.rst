@@ -113,10 +113,10 @@ meer21cm.power module
    :undoc-members:
    :show-inheritance:
 
-meer21cm.window module
------------------------------
+meer21cm.power_ops module
+-------------------------
 
-.. automodule:: meer21cm.window
+.. automodule:: meer21cm.power_ops
    :members:
    :undoc-members:
    :show-inheritance:
@@ -149,6 +149,14 @@ meer21cm.util module
 --------------------
 
 .. automodule:: meer21cm.util
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+meer21cm.window module
+-----------------------------
+
+.. automodule:: meer21cm.window
    :members:
    :undoc-members:
    :show-inheritance:
