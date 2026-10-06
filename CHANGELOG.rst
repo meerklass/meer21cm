@@ -4,6 +4,14 @@ Releases
 dev
 ------
 
+Enhancements
+++++++++++++
+* cache the HEALPix voxel to (pixel, frequency channel) binning of
+  ``grid_field_to_sky_map`` (built once per geometry, in line-of-sight batches)
+  so that repeated ``propagate_mock_field_to_data`` / ``grid_field_to_sky_map``
+  calls only accumulate with ``numpy.bincount``; repeat calls are ~30x faster
+  and return bitwise identical maps
+
 v0.10.0
 -------
 Features

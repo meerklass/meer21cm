@@ -1662,6 +1662,124 @@ class LightconeGriddingMixin:
             map_bin *= self.W_HI
         return map_bin, count_bin
 
+    def _hp_binning_fingerprint(self):
+        """
+        Value fingerprint of everything that fixes the voxel assignment to
+        (HEALPix pixel, frequency channel).
+
+        The remaining dependencies (the skymap object, its pixel list and the
+        fiducial redshift-distance interpolator) are compared by identity in
+        :meth:`_get_hp_binning_indices`, which holds strong references to them.
+        """
+        nu = np.asarray(self.nu)
+        return (
+            tuple(int(v) for v in self.box_ndim),
+            tuple(float(v) for v in np.asarray(self.box_len, dtype=float)),
+            tuple(float(v) for v in np.asarray(self.box_origin, dtype=float)),
+            np.asarray(self.rot_mat_sky_to_box, dtype=float).ravel().tobytes(),
+            nu.shape,
+            nu.tobytes(),
+            np.dtype(self.real_dtype).str,
+        )
+
+    def _get_hp_binning_indices(self):
+        """
+        Return the cached voxel to flat output index map used for HEALPix gridding.
+
+        The map only depends on the box geometry, the fiducial cosmology, the
+        channel grid and the HEALPix skymap, so it is built once and reused by
+        every subsequent gridding call. It is rebuilt whenever the geometry
+        fingerprint changes or any of the objects held by reference (skymap,
+        pixel list, redshift-distance interpolator) is replaced.
+
+        Returns
+        -------
+        idx: np.ndarray
+            Array with shape ``self.box_ndim`` holding
+            ``pixel_row * n_ch + channel`` for each voxel. Voxels outside the
+            survey footprint or outside the frequency range hold ``n_row``,
+            a scratch bin that the caller discards.
+        """
+        fingerprint = self._hp_binning_fingerprint()
+        refs = (self.skymap, self.skymap.pixel_id, self.z_as_func_of_comov_dist)
+        cached_fingerprint = getattr(self, "_hp_binning_fingerprint_cache", None)
+        cached_refs = getattr(self, "_hp_binning_refs_cache", None)
+        if (
+            cached_fingerprint is not None
+            and cached_fingerprint == fingerprint
+            and cached_refs is not None
+            and all(a is b for a, b in zip(cached_refs, refs))
+        ):
+            return self._hp_binning_idx
+        return self._build_hp_binning_indices(fingerprint, refs)
+
+    def _build_hp_binning_indices(self, fingerprint, refs):
+        """
+        Build the voxel to (HEALPix pixel, frequency channel) index map.
+
+        Geometry is evaluated in line-of-sight batches so that the temporary
+        coordinate arrays stay bounded, matching the batching used elsewhere in
+        this class.
+
+        Parameters
+        ----------
+        fingerprint: tuple
+            Geometry fingerprint from :meth:`_hp_binning_fingerprint`, stored
+            alongside the cache.
+        refs: tuple
+            Objects the cache holds by identity, stored alongside the cache.
+
+        Returns
+        -------
+        idx: np.ndarray
+            See :meth:`_get_hp_binning_indices`.
+        """
+        nside = int(self.hp_nside)
+        pixel_id = np.asarray(self.pixel_id, dtype=np.int64)
+        n_out = pixel_id.size
+        n_ch = int(self.nu.size)
+        n_row = n_out * n_ch
+        scratch = n_row + 1
+        idx_dtype = np.int32 if scratch <= np.iinfo(np.int32).max else np.int64
+        order = np.argsort(pixel_id, kind="mergesort")
+        pix_sorted = pixel_id[order]
+
+        nx, ny, nz = (int(n) for n in self.box_ndim)
+        x_vec = self.x_vec[0]
+        y_vec = self.x_vec[1]
+        idx = np.full((nx, ny, nz), scratch, dtype=idx_dtype)
+        for sel in self._iter_last_axis_batches(nz):
+            nz_sel = sel.size
+            z_vec = self.x_vec[2][sel]
+            nxyz = nx * ny * nz_sel
+            pos_xyz = np.empty((nxyz, 3), dtype=self.real_dtype)
+            pos_xyz[:, 0] = np.repeat(x_vec, ny * nz_sel)
+            pos_xyz[:, 1] = np.tile(np.repeat(y_vec, nz_sel), nx)
+            pos_xyz[:, 2] = np.tile(z_vec, nx * ny)
+            pos_ra, pos_dec, pos_z, _ = self.ra_dec_z_for_coord_in_box(pos_xyz)
+            hpix = hp.ang2pix(nside, pos_ra, pos_dec, lonlat=True).astype(np.int64)
+            pos_nu = np.asarray(redshift_to_freq(pos_z), dtype=np.float64)
+            ch_idx = find_ch_id(pos_nu, self.nu)
+            valid_ch = (ch_idx >= 0) & (ch_idx < n_ch)
+            valid_pos = np.flatnonzero(valid_ch)
+            hpix = hpix[valid_ch]
+            ch_idx = ch_idx[valid_ch]
+
+            row_s = np.searchsorted(pix_sorted, hpix)
+            # Do not index pix_sorted[row_s] when row_s == n_out (past end of
+            # searchsorted).
+            in_bounds = row_s < n_out
+            in_survey = np.zeros(hpix.shape, dtype=bool)
+            in_survey[in_bounds] = pix_sorted[row_s[in_bounds]] == hpix[in_bounds]
+            chunk = np.full((nx, ny, nz_sel), scratch, dtype=idx_dtype)
+            flat = order[row_s[in_survey]].astype(np.int64) * n_ch + ch_idx[in_survey]
+            chunk.reshape(-1)[valid_pos[in_survey]] = flat.astype(idx_dtype)
+            idx[..., sel] = chunk
+        self._hp_binning_fingerprint_cache = fingerprint
+        self._hp_binning_refs_cache = refs
+        self._hp_binning_idx = idx
+        return idx
+
     def _grid_field_to_sky_map_healpix(
         self,
         field,
@@ -1675,6 +1793,11 @@ class LightconeGriddingMixin:
         Voxel centres are assigned to HEALPix pixels at ``self.hp_nside`` and to
         frequency channels via :func:`~meer21cm.util.find_ch_id`. Only voxels whose
         pixel lies in ``self.pixel_id`` contribute.
+
+        The voxel to (pixel, channel) assignment only depends on the box/skymap
+        geometry and is therefore built once and cached (see
+        :meth:`_get_hp_binning_indices`); each call only accumulates the field
+        values into the map with :func:`numpy.bincount`.
         """
         los_sel = (
             np.arange(self.box_ndim[2], dtype=int)
@@ -1687,52 +1810,25 @@ class LightconeGriddingMixin:
                 f"field shape {field.shape} does not match expected shape "
                 f"{expected_shape} for los_sel size {los_sel.size}"
             )
-        nside = int(self.hp_nside)
-        pixel_id = np.asarray(self.pixel_id, dtype=np.int64)
-        n_out = pixel_id.size
+        idx = self._get_hp_binning_indices()
+        nz = int(self.box_ndim[2])
+        if not (los_sel.size == nz and np.array_equal(los_sel, np.arange(nz))):
+            idx = idx[..., los_sel]
+        n_out = int(np.asarray(self.pixel_id).size)
         n_ch = int(self.nu.size)
-        order = np.argsort(pixel_id, kind="mergesort")
-        pix_sorted = pixel_id[order]
-
-        x_vec = self.x_vec[0]
-        y_vec = self.x_vec[1]
-        z_vec = self.x_vec[2][los_sel]
-        nx = x_vec.size
-        ny = y_vec.size
-        nz = z_vec.size
-        nxyz = nx * ny * nz
-        pos_xyz = np.empty((nxyz, 3), dtype=self.real_dtype)
-        pos_xyz[:, 0] = np.repeat(x_vec, ny * nz)
-        pos_xyz[:, 1] = np.tile(np.repeat(y_vec, nz), nx)
-        pos_xyz[:, 2] = np.tile(z_vec, nx * ny)
-        pos_ra, pos_dec, pos_z, _ = self.ra_dec_z_for_coord_in_box(pos_xyz)
-        hpix = hp.ang2pix(nside, pos_ra, pos_dec, lonlat=True).astype(np.int64)
-        pos_nu = np.asarray(redshift_to_freq(pos_z), dtype=np.float64)
-        ch_idx = find_ch_id(pos_nu, self.nu)
-        valid_ch = (ch_idx >= 0) & (ch_idx < n_ch)
-        hpix = hpix[valid_ch]
-        ch_idx = ch_idx[valid_ch]
-        mass = np.asarray(field, dtype=self.real_dtype).ravel()[valid_ch]
-
-        row_s = np.searchsorted(pix_sorted, hpix)
-        # Do not index pix_sorted[row_s] when row_s == n_out (past end of searchsorted).
-        in_bounds = row_s < n_out
-        in_survey = np.zeros(hpix.shape, dtype=bool)
-        in_survey[in_bounds] = pix_sorted[row_s[in_bounds]] == hpix[in_bounds]
-        row = order[row_s[in_survey]]
-        ch_idx = ch_idx[in_survey]
-        mass = mass[in_survey]
-
-        map_sum = np.zeros((n_out, n_ch), dtype=self.real_dtype)
-        cnt = np.zeros((n_out, n_ch), dtype=self.real_dtype)
-        np.add.at(map_sum, (row, ch_idx), mass)
-        np.add.at(cnt, (row, ch_idx), 1.0)
+        n_row = n_out * n_ch
+        real_dtype = self.real_dtype
+        flat = idx.ravel()
+        # The scratch bin n_row collects voxels outside the survey/outside the
+        # frequency range and is dropped by the slice below.
+        mass = np.asarray(field, dtype=real_dtype).ravel()
+        map_sum = np.bincount(flat, weights=mass, minlength=n_row + 1)[:n_row]
+        cnt = np.bincount(flat, minlength=n_row + 1)[:n_row]
+        map_bin = map_sum.reshape(n_out, n_ch).astype(real_dtype, copy=False)
+        count_bin = cnt.reshape(n_out, n_ch).astype(real_dtype, copy=False)
         if average:
             with np.errstate(divide="ignore", invalid="ignore"):
-                map_bin = np.where(cnt > 0, map_sum / cnt, 0.0)
-        else:
-            map_bin = map_sum
-        count_bin = cnt
+                map_bin = np.where(count_bin > 0, map_bin / count_bin, 0.0)
         if mask:
             map_bin *= self.W_HI
         return map_bin, count_bin
