@@ -367,64 +367,57 @@ def isotropic_beam_window(beam_func, sigma, lmax, theta_grid=None):
     return hp.sphtfunc.beam2bl(profile, theta_grid, lmax_i)
 
 
-def weighted_smoothing_healpix(
+def _smooth_with_alm(alm, b_ell, nside, masks):
+    r"""
+    Synthesis step of :func:`_harmonic_smooth_map`.
+
+    Multiplies ``alm`` by the beam window and transforms back to pixel space,
+    restoring ``UNSEEN`` at the (bad) input pixels flagged in ``masks``.
+    """
+    smoothed = hp.alm2map(
+        hp.almxfl(alm, b_ell, mmax=None, inplace=False),
+        nside,
+        lmax=None,
+        mmax=None,
+        pixwin=False,
+        pol=False,
+    )
+    smoothed[masks] = hp.UNSEEN
+    return smoothed
+
+
+def _harmonic_smooth_map(map_full, b_ell, nside):
+    r"""
+    Harmonic-space smoothing of one full-sphere map.
+
+    Numerically identical to
+    ``hp.smoothing(map_full, beam_window=b_ell, iter=0, pol=False)`` — same
+    ``map2alm`` → ``almxfl`` → ``alm2map`` sequence, including the ``UNSEEN``
+    masking of bad input pixels — but without the healpy wrapper overhead.
+    """
+    masks = hp.pixelfunc.mask_bad(map_full)
+    alm = hp.map2alm(map_full, lmax=None, mmax=None, iter=0, pol=False)
+    return _smooth_with_alm(alm, b_ell, nside, masks)
+
+
+def _smoothing_setup(
     data_pix,
     weights_pix,
     beam_window_ch,
     hp_nside,
     pixel_id,
-    kernel_renorm=True,
-    nside_out=None,
-    pixel_id_out=None,
+    nside_out,
+    pixel_id_out,
 ):
-    r"""
-    Weighted HEALPix smoothing, mirroring :func:`weighted_convolution` semantics.
-
-    For each channel :math:`c` with beam window :math:`B^{(c)}_\ell`, this
-    returns
-
-    .. math::
-
-        \tilde s^{(c)} = \frac{\mathcal{S}[s^{(c)} w^{(c)} \, B^{(c)}_\ell]}
-                               {\mathcal{S}[w^{(c)} \, B^{(c)}_\ell]},\qquad
-        \tilde w^{(c)} = \frac{\bigl(\mathcal{S}[w^{(c)} B^{(c)}_\ell]\bigr)^2}
-                               {\mathcal{S}[w^{(c)} (B^{(c)}_\ell)^2]},
-
-    where :math:`\mathcal{S}` denotes harmonic-space smoothing via
-    ``hp.smoothing(..., beam_window=B_\ell)`` on a full-sphere scratch buffer
-    (allocated per channel, not kept).
-
-    Parameters
-    ----------
-    data_pix : (n_pix, n_ch) ndarray
-    weights_pix : (n_pix, n_ch) ndarray
-    beam_window_ch : (n_ch, lmax+1) ndarray or (lmax+1,) ndarray
-        Per-channel beam window. A 1D array is broadcast over all channels.
-    hp_nside : int
-        HEALPix :math:`N_{\rm side}` that ``pixel_id`` refers to.
-    pixel_id : ndarray of int
-        HEALPix indices at ``hp_nside``, matching rows of ``data_pix`` /
-        ``weights_pix``, used to paint the high-resolution sphere before smoothing.
-    pixel_id_out : ndarray of int, optional
-        If ``nside_out`` is below ``hp_nside``, indices at ``nside_out`` where outputs
-        are sampled (survey footprint). Required in that case. When no downgrade,
-        defaults to ``pixel_id``.
-    kernel_renorm : bool, default True
-        Kept for API symmetry with :func:`weighted_convolution`. ``B_\ell`` is
-        already normalised by ``hp.smoothing`` (``B_0 = 1`` for Gaussian
-        windows), so this flag is informational only.
-    nside_out : int, optional
-        If set to a HEALPix :math:`N_{\\rm side}` strictly less than ``hp_nside``,
-        harmonic smoothing is carried out at ``hp_nside`` on full spheres, maps are
-        ``hp.ud_grade`` down to ``nside_out``, then values are sampled at
-        ``pixel_id_out``.
+    """
+    Validate the inputs shared by :func:`weighted_smoothing_healpix` and
+    :func:`smooth_weight_maps_healpix`, returning the resolved geometry.
 
     Returns
     -------
-    conv_data_pix : (n_pix_out, n_ch) ndarray
-    conv_weights_pix : (n_pix_out, n_ch) ndarray
+    tuple
+        ``(nside_i, nside_o, pid, pid_out, bwin, npix_full, n_pix, n_pix_out, n_ch)``.
     """
-    del kernel_renorm
     nside_i = int(hp_nside)
     if nside_out is None:
         nside_o = nside_i
@@ -472,6 +465,195 @@ def weighted_smoothing_healpix(
             )
     else:
         raise ValueError("beam_window_ch must be 1D or 2D.")
+    return nside_i, nside_o, pid, pid_out, bwin, npix_full, n_pix, n_pix_out, n_ch
+
+
+def smooth_weight_maps_healpix(
+    weights_pix,
+    beam_window_ch,
+    hp_nside,
+    pixel_id,
+    nside_out=None,
+    pixel_id_out=None,
+):
+    r"""
+    Harmonic smoothing of the weight sphere, sampled on the survey footprint.
+
+    For every channel :math:`c` this evaluates
+
+    .. math::
+
+        \mathcal{S}\bigl[w^{(c)} B^{(c)}_\ell\bigr]\big|_{\rm pixel\_id\_out},
+        \qquad
+        \mathcal{S}\bigl[w^{(c)} (B^{(c)}_\ell)^2\bigr]\big|_{\rm pixel\_id\_out},
+
+    the two weight-only terms of :func:`weighted_smoothing_healpix`. The
+    spherical-harmonic analysis of :math:`w^{(c)}` is computed **once** per
+    channel and reused for both beam windows. The result depends only on the
+    weights, the beam windows and the geometry, so it is a natural candidate
+    for caching (see ``Specification.weight_smoothing_cache``).
+
+    Parameters
+    ----------
+    weights_pix : (n_pix, n_ch) ndarray
+        Per-pixel weights.
+    beam_window_ch : (n_ch, lmax+1) ndarray or (lmax+1,) ndarray
+        Per-channel beam window; a 1D array is broadcast over all channels.
+    hp_nside : int
+        HEALPix :math:`N_{\rm side}` that ``pixel_id`` refers to.
+    pixel_id : ndarray of int
+        HEALPix indices at ``hp_nside`` (rows of ``weights_pix``).
+    nside_out : int, optional
+        Downgrade target, as in :func:`weighted_smoothing_healpix`.
+    pixel_id_out : ndarray of int, optional
+        Output indices at ``nside_out``; required when ``nside_out`` is set.
+
+    Returns
+    -------
+    smoothed_weights : (n_pix_out, n_ch) ndarray
+    smoothed_weights_sq : (n_pix_out, n_ch) ndarray
+    """
+    (
+        nside_i,
+        nside_o,
+        pid,
+        pid_out,
+        bwin,
+        npix_full,
+        _n_pix,
+        n_pix_out,
+        n_ch,
+    ) = _smoothing_setup(
+        weights_pix,
+        weights_pix,
+        beam_window_ch,
+        hp_nside,
+        pixel_id,
+        nside_out,
+        pixel_id_out,
+    )
+    weights_pix = np.asarray(weights_pix)
+    smoothed_w = np.zeros((n_pix_out, n_ch), dtype=np.float64)
+    smoothed_w_sq = np.zeros((n_pix_out, n_ch), dtype=np.float64)
+    for ci in range(n_ch):
+        w = np.asarray(weights_pix[:, ci], dtype=np.float64)
+        b_ell = np.asarray(bwin[ci], dtype=np.float64)
+        w_full = np.zeros(npix_full, dtype=np.float64)
+        np.add.at(w_full, pid, w)
+        masks = hp.pixelfunc.mask_bad(w_full)
+        alm = hp.map2alm(w_full, lmax=None, mmax=None, iter=0, pol=False)
+        smoothed = _smooth_with_alm(alm, b_ell, nside_i, masks)
+        smoothed_sq = _smooth_with_alm(alm, b_ell**2, nside_i, masks)
+        if nside_o != nside_i:
+            smoothed = hp.ud_grade(smoothed, nside_o, order_in="RING")
+            smoothed_sq = hp.ud_grade(smoothed_sq, nside_o, order_in="RING")
+        smoothed_w[:, ci] = smoothed[pid_out]
+        smoothed_w_sq[:, ci] = smoothed_sq[pid_out]
+    return smoothed_w, smoothed_w_sq
+
+
+def weighted_smoothing_healpix(
+    data_pix,
+    weights_pix,
+    beam_window_ch,
+    hp_nside,
+    pixel_id,
+    kernel_renorm=True,
+    nside_out=None,
+    pixel_id_out=None,
+    weight_smoothing=None,
+):
+    r"""
+    Weighted HEALPix smoothing, mirroring :func:`weighted_convolution` semantics.
+
+    For each channel :math:`c` with beam window :math:`B^{(c)}_\ell`, this
+    returns
+
+    .. math::
+
+        \tilde s^{(c)} = \frac{\mathcal{S}[s^{(c)} w^{(c)} \, B^{(c)}_\ell]}
+                               {\mathcal{S}[w^{(c)} B^{(c)}_\ell]},\qquad
+        \tilde w^{(c)} = \frac{\bigl(\mathcal{S}[w^{(c)} B^{(c)}_\ell]\bigr)^2}
+                               {\mathcal{S}[w^{(c)} (B^{(c)}_\ell)^2]},
+
+    where :math:`\mathcal{S}` denotes harmonic-space smoothing on a full-sphere
+    scratch buffer (allocated per channel, not kept).
+
+    Parameters
+    ----------
+    data_pix : (n_pix, n_ch) ndarray
+    weights_pix : (n_pix, n_ch) ndarray
+    beam_window_ch : (n_ch, lmax+1) ndarray or (lmax+1,) ndarray
+        Per-channel beam window. A 1D array is broadcast over all channels.
+    hp_nside : int
+        HEALPix :math:`N_{\rm side}` that ``pixel_id`` refers to.
+    pixel_id : ndarray of int
+        HEALPix indices at ``hp_nside``, matching rows of ``data_pix`` /
+        ``weights_pix``, used to paint the high-resolution sphere before smoothing.
+    pixel_id_out : ndarray of int, optional
+        If ``nside_out`` is below ``hp_nside``, indices at ``nside_out`` where outputs
+        are sampled (survey footprint). Required in that case. When no downgrade,
+        defaults to ``pixel_id``.
+    kernel_renorm : bool, default True
+        Kept for API symmetry with :func:`weighted_convolution`. ``B_\ell`` is
+        already normalised by ``hp.smoothing`` (``B_0 = 1`` for Gaussian
+        windows), so this flag is informational only.
+    nside_out : int, optional
+        If set to a HEALPix :math:`N_{\\rm side}` strictly less than ``hp_nside``,
+        harmonic smoothing is carried out at ``hp_nside`` on full spheres, maps are
+        ``hp.ud_grade`` down to ``nside_out``, then values are sampled at
+        ``pixel_id_out``.
+    weight_smoothing : tuple of ndarray, optional
+        Pre-computed ``(smoothed_w, smoothed_w_sq)`` sampled at ``pixel_id_out``,
+        as returned by :func:`smooth_weight_maps_healpix`, each of shape
+        ``(n_pix_out, n_ch)``. Passing a cached pair skips the two weight-only
+        transforms entirely; when omitted they are computed here.
+
+    Returns
+    -------
+    conv_data_pix : (n_pix_out, n_ch) ndarray
+    conv_weights_pix : (n_pix_out, n_ch) ndarray
+    """
+    del kernel_renorm
+    (
+        nside_i,
+        nside_o,
+        pid,
+        pid_out,
+        bwin,
+        npix_full,
+        n_pix,
+        n_pix_out,
+        n_ch,
+    ) = _smoothing_setup(
+        data_pix,
+        weights_pix,
+        beam_window_ch,
+        hp_nside,
+        pixel_id,
+        nside_out,
+        pixel_id_out,
+    )
+    data_pix = np.asarray(data_pix)
+    weights_pix = np.asarray(weights_pix)
+    if weight_smoothing is None:
+        smoothed_w, smoothed_w_sq = smooth_weight_maps_healpix(
+            weights_pix,
+            bwin,
+            nside_i,
+            pid,
+            nside_out=nside_out,
+            pixel_id_out=pixel_id_out,
+        )
+    else:
+        smoothed_w = np.asarray(weight_smoothing[0], dtype=np.float64)
+        smoothed_w_sq = np.asarray(weight_smoothing[1], dtype=np.float64)
+        expected = (n_pix_out, n_ch)
+        if smoothed_w.shape != expected or smoothed_w_sq.shape != expected:
+            raise ValueError(
+                f"weight_smoothing must be two arrays of shape (n_pix_out, n_ch)="
+                f"{expected}; got {smoothed_w.shape} and {smoothed_w_sq.shape}."
+            )
     real_dtype = np.result_type(data_pix.dtype, weights_pix.dtype, np.float64)
     conv_data = np.zeros((n_pix_out, n_ch), dtype=real_dtype)
     conv_weights = np.zeros((n_pix_out, n_ch), dtype=real_dtype)
@@ -479,41 +661,16 @@ def weighted_smoothing_healpix(
         s = np.asarray(data_pix[:, ci], dtype=np.float64)
         w = np.asarray(weights_pix[:, ci], dtype=np.float64)
         b_ell = np.asarray(bwin[ci], dtype=np.float64)
-        b_ell_sq = b_ell**2
         sw_full = np.zeros(npix_full, dtype=np.float64)
-        w_full = np.zeros(npix_full, dtype=np.float64)
         np.add.at(sw_full, pid, s * w)
-        np.add.at(w_full, pid, w)
-        smoothed_sw = hp.smoothing(
-            sw_full,
-            beam_window=b_ell,
-            iter=0,
-            pol=False,
-            use_weights=False,
-        )
-        smoothed_w = hp.smoothing(
-            w_full,
-            beam_window=b_ell,
-            iter=0,
-            pol=False,
-            use_weights=False,
-        )
-        smoothed_w_sq = hp.smoothing(
-            w_full,
-            beam_window=b_ell_sq,
-            iter=0,
-            pol=False,
-            use_weights=False,
-        )
+        smoothed_sw = _harmonic_smooth_map(sw_full, b_ell, nside_i)
         if nside_o != nside_i:
             smoothed_sw = hp.ud_grade(smoothed_sw, nside_o, order_in="RING")
-            smoothed_w = hp.ud_grade(smoothed_w, nside_o, order_in="RING")
-            smoothed_w_sq = hp.ud_grade(smoothed_w_sq, nside_o, order_in="RING")
-        denom = smoothed_w[pid_out]
+        denom = smoothed_w[:, ci]
         num = smoothed_sw[pid_out]
         with np.errstate(divide="ignore", invalid="ignore"):
             cdata = np.where(np.abs(denom) > 0, num / denom, 0.0)
-        denom_sq = smoothed_w_sq[pid_out]
+        denom_sq = smoothed_w_sq[:, ci]
         with np.errstate(divide="ignore", invalid="ignore"):
             cvar = np.where(np.abs(denom_sq) > 0, denom_sq / denom**2, np.inf)
             cvar = np.where(denom != 0, cvar, np.inf)

@@ -359,6 +359,7 @@ class Specification:
         self.beam_model = beam_model
         self._beam_image = None
         self._beam_window_ch = None
+        self._weight_smoothing_cache = None
         self._z_as_func_of_comov_dist = None
         self.z_interp_max = z_interp_max
         self.data_column = data_column
@@ -725,6 +726,9 @@ class Specification:
         # leave it stale and a later read uses the pre-mask counts.
         if getattr(self, "_counts_in_box", None) is not None:
             self._counts_in_box = None
+        # the weight-smoothing cache holds the harmonic transform of the
+        # previous weights, so any new weights invalidate it.
+        self._weight_smoothing_cache = None
 
     w_HI = weights_map_pixel
 
@@ -1183,6 +1187,116 @@ class Specification:
             self.get_beam_window_ch()
         return self._beam_window_ch
 
+    @property
+    @tagging("beam", "nu")
+    def weight_smoothing_cache(self):
+        """
+        Cached harmonic smoothing of the pixel weights, as returned by
+        :meth:`get_weight_smoothing`: the pair ``(smoothed_w, smoothed_w_sq)``,
+        each ``(n_pix, n_ch)``.
+
+        The ``beam``/``nu`` tags register the backing attribute in
+        ``beam_dep_attr``/``nu_dep_attr``, so every parameter setter that
+        changes the beam windows or the channel grid drops the cache through
+        :meth:`clean_cache`; assigning :attr:`w_HI` (i.e.
+        :attr:`weights_map_pixel`) drops it from its setter, and the entry is
+        additionally validated against the weights and the pixel geometry on
+        every read (see :meth:`get_weight_smoothing`).
+        """
+        if self._weight_smoothing_cache is None:
+            return None
+        return self._weight_smoothing_cache[1], self._weight_smoothing_cache[2]
+
+    @staticmethod
+    def _weight_smoothing_key_matches(key, cached_key):
+        """
+        Compare two ``get_weight_smoothing`` keys (weights, pixel_id, nside,
+        nside_out) by identity where possible, by value otherwise.
+        """
+        if key[2] != cached_key[2] or key[3] != cached_key[3]:
+            return False
+        for new, old in zip(key[:2], cached_key[:2]):
+            if new is old:
+                continue
+            if new.shape != old.shape:
+                return False
+            if new.dtype.kind == "f" and old.dtype.kind == "f":
+                if not np.array_equal(new, old, equal_nan=True):
+                    return False
+            elif not np.array_equal(new, old):
+                return False
+        return True
+
+    def get_weight_smoothing(
+        self,
+        weights,
+        hp_nside=None,
+        pixel_id=None,
+        nside_out=None,
+        pixel_id_out=None,
+        beam_window_ch=None,
+    ):
+        """
+        Harmonic smoothing of ``weights`` for the weight-only terms of
+        :meth:`convolve_data`, cached in :attr:`weight_smoothing_cache`.
+
+        The cache entry is validated against the weights (by identity, else by
+        value), the pixel geometry and ``nside_out``, and is dropped by the
+        ``beam``/``nu`` tags or by assigning :attr:`w_HI`. Repeated calls with
+        unchanged weights therefore skip the two weight-only
+        ``map2alm``/``alm2map`` transforms per channel, which are ~2/3 of
+        :func:`~meer21cm.telescope.weighted_smoothing_healpix`.
+
+        Parameters
+        ----------
+        weights : (n_pix, n_ch) ndarray
+            The per-pixel weights to smooth (e.g. ``self.w_HI``).
+        hp_nside : int, optional
+            Defaults to ``self.hp_nside``.
+        pixel_id : ndarray of int, optional
+            Defaults to ``self.pixel_id``.
+        nside_out, pixel_id_out : optional
+            As in :func:`~meer21cm.telescope.smooth_weight_maps_healpix`.
+        beam_window_ch : ndarray, optional
+            Pre-computed beam windows; defaults to :meth:`get_beam_window_ch`
+            (cached).
+
+        Returns
+        -------
+        smoothed_weights : (n_pix_out, n_ch) ndarray
+        smoothed_weights_sq : (n_pix_out, n_ch) ndarray
+        """
+        weights = np.asarray(weights)
+        if hp_nside is None:
+            hp_nside = int(self.hp_nside)
+        else:
+            hp_nside = int(hp_nside)
+        if pixel_id is None:
+            pixel_id = np.asarray(self.pixel_id, dtype=np.int64)
+        else:
+            pixel_id = np.asarray(pixel_id, dtype=np.int64)
+        key = (
+            weights,
+            pixel_id,
+            hp_nside,
+            None if nside_out is None else int(nside_out),
+        )
+        cached = self._weight_smoothing_cache
+        if cached is not None and self._weight_smoothing_key_matches(key, cached[0]):
+            return cached[1], cached[2]
+        if beam_window_ch is None:
+            beam_window_ch = self.get_beam_window_ch(cache=True, hp_nside=hp_nside)
+        smoothed = telescope.smooth_weight_maps_healpix(
+            weights,
+            beam_window_ch,
+            hp_nside,
+            pixel_id,
+            nside_out=nside_out,
+            pixel_id_out=pixel_id_out,
+        )
+        self._weight_smoothing_cache = (key, smoothed[0], smoothed[1])
+        return smoothed
+
     def get_beam_window_ch(
         self,
         ch_sel=None,
@@ -1297,8 +1411,15 @@ class Specification:
         fdtype = np.result_type(real_dtype_from_array(data), self.real_dtype)
         conv_data = np.zeros_like(data, dtype=fdtype)
         conv_weights = np.zeros_like(weights, dtype=fdtype)
+        beam_ch = self.get_beam_window_ch(cache=True, hp_nside=nside)
+        weight_smoothing = self.get_weight_smoothing(
+            weights,
+            hp_nside=nside,
+            pixel_id=pix_id,
+            beam_window_ch=beam_ch,
+        )
         for ch_sel, sl_d in self._iter_field_los_chunks(data):
-            beam_w = self.get_beam_window_ch(ch_sel=ch_sel, cache=False, hp_nside=nside)
+            beam_w = None if beam_ch is None else beam_ch[ch_sel]
             sl_d = np.asarray(sl_d, dtype=fdtype)
             sl_w = np.asarray(weights[..., ch_sel], dtype=fdtype)
             cd, cw = telescope.weighted_smoothing_healpix(
@@ -1307,6 +1428,10 @@ class Specification:
                 beam_w,
                 nside,
                 pix_id,
+                weight_smoothing=(
+                    weight_smoothing[0][:, ch_sel],
+                    weight_smoothing[1][:, ch_sel],
+                ),
             )
             conv_data[:, ch_sel] = cd
             conv_weights[:, ch_sel] = cw
@@ -1321,7 +1446,11 @@ class Specification:
 
         **HEALPix** maps ignore raster ``kernel`` and use harmonic
         :func:`~meer21cm.telescope.weighted_smoothing_healpix` with per-channel beam
-        windows from :meth:`get_beam_window_ch` — pass ``kernel=None``.
+        windows from :meth:`get_beam_window_ch` — pass ``kernel=None``. The two
+        weight-only transforms are cached in :attr:`weight_smoothing_cache` and
+        reused while the weights, the beam windows and the pixel geometry stay
+        unchanged (assigning :attr:`w_HI` or changing a ``beam``/``nu`` parameter
+        drops the cache).
 
         Parameters
         ----------
