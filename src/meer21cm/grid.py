@@ -256,7 +256,7 @@ def interlace_two_fields(
     fourier_field_2 = np.fft.fftn(real_field_2)
     kH_2 = [np.fft.fftfreq(box_ndim[i]) for i in range(3)]
     kH_2 = np.array(np.meshgrid(*kH_2, indexing="ij"))
-    exp_term = np.prod(np.exp(-2 * 1j * shift * kH_2), axis=0)
+    exp_term = np.prod(np.exp(+2 * np.pi * 1j * shift * kH_2), axis=0)
     fourier_field_1 = (fourier_field_1 + exp_term * fourier_field_2) / 2
     return np.fft.ifftn(fourier_field_1).real
 
