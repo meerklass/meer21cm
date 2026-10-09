@@ -4,6 +4,22 @@ Releases
 dev
 ------
 
+Enhancements
+++++++++++++
+* cache the HEALPix voxel to (pixel, frequency channel) binning of
+  ``grid_field_to_sky_map`` (built once per geometry, in line-of-sight batches)
+  so that repeated ``propagate_mock_field_to_data`` / ``grid_field_to_sky_map``
+  calls only accumulate with ``numpy.bincount``; repeat calls are ~30x faster
+  and return bitwise identical maps
+* speed up the HEALPix beam convolution: cache the two weight-only harmonic
+  transforms behind the ``beam``/``nu``-tagged ``weight_smoothing_cache``
+  (dropped whenever the weights, beam windows or pixel geometry change) and
+  share one ``map2alm`` per channel between the ``B_ell`` and ``B_ell^2``
+  branches of ``weighted_smoothing_healpix``, bypassing the ``hp.smoothing``
+  wrapper while keeping its ``UNSEEN`` masking; beam-on
+  ``propagate_mock_field_to_data`` repeat calls are ~2.6x faster and bitwise
+  identical
+
 v0.10.0
 -------
 Features
