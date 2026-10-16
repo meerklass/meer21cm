@@ -292,6 +292,19 @@ class TransferFunction:
             otherwise the mock HI map may contain nan and cause errors.
         mock_directory: string, default None
             The filepath to where pre-run mocks are stored to load for the transfer functions computation.
+        project_combined: bool, default False
+            If True, the PCA eigenmode matrix (derived from the combined ``uncleaned_data + mock``
+            map either way) is applied to that same combined map, so the "cleaned" quantity used to
+            build the transfer function is ``R @ (uncleaned_data + mock)`` rather than ``R @ mock``.
+            The default (False) applies R only to the mock component, which by linearity of the PCA
+            projection is exactly equivalent to ``R @ (uncleaned_data + mock) - R @ uncleaned_data``,
+            i.e. implicitly subtracting the cleaned real-data-alone term (``X_clean`` in the notation
+            of Cunnington et al. 2024, arXiv:2407.21626, Sec 4.5). That paper notes this subtraction
+            gives an equally converged transfer function *mean* with fewer mocks, but removes a
+            genuine source of mock-to-mock *scatter* coming from the real data's own realisation-
+            dependent contribution to the eigenmode cleaning -- scatter which they explicitly keep in
+            (i.e. use ``project_combined=True``) when the transfer function is used for error
+            estimation rather than just the mean signal-loss correction.
 
     """
 
@@ -313,7 +326,8 @@ class TransferFunction:
         num_process: int | None = None,
         unmask_during_mock: bool = False,
         mock_directory: str = None,
-        
+        project_combined: bool = False,
+
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -335,6 +349,7 @@ class TransferFunction:
         self.R_mat = R_mat
         self.unmask_during_mock = unmask_during_mock
         self.mock_directory = mock_directory
+        self.project_combined = project_combined
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -474,6 +489,7 @@ class TransferFunction:
 
                     self.R_mat,
                     self.uncleaned_data,
+                    self.project_combined,
                     return_power_3d,
                     return_power_1d,
 
@@ -531,6 +547,7 @@ class TransferFunction:
 
                     self.R_mat,
                     self.uncleaned_data,
+                    self.project_combined,
                     return_power_3d,
                     return_power_1d,
 
@@ -645,6 +662,7 @@ def run_tf_calculation_cross(
 
     R_mat=None,
     uncleaned_data=0.0,
+    project_combined=False,
     return_power_3d=False,
     return_power_1d=False,
 
@@ -689,6 +707,12 @@ def run_tf_calculation_cross(
             If provided, it will be used to clean the map, and no injection + PCA is performed.
         uncleaned_data: np.ndarray, default 0.0
             The uncleaned data map.
+        project_combined: bool, default False
+            If True, the PCA matrix is applied to ``uncleaned_data + mock.data`` (the combined map)
+            rather than to ``mock.data`` alone, so the "cleaned" mock used to build the transfer
+            function includes the real data's own cleaned contribution. See
+            :class:`meer21cm.transfer.TransferFunction` for the full explanation of why this matters
+            for error estimation (Cunnington et al. 2024, arXiv:2407.21626, Sec 4.5).
         return_power_3d: bool, default False
             Whether to return the 3D power spectrum of the mock results, including the uncleaned and cleaned data.
         return_power_1d: bool, default False
@@ -808,12 +832,20 @@ def run_tf_calculation_cross(
         R_mat_mock = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
+    # project_combined=True: clean the full (data+mock) map (Cunnington et al.
+    # 2024, Sec 4.5), so the cleaned mock retains the scatter contributed by
+    # the real data's own realisation-dependent cleaning -- needed for error
+    # estimation from the transfer function's mock-to-mock scatter. The
+    # default (False) cleans the mock alone, which is exactly equivalent by
+    # linearity to subtracting off the cleaned real-data-alone term, and
+    # under-estimates that scatter (see TransferFunction docstring).
+    array_to_clean = map_to_clean if project_combined else mock.data
     if mean_center_map:
-        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
+        data_mean = np.sum(pca_map_weights * array_to_clean, axis=(0, 1)) / np.sum(
             pca_map_weights, axis=(0, 1)
         )
-        mock.data -= data_mean[None, None, :]
-    mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
+        array_to_clean = array_to_clean - data_mean[None, None, :]
+    mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, array_to_clean)
     mock.data = mock_map_cleaned
     # regrid the cleaned data
     mock_map_rg, _, _ = mock.grid_data_to_field()
@@ -856,6 +888,7 @@ def run_tf_calculation_auto(
     mean_center_map,
     R_mat=None,
     uncleaned_data=0.0,
+    project_combined=False,
     return_power_3d=False,
     return_power_1d=False,
 
@@ -895,6 +928,11 @@ def run_tf_calculation_auto(
             If provided, it will be used to clean the map, and no injection + PCA is performed.
         uncleaned_data: np.ndarray, default 0.0
             The uncleaned data map.
+        project_combined: bool, default False
+            If True, the PCA matrix is applied to ``uncleaned_data + mock.data`` (the combined map)
+            rather than to ``mock.data`` alone. See :class:`meer21cm.transfer.TransferFunction` for
+            the full explanation of why this matters for error estimation (Cunnington et al. 2024,
+            arXiv:2407.21626, Sec 4.5).
         return_power_3d: bool, default False
             Whether to return the 3D power spectrum of the mock results, including the uncleaned and cleaned data.
         return_power_1d: bool, default False
@@ -950,12 +988,16 @@ def run_tf_calculation_auto(
         R_mat_mock = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
+    # project_combined=True: clean the full (data+mock) map (Cunnington et al.
+    # 2024, Sec 4.5) instead of just the mock -- see run_tf_calculation_cross
+    # for the full explanation of why this matters for error estimation.
+    array_to_clean = map_to_clean if project_combined else mock.data
     if mean_center_map:
-        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
+        data_mean = np.sum(pca_map_weights * array_to_clean, axis=(0, 1)) / np.sum(
             pca_map_weights, axis=(0, 1)
         )
-        mock.data -= data_mean[None, None, :]
-    mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
+        array_to_clean = array_to_clean - data_mean[None, None, :]
+    mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, array_to_clean)
     mock.data = mock_map_cleaned
     # regrid the cleaned data
     mock_map_rg_cleaned, _, _ = mock.grid_data_to_field()
