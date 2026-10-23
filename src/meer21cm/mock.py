@@ -3,9 +3,13 @@ This module contains the classes for generating mock intensity mapping data, gal
 and HI galaxy catalogues for HI emission line observations.
 """
 
+import os
+import pickle
+
 import numpy as np
 from scipy.interpolate import interp1d
 from astropy.cosmology import Planck18
+from astropy.table import Table
 from numpy.random import default_rng
 from astropy import constants
 from .util import (
@@ -1445,6 +1449,88 @@ class MockSimulation(PowerSpectrum):
             return self._propagate_mock_field_to_data_healpix(
                 field, beam=beam, average=average
             )
+
+    def save_mock_products(self, prefix, seed=None):
+        """
+        Write the HI sky cube and the galaxy catalogue for transfer-function runs.
+
+        ``prefix`` is concatenated in the same way as
+        ``TransferFunction.mock_directory``:
+
+        - ``{prefix}HI_mock_{seed}.pkl``
+        - ``{prefix}gal_mock_{seed}.fits``
+
+        Pass a directory path ending in ``os.sep``, or a stem such as
+        ``".../uhf_zbin5_6_"``. The parent directory of the pickle path is created
+        if needed.
+
+        The pickle is a dict. ``HImap`` is the sky cube (``self.data``, last axis
+        frequency). ``freq`` is ``self.nu`` in MHz. ``wcs`` is ``self.wproj``.
+        The FITS file is a binary table with columns ``RA``, ``DEC``, ``Z`` in
+        degrees and redshift. A ``WEIGHT`` column is written when
+        ``weights_gal`` is set.
+
+        Parameters
+        ----------
+        prefix: str
+            Path prefix concatenated onto the file names.
+        seed: int, default None
+            Seed used in the file names. The default is ``self.seed``.
+
+        Returns
+        -------
+        hi_path: str
+            Path of the HI pickle.
+        gal_path: str
+            Path of the galaxy FITS table.
+        """
+        if seed is None:
+            seed = self.seed
+        if self.data is None or self.nu is None:
+            raise ValueError("HI cube and frequency grid must be set before saving")
+        hi_map = np.ma.filled(np.ma.asarray(self.data), 0.0)
+        freq_mhz = np.asarray(self.nu, dtype=float) / 1e6
+        if hi_map.ndim != 3 or hi_map.shape[-1] != freq_mhz.size:
+            raise ValueError(
+                "HI cube must have shape (nx, ny, n_freq) matching self.nu"
+            )
+        ra_gal = getattr(self, "_ra_gal", None)
+        dec_gal = getattr(self, "_dec_gal", None)
+        z_gal = getattr(self, "_z_gal", None)
+        if ra_gal is None or dec_gal is None or z_gal is None:
+            raise ValueError(
+                "galaxy catalogue must be set before saving; "
+                "call propagate_mock_tracer_to_gal_cat first"
+            )
+        ra = np.asarray(ra_gal, dtype=float)
+        dec = np.asarray(dec_gal, dtype=float)
+        redshift = np.asarray(z_gal, dtype=float)
+        if not (ra.shape == dec.shape == redshift.shape):
+            raise ValueError("ra_gal, dec_gal and z_gal must have the same shape")
+        hi_path = f"{prefix}HI_mock_{seed}.pkl"
+        gal_path = f"{prefix}gal_mock_{seed}.fits"
+        parent = os.path.dirname(hi_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        payload = {
+            "HImap": np.asarray(hi_map),
+            "freq": freq_mhz,
+            "wcs": self.wproj,
+        }
+        with open(hi_path, "wb") as handle:
+            pickle.dump(payload, handle)
+        columns = {
+            "RA": ra,
+            "DEC": dec,
+            "Z": redshift,
+        }
+        if self.weights_gal is not None:
+            weights = np.asarray(self.weights_gal, dtype=float)
+            if weights.shape != ra.shape:
+                raise ValueError("weights_gal must have the same shape as ra_gal")
+            columns["WEIGHT"] = weights
+        Table(columns).write(gal_path, format="fits", overwrite=True)
+        return hi_path, gal_path
 
 
 class HIGalaxySimulation(MockSimulation):

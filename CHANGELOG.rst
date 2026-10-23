@@ -4,6 +4,9 @@ Releases
 dev
 ------
 
+* transfer function can load precomputed HI and galaxy mocks, return several
+  multipoles, and apply the cleaning matrix to the combined map
+
 v0.10.0
 -------
 Features
