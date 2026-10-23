@@ -9,7 +9,7 @@ from meer21cm.mock import (
     generate_colored_noise,
 )
 from meer21cm import Specification
-from meer21cm.util import create_udres_wproj
+from meer21cm.util import create_udres_wproj, create_wcs
 from meer21cm.util import center_to_edges
 from meer21cm.util import radec_to_indx, find_ch_id, redshift_to_freq
 from scipy.signal import windows
@@ -717,3 +717,90 @@ def test_lightcone_count_and_dndz():
     shape_in = shape_in / shape_in.max()
     assert np.abs(shape_meas - shape_in).mean() < 0.1
     assert np.corrcoef(shape_meas, shape_in)[0, 1] > 0.9
+
+
+def test_save_mock_products(saved_mock_prefix):
+    import os
+    import pickle
+
+    hi_path = saved_mock_prefix + "HI_mock_0.pkl"
+    gal_path = saved_mock_prefix + "gal_mock_0.fits"
+    assert os.path.isfile(hi_path)
+    assert os.path.isfile(gal_path)
+    with open(hi_path, "rb") as handle:
+        payload = pickle.load(handle)
+    nu = np.linspace(900e6, 1000e6, 5)
+    assert payload["HImap"].shape == (4, 4, nu.size)
+    assert np.allclose(
+        payload["HImap"], np.arange(4 * 4 * nu.size).reshape(4, 4, nu.size)
+    )
+    assert np.allclose(payload["freq"] * 1e6, nu)
+    assert payload["wcs"] is not None
+    reloaded = MockSimulation(
+        nu=nu,
+        wproj=payload["wcs"],
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=0,
+        gal_file=gal_path,
+    )
+    reloaded.read_gal_cat(weight_col="WEIGHT", trim=False)
+    assert np.allclose(reloaded.ra_gal, [10.0, 11.5])
+    assert np.allclose(reloaded.dec_gal, [-2.0, 1.25])
+    assert np.allclose(reloaded.z_gal, [0.42, 0.55])
+    assert np.allclose(reloaded.weights_gal, [1.0, 0.5])
+
+
+def test_save_mock_products_requires_catalogue():
+    mock = MockSimulation(
+        nu=np.linspace(900e6, 1000e6, 5),
+        wproj=create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0]),
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=0,
+    )
+    with pytest.raises(ValueError):
+        mock.save_mock_products("unused_")
+
+
+def _save_ready_mock():
+    nu = np.linspace(900e6, 1000e6, 5)
+    mock = MockSimulation(
+        nu=nu,
+        wproj=create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0]),
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=0,
+    )
+    mock.data = np.ones((4, 4, nu.size))
+    return mock
+
+
+def test_save_mock_products_rejects_bad_inputs(tmp_path):
+    mock = _save_ready_mock()
+    mock._nu = None
+    with pytest.raises(ValueError):
+        mock.save_mock_products(str(tmp_path) + "/")
+
+    mock = _save_ready_mock()
+    mock.data = np.ones((4, 4))
+    with pytest.raises(ValueError):
+        mock.save_mock_products(str(tmp_path) + "/")
+
+    mock = _save_ready_mock()
+    mock._ra_gal = np.ones(2)
+    mock._dec_gal = np.ones(1)
+    mock._z_gal = np.ones(2)
+    with pytest.raises(ValueError):
+        mock.save_mock_products(str(tmp_path) + "/")
+
+    mock = _save_ready_mock()
+    mock._ra_gal = np.ones(2)
+    mock._dec_gal = np.ones(2)
+    mock._z_gal = np.ones(2)
+    mock.weights_gal = np.ones(3)
+    with pytest.raises(ValueError):
+        mock.save_mock_products(str(tmp_path) + "/")

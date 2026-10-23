@@ -4,6 +4,8 @@ from astropy.wcs import WCS
 import numpy as np
 import os
 import meer21cm
+from meer21cm import MockSimulation
+from meer21cm.util import create_wcs
 
 data_dir = meer21cm.__file__.rsplit("/", 1)[0] + "/data/"
 
@@ -76,3 +78,30 @@ def test_GAMA_range():
     raminGAMA, ramaxGAMA = 339, 351
     decminGAMA, decmaxGAMA = -35, -30
     return (raminGAMA, ramaxGAMA), (decminGAMA, decmaxGAMA)
+
+
+@pytest.fixture
+def saved_mock_prefix(tmp_path):
+    """
+    Prefix for one tiny HI pickle and galaxy FITS table.
+
+    ``TransferFunction.mock_directory`` is this prefix: the loader concatenates
+    ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits`` onto it. The seed is 0.
+    """
+    nu = np.linspace(900e6, 1000e6, 5)
+    mock = MockSimulation(
+        nu=nu,
+        wproj=create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0]),
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=0,
+    )
+    mock.data = np.arange(4 * 4 * nu.size, dtype=float).reshape(4, 4, nu.size)
+    mock._ra_gal = np.array([10.0, 11.5])
+    mock._dec_gal = np.array([-2.0, 1.25])
+    mock._z_gal = np.array([0.42, 0.55])
+    mock.weights_gal = np.array([1.0, 0.5])
+    prefix = str(tmp_path) + os.sep
+    mock.save_mock_products(prefix)
+    return prefix
