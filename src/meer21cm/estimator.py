@@ -225,6 +225,10 @@ class FieldPowerSpectrum(Specification):
         self._field_2_R = None
         self._field_1_alpha = 0.0
         self._field_2_alpha = 0.0
+        self._field_1_D2 = None
+        self._field_2_D2 = None
+        self._field_1_R2 = None
+        self._field_2_R2 = None
         self.field_1 = field_1
         self.field_2 = field_2
         self.weights_1: ArrayLike | None = weights_1
@@ -558,6 +562,7 @@ class FieldPowerSpectrum(Specification):
                 "assign field_1_D and field_1_R"
             )
         self._field_1 = value
+        self._field_1_D2 = None
         self._drop_tracer_cache(1, "field_1")
 
     @field_2.setter
@@ -568,6 +573,7 @@ class FieldPowerSpectrum(Specification):
                 "assign field_2_D and field_2_R"
             )
         self._field_2 = value
+        self._field_2_D2 = None
         self._drop_tracer_cache(2, "field_2")
 
     @property
@@ -621,6 +627,7 @@ class FieldPowerSpectrum(Specification):
     @field_1_D.setter
     def field_1_D(self, value: ArrayLike | None) -> None:
         self._field_1_D = value
+        self._field_1_D2 = None
         self._drop_tracer_cache(1, "field_1_D")
 
     @property
@@ -638,6 +645,7 @@ class FieldPowerSpectrum(Specification):
     @field_2_D.setter
     def field_2_D(self, value: ArrayLike | None) -> None:
         self._field_2_D = value
+        self._field_2_D2 = None
         self._drop_tracer_cache(2, "field_2_D")
 
     @property
@@ -656,6 +664,7 @@ class FieldPowerSpectrum(Specification):
     @field_1_R.setter
     def field_1_R(self, value: ArrayLike | float | None) -> None:
         self._field_1_R = value
+        self._field_1_R2 = None
         self._drop_tracer_cache(1, "field_1_R")
 
     @property
@@ -674,6 +683,7 @@ class FieldPowerSpectrum(Specification):
     @field_2_R.setter
     def field_2_R(self, value: ArrayLike | float | None) -> None:
         self._field_2_R = value
+        self._field_2_R2 = None
         self._drop_tracer_cache(2, "field_2_R")
 
     @property
@@ -707,6 +717,72 @@ class FieldPowerSpectrum(Specification):
     def field_2_alpha(self, value: float) -> None:
         self._field_2_alpha = float(value)
         self._drop_tracer_cache(2, "field_2_alpha")
+
+    @property
+    def field_1_D2(self) -> ArrayLike | None:
+        """Paint of the squared data weights of tracer 1.
+
+        Returns
+        -------
+        array_like or None
+            None when not set. The shot noise then uses the data paint,
+            which is exact for unit weights only. Assigning ``field_1`` or
+            ``field_1_D`` resets it to None.
+        """
+        return self._field_1_D2
+
+    @field_1_D2.setter
+    def field_1_D2(self, value: ArrayLike | None) -> None:
+        self._field_1_D2 = value
+
+    @property
+    def field_2_D2(self) -> ArrayLike | None:
+        """Paint of the squared data weights of tracer 2.
+
+        Returns
+        -------
+        array_like or None
+            None when not set. The shot noise then uses the data paint,
+            which is exact for unit weights only. Assigning ``field_2`` or
+            ``field_2_D`` resets it to None.
+        """
+        return self._field_2_D2
+
+    @field_2_D2.setter
+    def field_2_D2(self, value: ArrayLike | None) -> None:
+        self._field_2_D2 = value
+
+    @property
+    def field_1_R2(self) -> ArrayLike | None:
+        """Paint of the squared random weights of tracer 1.
+
+        Returns
+        -------
+        array_like or None
+            None when not set. The shot noise then uses ``field_1_R``.
+            Assigning ``field_1_R`` resets it to None.
+        """
+        return self._field_1_R2
+
+    @field_1_R2.setter
+    def field_1_R2(self, value: ArrayLike | None) -> None:
+        self._field_1_R2 = value
+
+    @property
+    def field_2_R2(self) -> ArrayLike | None:
+        """Paint of the squared random weights of tracer 2.
+
+        Returns
+        -------
+        array_like or None
+            None when not set. The shot noise then uses ``field_2_R``.
+            Assigning ``field_2_R`` resets it to None.
+        """
+        return self._field_2_R2
+
+    @field_2_R2.setter
+    def field_2_R2(self, value: ArrayLike | None) -> None:
+        self._field_2_R2 = value
 
     @property
     def mean_center_1(self) -> bool:

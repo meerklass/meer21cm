@@ -227,6 +227,8 @@ def get_shot_noise_counts(
     random_counts=None,
     alpha=0.0,
     unitless=False,
+    data_counts_sq=None,
+    random_counts_sq=None,
 ):
     """
     Poisson shot-noise amplitude of a painted count field.
@@ -235,7 +237,7 @@ def get_shot_noise_counts(
 
         P_{\\rm shot}
         = \\frac{V}{N}
-        \\frac{\\sum_c g_c^2 (D_c + \\alpha^2 R_c)}{\\sum_c W_c^2}
+        \\frac{\\sum_c g_c^2 (D^{(2)}_c + \\alpha^2 R^{(2)}_c)}{\\sum_c W_c^2}
         \\left(\\frac{\\bar\\mu_g^2}{m^2}\\right)^{u}
 
     with :math:`W = g w_f`, :math:`m = \\sum g D / \\sum g`,
@@ -244,6 +246,11 @@ def get_shot_noise_counts(
     field that is not divided by its mean, including :math:`F = D - \\alpha R`
     with :math:`w_f = \\alpha R`. The mass-assignment factor
     :math:`C_{\\rm MAS}(\\mathbf{k})` is not included.
+
+    :math:`D^{(2)}` and :math:`R^{(2)}` are the paint of the squared
+    per-object weights, the Poisson variance of a field of weighted objects.
+    They default to :math:`D` and :math:`R`, which is exact for unit weights
+    only.
 
     Parameters
     ----------
@@ -261,6 +268,12 @@ def get_shot_noise_counts(
         :math:`\\alpha = \\sum D / \\sum R`.
     unitless : bool, default False
         True applies the factor from dividing the counts by their mean.
+    data_counts_sq : array, optional
+        Paint of the squared data weights :math:`D^{(2)}`. ``None`` uses
+        ``data_counts``.
+    random_counts_sq : array, optional
+        Paint of the squared random weights :math:`R^{(2)}`. ``None`` uses
+        ``random_counts``.
 
     Returns
     -------
@@ -280,9 +293,17 @@ def get_shot_noise_counts(
         random_counts = np.zeros((), dtype=real_dtype)
     else:
         random_counts = np.asarray(random_counts, dtype=real_dtype)
+    if data_counts_sq is None:
+        data_counts_sq = data_counts
+    else:
+        data_counts_sq = np.asarray(data_counts_sq, dtype=real_dtype)
+    if random_counts_sq is None:
+        random_counts_sq = random_counts
+    else:
+        random_counts_sq = np.asarray(random_counts_sq, dtype=real_dtype)
     alpha = np.asarray(alpha, dtype=real_dtype)
     window = weights_grid * weights_field
-    poisson = data_counts + (alpha**2) * random_counts
+    poisson = data_counts_sq + (alpha**2) * random_counts_sq
     numer = np.sum(weights_grid**2 * poisson)
     denom = np.sum(window**2)
     amplitude = (
@@ -304,6 +325,7 @@ def get_shot_noise_galaxy(
     box_len,
     weights_grid=None,
     weights_field=None,
+    gal_count_sq=None,
 ):
     """
     Shot-noise amplitude of a mean-divided galaxy count field.
@@ -322,6 +344,8 @@ def get_shot_noise_galaxy(
         Grid weight :math:`g`. ``None`` is 1.
     weights_field : array, optional
         Field weight :math:`w_f`. ``None`` is 1.
+    gal_count_sq : array, optional
+        Paint of the squared galaxy weights. ``None`` uses ``gal_count``.
 
     Returns
     -------
@@ -336,6 +360,7 @@ def get_shot_noise_galaxy(
         random_counts=None,
         alpha=0.0,
         unitless=True,
+        data_counts_sq=gal_count_sq,
     )
 
 

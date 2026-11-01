@@ -15,6 +15,7 @@ by using :class:`mpi4py.futures.MPIPoolExecutor`.
 The default installation of meer21cm does not include ``mpi4py``,
 and you need to configure MPI first (usually with openmpi or mpich), and then install ``mpi4py`` manually.
 """
+
 import numpy as np
 from .util import pca_clean, dft_matrix, inv_dft_matrix
 from .mock import MockSimulation
@@ -22,6 +23,7 @@ from multiprocessing import Pool
 from .power import PowerSpectrum
 from typing import Callable
 from scipy.interpolate import interp1d
+import pickle
 
 
 def fft_matrix(mat, norm="backward"):
@@ -290,6 +292,25 @@ class TransferFunction:
             This is useful for mitigating edge effects and when box buffer is small.
             For a large patch with a wide z-range, it is recommended to set this to True,
             otherwise the mock HI map may contain nan and cause errors.
+        mock_directory: string, default None
+            Path prefix for precomputed mocks. The workers concatenate
+            ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits`` onto this string.
+            A directory path must end with the path separator. ``None`` generates
+            each mock inside the worker.
+        project_combined: bool, default False
+            If True, the PCA matrix is applied to ``uncleaned_data + mock``.
+            The default applies it to the mock only. With mean-centering off, that
+            default is the combined-map cleaning minus the cleaning of the data
+            alone (Cunnington et al. 2024, arXiv:2407.21626, Sec 4.5). With
+            mean-centering on, the weighted frequency mean is removed from the
+            cube that is projected. ``True`` keeps the scatter from the data's
+            contribution to the cleaning, which is the choice in that paper when
+            the mock-to-mock scatter is used as an error.
+        convolve_loaded_mock: bool, default False
+            If True, convolve a cube loaded from ``mock_directory`` with a
+            Gaussian primary beam using ``sigma_beam_ch``. Has no effect when
+            the mock is generated inside the worker.
+
     """
 
     def __init__(
@@ -309,6 +330,9 @@ class TransferFunction:
         pool: str = "multiprocessing",
         num_process: int | None = None,
         unmask_during_mock: bool = False,
+        mock_directory: str | None = None,
+        project_combined: bool = False,
+        convolve_loaded_mock: bool = False,
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -329,6 +353,9 @@ class TransferFunction:
         self.num_process = num_process
         self.R_mat = R_mat
         self.unmask_during_mock = unmask_during_mock
+        self.mock_directory = mock_directory
+        self.project_combined = project_combined
+        self.convolve_loaded_mock = convolve_loaded_mock
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -352,6 +379,8 @@ class TransferFunction:
         for attr in required_attrs:
             attr_dict[attr] = getattr(self.ps, attr)
         attr_dict["seed"] = seed
+        attr_dict["nu_min"] = self.ps.nu_min
+        attr_dict["nu_max"] = self.ps.nu_max
         if hasattr(self.ps, "ra_gal"):
             attr_dict["num_discrete_source"] = self.ps.ra_gal.size
         # if it is a mock itself then overrides with its own attribute
@@ -373,6 +402,7 @@ class TransferFunction:
         seed_list,
         return_power_3d=False,
         return_power_1d=False,
+        multipole_ells=None,
     ):
         """
         Generate a list of arguments for parallelisation of the null test runs.
@@ -389,6 +419,9 @@ class TransferFunction:
                 Note that for null test, the result itself is the 1D power, so this
                 is a dummy argument to keep consistency with
                 ``cross`` and ``auto`` runs.
+            multipole_ells: list, default None
+                Accepted for the same call signature as the auto and cross
+                argument lists. The null test does not use it.
 
         Returns
         -------
@@ -419,7 +452,11 @@ class TransferFunction:
         return arg_list
 
     def get_arg_list_for_parallel_cross(
-        self, seed_list, return_power_3d=False, return_power_1d=False
+        self,
+        seed_list,
+        return_power_3d=False,
+        return_power_1d=False,
+        multipole_ells=None,
     ):
         """
         Generate a list of arguments for parallelisation of the cross-correlation runs
@@ -434,6 +471,8 @@ class TransferFunction:
                 Whether to return the 3D power spectrum of the cross-correlation.
             return_power_1d: bool, default False
                 Whether to return the 1D power spectrum of the cross-correlation.
+            multipole_ells: list, default None
+                Multipoles passed through to the worker. ``None`` is the monopole.
 
         Returns
         -------
@@ -464,12 +503,20 @@ class TransferFunction:
                     self.ps.ra_range,
                     self.ps.dec_range,
                     self.discrete_source_dndz,
+                    self.project_combined,
+                    multipole_ells,
+                    self.mock_directory,
+                    self.convolve_loaded_mock,
                 )
             )
         return arg_list
 
     def get_arg_list_for_parallel_auto(
-        self, seed_list, return_power_3d=False, return_power_1d=False
+        self,
+        seed_list,
+        return_power_3d=False,
+        return_power_1d=False,
+        multipole_ells=None,
     ):
         """
         Generate a list of arguments for parallelisation of the auto-correlation runs
@@ -484,6 +531,8 @@ class TransferFunction:
                 Whether to return the 3D power spectrum of the auto-correlation.
             return_power_1d: bool, default False
                 Whether to return the 1D power spectrum of the auto-correlation.
+            multipole_ells: list, default None
+                Multipoles passed through to the worker. ``None`` is the monopole.
 
         Returns
         -------
@@ -511,12 +560,21 @@ class TransferFunction:
                     self.unmask_during_mock,
                     self.ps.ra_range,
                     self.ps.dec_range,
+                    self.project_combined,
+                    multipole_ells,
+                    self.mock_directory,
+                    self.convolve_loaded_mock,
                 )
             )
         return arg_list
 
     def run(
-        self, seed_list, type="cross", return_power_3d=False, return_power_1d=False
+        self,
+        seed_list,
+        type="cross",
+        return_power_3d=False,
+        return_power_1d=False,
+        multipole_ells=None,
     ):
         """
         Run the transfer function calculation.
@@ -553,6 +611,10 @@ class TransferFunction:
                 Whether to return the 3D power spectrum of the transfer function.
             return_power_1d: bool, default False
                 Whether to return the 1D power spectrum of the transfer function.
+            multipole_ells: list, default None
+                Multipoles to compute. ``None`` is the monopole. A single
+                multipole is returned as a 1D array. Several multipoles are
+                stacked on the first axis.
 
         Returns
         -------
@@ -574,7 +636,7 @@ class TransferFunction:
         else:
             raise ValueError(f"Invalid type: {type}")
         arg_func = getattr(self, f"get_arg_list_for_parallel_{type}")
-        arg_list = arg_func(seed_list, return_power_3d, return_power_1d)
+        arg_list = arg_func(seed_list, return_power_3d, return_power_1d, multipole_ells)
         if self.pool == "multiprocessing":
             pool_func = Pool
         elif self.pool == "mpi":
@@ -588,6 +650,174 @@ class TransferFunction:
             for result_i in pool.starmap(run_func, arg_list):
                 results_arr.append(result_i)
         return results_arr
+
+
+def _multipole_ells(multipole_ells):
+    """Return the multipoles to bin. ``None`` is the monopole."""
+    if multipole_ells is None:
+        return (0,)
+    ells = tuple(multipole_ells)
+    if len(ells) == 0:
+        raise ValueError("multipole_ells must contain at least one multipole")
+    return ells
+
+
+def multipole_power_1d(mock, power3d, k1dweights, multipole_ells):
+    """
+    Bin a 3D power spectrum into one or more multipoles.
+
+    A single multipole is the 1D array returned by ``get_1d_power``.
+    Several multipoles are stacked on the first axis.
+    """
+    ells = _multipole_ells(multipole_ells)
+    spectra = []
+    for ell in ells:
+        power_1d, _, _ = mock.get_1d_power(
+            power3d, k1dweights=k1dweights, multipole_ell=ell
+        )
+        spectra.append(power_1d)
+    if len(spectra) == 1:
+        return spectra[0]
+    return np.stack(spectra, axis=0)
+
+
+def apply_cleaning_matrix(
+    mock_data,
+    uncleaned_data,
+    cleaning_matrix,
+    map_weights,
+    mean_center_map,
+    project_combined,
+):
+    """
+    Apply a frequency cleaning matrix to a sky cube.
+
+    ``cleaning_matrix`` is applied to the mock cube, or to
+    ``uncleaned_data + mock_data`` when ``project_combined`` is True.
+    When ``mean_center_map`` is True, the frequency mean of that chosen cube,
+    weighted by ``map_weights``, is removed before the matrix is applied.
+
+    Parameters
+    ----------
+    mock_data: np.ndarray
+        Mock sky cube, shape ``(nx, ny, n_freq)``.
+    uncleaned_data: np.ndarray
+        Data cube added to the mock when ``project_combined`` is True.
+    cleaning_matrix: np.ndarray
+        Frequency matrix with shape ``(n_freq, n_freq)``.
+    map_weights: np.ndarray
+        Weights for the frequency mean, same sky shape as the cube.
+    mean_center_map: bool
+        Whether to subtract the weighted frequency mean.
+    project_combined: bool
+        Whether to project the sum of the data and the mock.
+
+    Returns
+    -------
+    np.ndarray
+        Cleaned cube, shape ``(nx, ny, n_freq)``.
+    """
+    combined = np.asarray(uncleaned_data) + mock_data
+    array_to_clean = combined if project_combined else np.asarray(mock_data)
+    if mean_center_map:
+        data_mean = np.sum(map_weights * array_to_clean, axis=(0, 1)) / np.sum(
+            map_weights, axis=(0, 1)
+        )
+        array_to_clean = array_to_clean - data_mean[None, None, :]
+    return np.einsum("ij,abj->abi", cleaning_matrix, array_to_clean)
+
+
+def _align_loaded_cube_masks(mock):
+    """Broadcast the spatial mask and pixel weights onto the loaded cube."""
+    shape = mock.data.shape
+    sampling = np.asarray(mock.map_has_sampling)
+    if sampling.shape != shape:
+        if sampling.ndim == 3 and sampling.shape[:2] == shape[:2]:
+            spatial = np.any(sampling, axis=-1)
+        elif sampling.shape == shape[:2]:
+            spatial = np.asarray(sampling, dtype=bool)
+        else:
+            spatial = np.ones(shape[:2], dtype=bool)
+        mock.map_has_sampling = np.broadcast_to(spatial[..., None], shape).copy()
+    weights = np.asarray(mock.weights_map_pixel)
+    if weights.shape != shape:
+        if weights.ndim == 3 and weights.shape[:2] == shape[:2]:
+            spatial_weights = np.mean(weights, axis=-1)
+        else:
+            spatial_weights = np.ones(shape[:2], dtype=float)
+        mock.weights_map_pixel = np.broadcast_to(
+            spatial_weights[..., None], shape
+        ).copy()
+
+
+def _convolve_loaded_cube(mock):
+    """Convolve a loaded HI cube with a per-channel Gaussian primary beam."""
+    from .telescope import gaussian_beam, isotropic_beam_profile, weighted_convolution
+
+    sigma = None if mock.sigma_beam_ch is None else np.asarray(mock.sigma_beam_ch)
+    n_freq = mock.data.shape[-1]
+    if sigma is None or sigma.shape != (n_freq,):
+        raise ValueError(
+            "sigma_beam_ch must have one value for each loaded frequency channel"
+        )
+    beam = np.zeros(mock.data.shape, dtype=float)
+    for channel, sigma_channel in enumerate(sigma):
+        beam[:, :, channel] = isotropic_beam_profile(
+            mock.num_pix_x,
+            mock.num_pix_y,
+            mock.wproj,
+            gaussian_beam(float(sigma_channel)),
+        )
+    weights = np.ones(mock.data.shape, dtype=float)
+    convolved, _ = weighted_convolution(mock.data, beam, weights)
+    mock.data = convolved
+
+
+def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock=False):
+    """
+    Replace a mock's sky cube with a saved HI map and, optionally, its galaxies.
+
+    The pickle is ``{prefix}HI_mock_{seed}.pkl`` with ``HImap`` and ``freq``
+    in MHz. Channels outside ``mock.nu_min < freq < mock.nu_max`` are dropped,
+    ``mock.nu`` is set to the kept frequencies, and the sky mask is rebuilt to
+    the cube shape. When ``read_galaxies`` is True, ``{prefix}gal_mock_{seed}.fits``
+    is read. ``convolve_loaded_mock`` applies the Gaussian primary beam.
+
+    Parameters
+    ----------
+    mock: MockSimulation
+        Mock whose ``seed``, frequency window, and beam width are already set.
+    prefix: str
+        Path prefix concatenated onto the file names.
+    read_galaxies: bool, default True
+        Whether to read the galaxy FITS table.
+    convolve_loaded_mock: bool, default False
+        Whether to convolve the loaded cube with ``sigma_beam_ch``.
+
+    Returns
+    -------
+    MockSimulation
+        The same mock, updated in place.
+    """
+    hi_path = f"{prefix}HI_mock_{mock.seed}.pkl"
+    with open(hi_path, "rb") as handle:
+        payload = pickle.load(handle)
+    hi_map = np.asarray(payload["HImap"])
+    freq_hz = np.asarray(payload["freq"], dtype=float) * 1e6
+    keep = (freq_hz > mock.nu_min) & (freq_hz < mock.nu_max)
+    if not np.any(keep):
+        raise ValueError(
+            f"no channels in {hi_path} lie in " f"{mock.nu_min} < freq < {mock.nu_max}"
+        )
+    mock.data = hi_map[:, :, keep]
+    mock.nu = freq_hz[keep]
+    _align_loaded_cube_masks(mock)
+    if convolve_loaded_mock:
+        _convolve_loaded_cube(mock)
+    if read_galaxies:
+        mock.gal_file = f"{prefix}gal_mock_{mock.seed}.fits"
+        mock.read_gal_cat()
+    return mock
 
 
 # this must be pickleable inputs for multiprocessing
@@ -611,6 +841,10 @@ def run_tf_calculation_cross(
     ra_range=None,
     dec_range=None,
     discrete_source_dndz=None,
+    project_combined=False,
+    multipole_ells=None,
+    mock_directory=None,
+    convolve_loaded_mock=False,
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -668,32 +902,53 @@ def run_tf_calculation_cross(
             only the shape of the dndz is used, not the normalization.
             If a list is provided, the first element is the redshift array, and the second element is the dndz array,
             and a 1D linear interpolation is used to get the dndz function.
+        project_combined: bool, default False
+            If True, apply the cleaning matrix to ``uncleaned_data + mock``.
+            See :class:`meer21cm.transfer.TransferFunction`.
+        multipole_ells: sequence, default None
+            Multipoles to bin. ``None`` is the monopole. One multipole is a 1D
+            array. Several are stacked on the first axis.
+        mock_directory: str, default None
+            Prefix for ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits``.
+            ``None`` generates the mock in this function.
+        convolve_loaded_mock: bool, default False
+            Convolve a loaded HI cube with the Gaussian primary beam.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
     mock = MockSimulation(**mock_attr_dict)
-    if not isinstance(discrete_source_dndz, Callable):
-        discrete_source_dndz = interp1d(
-            discrete_source_dndz[0],
-            discrete_source_dndz[1],
-            kind="linear",
-            bounds_error=False,
-            fill_value=0,
+    if mock_directory is None:
+        if not isinstance(discrete_source_dndz, Callable):
+            discrete_source_dndz = interp1d(
+                discrete_source_dndz[0],
+                discrete_source_dndz[1],
+                kind="linear",
+                bounds_error=False,
+                fill_value=0,
+            )
+        mock.discrete_source_dndz = discrete_source_dndz
+        if unmask_during_mock:
+            W_HI_mock = mock.W_HI.copy()
+            w_HI_mock = mock.w_HI.copy()
+            mock.W_HI = np.ones_like(mock.W_HI)
+            mock.w_HI = np.ones_like(mock.w_HI)
+        mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
+        mock.propagate_mock_tracer_to_gal_cat()
+        if unmask_during_mock:
+            mock.W_HI = W_HI_mock
+            mock.w_HI = w_HI_mock
+            mock.data[mock.W_HI == 0] = 0
+
+    else:
+        load_precomputed_mock(
+            mock,
+            mock_directory,
+            read_galaxies=True,
+            convolve_loaded_mock=convolve_loaded_mock,
         )
-    mock.discrete_source_dndz = discrete_source_dndz
-    if unmask_during_mock:
-        W_HI_mock = mock.W_HI.copy()
-        w_HI_mock = mock.w_HI.copy()
-        mock.W_HI = np.ones_like(mock.W_HI)
-        mock.w_HI = np.ones_like(mock.w_HI)
-    mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
-    mock.propagate_mock_tracer_to_gal_cat()
-    if unmask_during_mock:
-        mock.W_HI = W_HI_mock
-        mock.w_HI = w_HI_mock
-        mock.data[mock.W_HI == 0] = 0
+
     mock.ra_range = ra_range
     mock.dec_range = dec_range
     mock.trim_map_to_range()
@@ -709,36 +964,34 @@ def run_tf_calculation_cross(
     mock.field_2 = mockgal_map_rg
     mock.weights_field_2 = weights_field_2
     mock.weights_grid_2 = weights_grid_2
-    # get 1d power
-    pmock_1d_cross, _, _ = mock.get_1d_power(
-        mock.cross_power_3d, k1dweights=k_sel_3d_to_1d
+
+    pmock_1d_cross = multipole_power_1d(
+        mock, mock.cross_power_3d, k_sel_3d_to_1d, multipole_ells
     )
     if return_power_3d:
         power_3d_uncleaned = mock.cross_power_3d
-    # perform PCA cleaning
-    map_to_clean = uncleaned_data + mock.data
-    R_mat_mock = R_mat
-    if R_mat is None:
-        R_mat_mock = get_pca_matrix(
+    map_to_clean = np.asarray(uncleaned_data) + mock.data
+    cleaning_matrix = R_mat
+    if cleaning_matrix is None:
+        cleaning_matrix = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
-    if mean_center_map:
-        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
-            pca_map_weights, axis=(0, 1)
-        )
-        mock.data -= data_mean[None, None, :]
-    mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
-    mock.data = mock_map_cleaned
-    # regrid the cleaned data
+    mock.data = apply_cleaning_matrix(
+        mock.data,
+        uncleaned_data,
+        cleaning_matrix,
+        pca_map_weights,
+        mean_center_map,
+        project_combined,
+    )
     mock_map_rg, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
-    # get 1d power again
-    pmock_1d_cross_cleaned, _, _ = mock.get_1d_power(
-        mock.cross_power_3d, k1dweights=k_sel_3d_to_1d
+    pmock_1d_cross_cleaned = multipole_power_1d(
+        mock, mock.cross_power_3d, k_sel_3d_to_1d, multipole_ells
     )
-    tf_1d_i = pmock_1d_cross_cleaned / pmock_1d_cross
+    tf_1d_i = np.asarray(pmock_1d_cross_cleaned) / np.asarray(pmock_1d_cross)
     result = [tf_1d_i]
     if return_power_3d:
         result.append(power_3d_uncleaned)
@@ -766,6 +1019,10 @@ def run_tf_calculation_auto(
     unmask_during_mock=False,
     ra_range=None,
     dec_range=None,
+    project_combined=False,
+    multipole_ells=None,
+    mock_directory=None,
+    convolve_loaded_mock=False,
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -811,22 +1068,41 @@ def run_tf_calculation_auto(
             The range of the RA in the sky map. Map and galaxy will be trimmed to this range.
         dec_range: tuple, default None
             The range of the Dec in the sky map. Map and galaxy will be trimmed to this range.
+        project_combined: bool, default False
+            If True, apply the cleaning matrix to ``uncleaned_data + mock``.
+            See :class:`meer21cm.transfer.TransferFunction`.
+        multipole_ells: sequence, default None
+            Multipoles to bin. ``None`` is the monopole. One multipole is a 1D
+            array. Several are stacked on the first axis.
+        mock_directory: str, default None
+            Prefix for ``HI_mock_{seed}.pkl``. ``None`` generates the mock here.
+            The galaxy file is not read on this path.
+        convolve_loaded_mock: bool, default False
+            Convolve a loaded HI cube with the Gaussian primary beam.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
     mock = MockSimulation(**mock_attr_dict)
-    if unmask_during_mock:
-        W_HI_mock = mock.W_HI.copy()
-        w_HI_mock = mock.w_HI.copy()
-        mock.W_HI = np.ones_like(mock.W_HI)
-        mock.w_HI = np.ones_like(mock.w_HI)
-    mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
-    if unmask_during_mock:
-        mock.W_HI = W_HI_mock
-        mock.w_HI = w_HI_mock
-        mock.data[mock.W_HI == 0] = 0
+    if mock_directory is None:
+        if unmask_during_mock:
+            W_HI_mock = mock.W_HI.copy()
+            w_HI_mock = mock.w_HI.copy()
+            mock.W_HI = np.ones_like(mock.W_HI)
+            mock.w_HI = np.ones_like(mock.w_HI)
+        mock.data = mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
+        if unmask_during_mock:
+            mock.W_HI = W_HI_mock
+            mock.w_HI = w_HI_mock
+            mock.data[mock.W_HI == 0] = 0
+    else:
+        load_precomputed_mock(
+            mock,
+            mock_directory,
+            read_galaxies=False,
+            convolve_loaded_mock=convolve_loaded_mock,
+        )
     mock.ra_range = ra_range
     mock.dec_range = dec_range
     mock.trim_map_to_range()
@@ -837,27 +1113,35 @@ def run_tf_calculation_auto(
     mock.field_1 = mock_map_rg_before
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
-    # get 1d power
-    pmock_1d_before, _, _ = mock.get_1d_power(
-        mock.auto_power_3d_1, k1dweights=k_sel_3d_to_1d
+    pmock_1d_before = multipole_power_1d(
+        mock, mock.auto_power_3d_1, k_sel_3d_to_1d, multipole_ells
     )
     if return_power_3d:
         power_3d_uncleaned = mock.auto_power_3d_1
-    # perform PCA cleaning
-    map_to_clean = uncleaned_data + mock.data
-    R_mat_mock = R_mat
-    if R_mat is None:
-        R_mat_mock = get_pca_matrix(
+    map_to_clean = np.asarray(uncleaned_data) + mock.data
+    cleaning_matrix = R_mat
+    if cleaning_matrix is None:
+        cleaning_matrix = get_pca_matrix(
             map_to_clean, N_fg, pca_map_weights, mean_center_map
         )
-    if mean_center_map:
+    if mean_center_map and not project_combined:
+        # Flat-sky gridding aliases field_1 with this map. Subtract in place so
+        # the cross against the cleaned cube uses the mean-centered mock.
         data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
             pca_map_weights, axis=(0, 1)
         )
         mock.data -= data_mean[None, None, :]
-    mock_map_cleaned = np.einsum("ij,abj->abi", R_mat_mock, mock.data)
-    mock.data = mock_map_cleaned
-    # regrid the cleaned data
+        cleaned = np.einsum("ij,abj->abi", cleaning_matrix, mock.data)
+    else:
+        cleaned = apply_cleaning_matrix(
+            mock.data,
+            uncleaned_data,
+            cleaning_matrix,
+            pca_map_weights,
+            mean_center_map,
+            project_combined,
+        )
+    mock.data = cleaned
     mock_map_rg_cleaned, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg_before
     mock.weights_field_1 = weights_field_1
@@ -867,12 +1151,10 @@ def run_tf_calculation_auto(
     mock.weights_grid_2 = weights_grid_1
     mock.unitless_2 = False
     mock.mean_center_2 = False
-
-    # get 1d power again
-    pmock_1d_cross_cleaned, _, _ = mock.get_1d_power(
-        mock.cross_power_3d, k1dweights=k_sel_3d_to_1d
+    pmock_1d_cross_cleaned = multipole_power_1d(
+        mock, mock.cross_power_3d, k_sel_3d_to_1d, multipole_ells
     )
-    tf_1d_i = pmock_1d_cross_cleaned / pmock_1d_before
+    tf_1d_i = np.asarray(pmock_1d_cross_cleaned) / np.asarray(pmock_1d_before)
     result = [tf_1d_i]
     if return_power_3d:
         result.append(power_3d_uncleaned)

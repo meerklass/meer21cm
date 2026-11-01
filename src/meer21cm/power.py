@@ -816,6 +816,8 @@ class PowerSpectrum(LightconeGriddingMixin, FieldPowerSpectrum, ModelPowerSpectr
             random_counts=getattr(self, f"field_{tracer}_R"),
             alpha=getattr(self, f"field_{tracer}_alpha"),
             unitless=bool(getattr(self, f"unitless_{tracer}")),
+            data_counts_sq=getattr(self, f"field_{tracer}_D2"),
+            random_counts_sq=getattr(self, f"field_{tracer}_R2"),
         )
         correction = shot_noise_correction_from_gridding(
             np.asarray(self.box_ndim), self.grid_scheme
@@ -828,8 +830,10 @@ class PowerSpectrum(LightconeGriddingMixin, FieldPowerSpectrum, ModelPowerSpectr
 
         Uses ``field_1_D`` when it is set, otherwise ``field_1``, together
         with ``weights_1``, ``weights_field_1``, ``field_1_R`` and
-        ``field_1_alpha``. ``unitless_1`` selects the mean-divided count
-        formula. The result includes :math:`C_{\\rm MAS}(\\mathbf{k})`.
+        ``field_1_alpha``. The Poisson variance is ``field_1_D2`` and
+        ``field_1_R2``, the paint of the squared weights, when they are set. ``unitless_1``
+        selects the mean-divided count formula.
+        The result includes :math:`C_{\\rm MAS}(\\mathbf{k})`.
 
         Returns
         -------
@@ -843,9 +847,11 @@ class PowerSpectrum(LightconeGriddingMixin, FieldPowerSpectrum, ModelPowerSpectr
         """Poisson shot noise of tracer 2 on the Fourier grid.
 
         Uses ``field_2_D`` when it is set, otherwise ``field_2``, together
+        Uses ``field_2_D`` when it is set, otherwise ``field_2``, together
         with ``weights_2``, ``weights_field_2``, ``field_2_R`` and
-        ``field_2_alpha``. ``unitless_2`` selects the mean-divided count
-        formula. With ``field_2_has_random`` True the amplitude is that of
+        ``field_2_alpha``. The Poisson variance is ``field_2_D2`` and
+        ``field_2_R2``, the paint of the squared weights, when they are set. ``unitless_2``
+        selects the mean-divided count formula. With ``field_2_has_random`` True the amplitude is that of
         :math:`F = D - \\alpha R`. The result includes
         :math:`C_{\\rm MAS}(\\mathbf{k})`.
 

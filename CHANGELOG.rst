@@ -71,6 +71,8 @@ Changed
   model over-predicts the data's coherent part by ~2–5% at mid-k; ruled out:
   sampling kernel, mode_scale placement, MAS commutation, and — via a
   z-taper experiment — window leakage)
+* transfer function can load precomputed HI and galaxy mocks, return several
+  multipoles, and apply the cleaning matrix to the combined map
 
 v0.10.0
 -------
