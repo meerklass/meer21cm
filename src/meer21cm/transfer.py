@@ -21,6 +21,7 @@ from .util import pca_clean, dft_matrix, inv_dft_matrix
 from .mock import MockSimulation
 from multiprocessing import Pool
 from .power import PowerSpectrum
+from .power_ops import fkp_count_field
 from typing import Callable
 from scipy.interpolate import interp1d
 import pickle
@@ -310,6 +311,45 @@ class TransferFunction:
             If True, convolve a cube loaded from ``mock_directory`` with a
             Gaussian primary beam using ``sigma_beam_ch``. Has no effect when
             the mock is generated inside the worker.
+        construct_fkp_mock: bool, default False
+            If True, the ``type="cross"`` worker builds an FKP field for the
+            mock galaxies instead of painting raw counts: ``F_mock = D_mock -
+            alpha_mock * R``, with ``alpha_mock = sum(D_mock) / sum(R)``
+            recomputed per mock from that mock's own painted counts, and
+            ``R`` taken from ``ps.field_2_R`` (the real survey's randoms,
+            already painted once by ``ps.grid_gal_to_field(construct_fkp=
+            True)`` -- not repainted per mock). Requires
+            ``ps.field_2_has_random`` to be True (i.e. the real data side was
+            itself built with ``construct_fkp=True``), otherwise
+            ``ps.field_2_R`` is undefined and this raises. ``ps.weights_grid_2``
+            is read as a pure taper/footprint template with no FKP amplitude
+            in it -- true for the standard real-data sequence, where
+            ``construct_fkp=True`` sets it to all-ones and any taper applied
+            afterwards multiplies it directly, never by ``alpha * R``. The
+            mock's weights are then ``weights_field_2 = alpha_mock * R *
+            template``, ``weights_grid_2 = template``. Without this, the
+            worker always stamps the parent's ``weights_field_2``/
+            ``weights_grid_2`` onto the mock's raw painted counts, which is
+            not an FKP field for that mock (see the ``tf_wmocks`` handoff
+            notes).
+        mock_dilution: np.ndarray, default None
+            Optional multiplicative array, same shape as the gridded HI
+            field, applied to the mock HI signal *after* beam convolution
+            (``convolve_loaded_mock``) but before it is injected into
+            ``uncleaned_data``. Intended for ``hit / hit_nomask`` (<=1):
+            saved mocks stay clean, pure HI, undiluted by the real
+            observation's inpainting-driven dilution (see
+            ``uhf-foreground-cleaning``'s block 7 rescaling note); this
+            applies that same dilution to a working copy of the mock signal
+            only, so the injection step sees what a real HI signal would
+            have looked like after block combination. The transfer function
+            denominator (the mock's own, "original" power) is taken
+            *before* this dilution, so the TF still measures recovery of
+            the true, undiluted signal. After PCA cleaning, the cleaned
+            mock is divided back by ``mock_dilution`` (i.e. multiplied by
+            ``hit_nomask / hit``), mirroring the rescale applied to the
+            real cleaned data. ``None`` (default) leaves the mock
+            undiluted, unchanged from prior behaviour.
 
     """
 
@@ -333,6 +373,8 @@ class TransferFunction:
         mock_directory: str | None = None,
         project_combined: bool = False,
         convolve_loaded_mock: bool = False,
+        construct_fkp_mock: bool = False,
+        mock_dilution: np.ndarray | None = None,
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -356,6 +398,8 @@ class TransferFunction:
         self.mock_directory = mock_directory
         self.project_combined = project_combined
         self.convolve_loaded_mock = convolve_loaded_mock
+        self.construct_fkp_mock = construct_fkp_mock
+        self.mock_dilution = mock_dilution
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -479,6 +523,12 @@ class TransferFunction:
             arg_list: list
                 The list of arguments for the parallelisation.
         """
+        if self.construct_fkp_mock and not getattr(self.ps, "field_2_has_random", False):
+            raise ValueError(
+                "construct_fkp_mock=True requires ps.field_2_has_random (i.e. "
+                "ps.grid_gal_to_field(construct_fkp=True) was already called "
+                "on the real data) so ps.field_2_R is defined."
+            )
         arg_list = []
         for seed in seed_list:
             mock_attr_dict = self.get_mock_instance_attr_dict(seed)
@@ -507,6 +557,9 @@ class TransferFunction:
                     multipole_ells,
                     self.mock_directory,
                     self.convolve_loaded_mock,
+                    self.construct_fkp_mock,
+                    getattr(self.ps, "field_2_R", None) if self.construct_fkp_mock else None,
+                    self.mock_dilution,
                 )
             )
         return arg_list
@@ -845,6 +898,9 @@ def run_tf_calculation_cross(
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
+    construct_fkp_mock=False,
+    random_counts_2=None,
+    mock_dilution=None,
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -913,6 +969,19 @@ def run_tf_calculation_cross(
             ``None`` generates the mock in this function.
         convolve_loaded_mock: bool, default False
             Convolve a loaded HI cube with the Gaussian primary beam.
+        construct_fkp_mock: bool, default False
+            Build ``F_mock = D_mock - alpha_mock * R`` for the mock galaxies
+            instead of stamping ``weights_field_2``/``weights_grid_2``
+            unchanged onto the mock's raw painted counts. See
+            :class:`meer21cm.transfer.TransferFunction`.
+        random_counts_2: np.ndarray, default None
+            Painted random counts ``R`` (``ps.field_2_R``), reused for every
+            mock. Required when ``construct_fkp_mock`` is True.
+        mock_dilution: np.ndarray, default None
+            See :class:`meer21cm.transfer.TransferFunction`. Applied to the
+            mock HI field after beam convolution, before injection into
+            ``uncleaned_data``; divided back out of the cleaned mock before
+            the transfer function ratio is taken. ``None`` is a no-op.
     Returns
     -------
         result: list
@@ -961,15 +1030,50 @@ def run_tf_calculation_cross(
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
-    mock.field_2 = mockgal_map_rg
-    mock.weights_field_2 = weights_field_2
-    mock.weights_grid_2 = weights_grid_2
+    if construct_fkp_mock:
+        # Mirror ps.grid_gal_to_field(construct_fkp=True), but with this
+        # mock's own painted counts D_mock and alpha_mock = sum(D_mock) /
+        # sum(R), instead of stamping the parent's weights_field_2 (built
+        # from the real D) onto the mock's raw counts. R is the real
+        # survey's randoms (random_counts_2 = ps.field_2_R), reused
+        # unchanged for every mock -- only D_mock, and hence alpha_mock,
+        # differ seed to seed. weights_grid_2 here is the parent's taper/
+        # footprint template (all-ones from construct_fkp=True, times
+        # whatever taper was applied afterwards), not the FKP amplitude.
+        data_counts = np.asarray(mockgal_map_rg, dtype=mock.real_dtype)
+        random_counts = np.asarray(random_counts_2, dtype=mock.real_dtype)
+        taper_template = np.asarray(weights_grid_2, dtype=mock.real_dtype)
+        _, alpha_mock = fkp_count_field(data_counts, random_counts)
+        # field_2 is a derived property once field_2_has_random is True (it
+        # computes D - alpha*R itself from field_2_D/_R/_alpha) -- assigning
+        # it directly would raise, so only the pieces it's built from are
+        # set here.
+        mock.field_2_D = data_counts
+        mock.field_2_R = random_counts
+        mock.field_2_alpha = float(alpha_mock)
+        mock.field_2_has_random = True
+        mock.weights_field_2 = alpha_mock * random_counts * taper_template
+        mock.weights_grid_2 = taper_template
+        mock.mean_center_2 = False
+        mock.unitless_2 = False
+        mock._disable_galaxy_observational_weights()
+    else:
+        mock.field_2 = mockgal_map_rg
+        mock.weights_field_2 = weights_field_2
+        mock.weights_grid_2 = weights_grid_2
 
     pmock_1d_cross = multipole_power_1d(
         mock, mock.cross_power_3d, k_sel_3d_to_1d, multipole_ells
     )
     if return_power_3d:
         power_3d_uncleaned = mock.cross_power_3d
+    # mock_dilution applied here, after the mock's own (undiluted) reference
+    # power above -- the transfer function denominator stays the true, clean
+    # HI signal. The dilution only affects the copy injected into
+    # uncleaned_data and cleaned below, mimicking how a real HI signal would
+    # have looked after block combination. See TransferFunction's docstring.
+    if mock_dilution is not None:
+        mock.data = mock.data * mock_dilution
     map_to_clean = np.asarray(uncleaned_data) + mock.data
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
@@ -984,6 +1088,10 @@ def run_tf_calculation_cross(
         mean_center_map,
         project_combined,
     )
+    if mock_dilution is not None:
+        # Undo the dilution on the cleaned output, mirroring the hit_nomask/
+        # hit rescale applied to the real cleaned data.
+        mock.data = mock.data / mock_dilution
     mock_map_rg, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
