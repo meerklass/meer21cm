@@ -256,7 +256,7 @@ def interlace_two_fields(
     fourier_field_2 = np.fft.fftn(real_field_2)
     kH_2 = [np.fft.fftfreq(box_ndim[i]) for i in range(3)]
     kH_2 = np.array(np.meshgrid(*kH_2, indexing="ij"))
-    exp_term = np.prod(np.exp(-2 * 1j * shift * kH_2), axis=0)
+    exp_term = np.prod(np.exp(+2 * np.pi * 1j * shift * kH_2), axis=0)
     fourier_field_1 = (fourier_field_1 + exp_term * fourier_field_2) / 2
     return np.fft.ifftn(fourier_field_1).real
 
@@ -1272,20 +1272,24 @@ class LightconeGriddingMixin:
         gal_map_rg, gal_weights_rg, pixel_counts_gal_rg = self._paint_positions(
             data_pos, weights
         )
+        data_counts_sq = self._paint_squared_weights(data_pos, weights)
         if not construct_fkp:
-            self._store_galaxy_counts(gal_map_rg, gal_weights_rg)
+            self._store_galaxy_counts(gal_map_rg, gal_weights_rg, data_counts_sq)
             return gal_map_rg, gal_weights_rg, pixel_counts_gal_rg
         rand_ra, rand_dec, rand_freq, rand_weights = self._resolve_random_catalogue(
             random_radecz, random_weights
         )
         rand_pos = self._sky_positions_in_box(rand_ra, rand_dec, rand_freq, flat_sky)
         random_counts = self._cached_random_paint(rand_pos, rand_weights)
+        random_counts_sq = self._fkp_random_paint_sq
         real_dtype = self.real_dtype
         data_counts = np.asarray(gal_map_rg, dtype=real_dtype)
         random_counts = np.asarray(random_counts, dtype=real_dtype)
         _field, alpha = fkp_count_field(data_counts, random_counts)
         self.field_2_D = data_counts
         self.field_2_R = random_counts
+        self.field_2_D2 = data_counts_sq
+        self.field_2_R2 = random_counts_sq
         self.field_2_alpha = float(alpha)
         self.field_2_has_random = True
         self.weights_field_2 = np.asarray(alpha * random_counts, dtype=real_dtype)
@@ -1295,7 +1299,7 @@ class LightconeGriddingMixin:
         self._disable_galaxy_observational_weights()
         return self.field_2, self.weights_field_2, self.field_2_D
 
-    def _store_galaxy_counts(self, gal_map_rg, gal_weights_rg):
+    def _store_galaxy_counts(self, gal_map_rg, gal_weights_rg, gal_map_sq=None):
         """Store painted galaxy counts as tracer 2.
 
         Parameters
@@ -1304,7 +1308,9 @@ class LightconeGriddingMixin:
             Painted counts :math:`D`.
         gal_weights_rg : ndarray
             Unused painter weights. The field weight is the lightcone mask.
-
+        gal_map_sq : ndarray, optional
+            Paint of the squared per-galaxy weights. ``None`` for unit weights.
+            
         Returns
         -------
         None
@@ -1315,6 +1321,7 @@ class LightconeGriddingMixin:
         self.field_2_R = None
         self.field_2_alpha = 0.0
         self.field_2 = gal_map_rg
+        self.field_2_D2 = gal_map_sq
         weights_g = (self.counts_in_box > 0).astype(real_dtype)
         self.weights_field_2 = weights_g
         self.weights_grid_2 = np.ones_like(self.field_2, dtype=real_dtype)
@@ -1391,7 +1398,8 @@ class LightconeGriddingMixin:
         Returns
         -------
         ndarray
-            Painted counts :math:`R`.
+            Painted counts :math:`R`. The paint of the squared weights is
+            kept on ``_fkp_random_paint_sq`` (None for unit weights).
         """
         weight_key = None if weights is None else int(np.asarray(weights).ctypes.data)
         key = (
@@ -1405,8 +1413,33 @@ class LightconeGriddingMixin:
             return self._fkp_random_paint
         painted, _, _ = self._paint_positions(positions, weights)
         self._fkp_random_paint = painted
+        self._fkp_random_paint_sq = self._paint_squared_weights(positions, weights)
         self._fkp_random_key = key
         return painted
+
+    def _paint_squared_weights(self, positions, weights):
+        """Paint the squared per-object weights.
+
+        This is the Poisson variance of the painted weights, used by the
+        shot noise. Unit weights need no second paint.
+
+        Parameters
+        ----------
+        positions : ndarray
+            Box coordinates, shape ``(n, 3)``.
+        weights : array or None
+            Per-object weights. ``None`` is unit mass.
+
+        Returns
+        -------
+        ndarray or None
+            Paint of :math:`w^2`. None when ``weights`` is None.
+        """
+        if weights is None:
+            return None
+        weights_sq = np.asarray(weights, dtype=float) ** 2
+        painted_sq, _, _ = self._paint_positions(positions, weights_sq)
+        return painted_sq
 
     def _sky_positions_in_box(self, ra_gal, dec_gal, freq_gal, flat_sky):
         """Convert sky coordinates to Cartesian box coordinates.

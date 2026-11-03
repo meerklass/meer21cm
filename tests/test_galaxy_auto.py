@@ -1,5 +1,7 @@
 """Galaxy catalogue weights, the FKP field, and the galaxy auto-power."""
 
+import logging
+
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -12,7 +14,13 @@ from meer21cm.io import read_catalogue_fits
 from meer21cm.grid import shot_noise_correction_from_gridding
 from meer21cm.power import get_shot_noise_galaxy
 from meer21cm.power_ops import fkp_count_field, get_shot_noise_counts
-from meer21cm.util import angle_in_range, f_21, freq_to_redshift, redshift_to_freq
+from meer21cm.util import (
+    angle_in_range,
+    create_wcs,
+    f_21,
+    freq_to_redshift,
+    redshift_to_freq,
+)
 
 
 def _survey_ps(test_gal_fits, test_W):
@@ -939,3 +947,125 @@ def test_selection_normalises_to_the_data_and_paints_cell_centres(tmp_path):
         rebuilt["nside"],
         mock.astropy_cosmo_true,
     ) == pytest.approx(rebuilt["data_weight"])
+
+
+def _shot_noise_from_painted_weights(ps):
+    """Shot noise that uses the paint of the weights as the Poisson variance.
+
+    This is the formula before the squared-weight paint. It agrees with
+    ``shot_noise_2`` only for unit weights.
+    """
+    data = ps.field_2 if ps.field_2_D is None else ps.field_2_D
+    amplitude = get_shot_noise_counts(
+        data,
+        ps.box_len,
+        weights_grid=ps.get_weights_none_to_one("weights_2"),
+        weights_field=ps.get_weights_none_to_one("weights_field_2"),
+        unitless=bool(ps.unitless_2),
+    )
+    correction = shot_noise_correction_from_gridding(
+        np.asarray(ps.box_ndim), ps.grid_scheme
+    )
+    return float(amplitude) * correction
+
+
+def test_constant_catalogue_weight_shot_noise():
+    """Weight 2 splits the shot-noise formulas, and the new one matches P(k).
+
+    A small cut of the validation patch (z = 0.6–0.8, 0.5 deg pixels) is
+    sampled at low number density and painted with a constant weight of 2.
+    The new shot noise is twice the old one. The last few monopole bins
+    sit on the new shot noise.
+    """
+    logger = logging.getLogger("meer21cm")
+    level = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        nu = np.linspace(redshift_to_freq(0.8), redshift_to_freq(0.6), 64)
+        wcs = create_wcs(150.0, -2.5, [48, 48], 0.5)
+        mock = MockSimulation(
+            wproj=wcs,
+            num_pix_x=48,
+            num_pix_y=48,
+            nu=nu,
+            ra_range=(125.0, 175.0),
+            dec_range=(-10.1, 5.0),
+            auto_set_radecnu_bounds=False,
+            density="lognormal",
+            tracer_bias_2=1.0,
+            num_discrete_source=1,
+            downres_factor_transverse=1.5,
+            downres_factor_radial=1.5,
+            grid_scheme="cic",
+            compensate=[False, False],
+            include_beam=[False, False],
+            include_sky_sampling=[False, False],
+            kaiser_rsd=False,
+            flat_sky=False,
+            box_buffkick=2,
+            interlace_shift=0.0,
+            seed=7,
+        )
+        # Well below the validation LRG density, so the high-k monopole is
+        # shot-noise dominated.
+        mock.num_discrete_source = int(round(4.0e-6 * float(mock.survey_volume)))
+        mock.propagate_mock_tracer_to_gal_cat(trim=True)
+        ra = np.asarray(mock.ra_gal)
+        dec = np.asarray(mock.dec_gal)
+        redshift = np.asarray(mock.z_gal)
+        freq = np.asarray(mock.freq_gal)
+        mock.grid_gal_to_field(
+            radecfreq=(ra, dec, freq),
+            weights=np.full(ra.shape, 2.0),
+        )
+        k_nyq = np.pi / np.min(np.asarray(mock.box_len) / np.asarray(mock.box_ndim))
+        edges = np.linspace(0.015, 0.85 * k_nyq, 8)
+        power, _keff, nmodes = mock.get_1d_power(mock.auto_power_3d_2, k1dbins=edges)
+        sn_new, _, _ = mock.get_1d_power(mock.shot_noise_2, k1dbins=edges)
+        sn_old, _, _ = mock.get_1d_power(
+            _shot_noise_from_painted_weights(mock), k1dbins=edges
+        )
+        squared = get_shot_noise_galaxy(
+            mock.field_2, mock.box_len, gal_count_sq=mock.field_2_D2
+        )
+        assert np.isfinite(squared)
+        assert mock._paint_squared_weights(np.zeros((1, 3)), None) is None
+
+        ones = np.ones(1)
+        mock.field_1_D2 = ones
+        assert mock.field_1_D2 is ones
+        mock.field_1_D = ones
+        assert mock.field_1_D2 is None
+        mock.field_1_R2 = ones
+        assert mock.field_1_R2 is ones
+        mock.field_1_R = 0.0
+        assert mock.field_1_R2 is None
+        mock.field_2_R2 = ones
+        assert np.all(mock.field_2_R2 == 1.0)
+
+        mock.grid_gal_to_field(
+            radecfreq=(ra[:5], dec[:5], freq[:5]),
+            weights=np.full(5, 2.0),
+            construct_fkp=True,
+            random_radecz=(ra[5:15], dec[5:15], redshift[5:15]),
+            random_weights=np.full(10, 3.0),
+        )
+        assert mock.field_2_D2 is not None
+        assert mock.field_2_R2 is not None
+        assert np.all(np.isfinite(mock.shot_noise_2))
+    finally:
+        logger.setLevel(level)
+
+    power = np.asarray(power, dtype=float)
+    sn_new = np.asarray(sn_new, dtype=float)
+    sn_old = np.asarray(sn_old, dtype=float)
+    nmodes = np.asarray(nmodes, dtype=float)
+    usable = np.isfinite(power) & np.isfinite(sn_new) & (nmodes > 0)
+    assert usable.sum() >= 3
+    last = np.flatnonzero(usable)[-3:]
+    assert np.median(sn_new[usable] / sn_old[usable]) == pytest.approx(2.0, rel=1e-3)
+    mode_weight = nmodes[last]
+    measured_over_new = np.sum(mode_weight * power[last]) / np.sum(
+        mode_weight * sn_new[last]
+    )
+    assert measured_over_new == pytest.approx(1.0, rel=0.25)

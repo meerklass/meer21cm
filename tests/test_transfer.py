@@ -345,16 +345,27 @@ def test_loaded_mock_frequency_cut_and_multipoles(tmp_path):
         mean_center_map=False,
         R_mat=np.diag(ramp),
     )
-    monopole = tf.run([0], type="cross", return_power_1d=True)[0]
-    both = tf.run([0], type="cross", multipole_ells=[0, 2], return_power_1d=True)[0]
+
+    def run_worker(kind, **kwargs):
+        # Call the worker in this process. tf.run() would hide these lines
+        # from the coverage file uploaded by GitHub Actions.
+        worker = {
+            "cross": run_tf_calculation_cross,
+            "auto": run_tf_calculation_auto,
+        }[kind]
+        arg_func = getattr(tf, f"get_arg_list_for_parallel_{kind}")
+        return worker(*arg_func([0], **kwargs)[0])
+
+    monopole = run_worker("cross", return_power_1d=True)
+    both = run_worker("cross", multipole_ells=[0, 2], return_power_1d=True)
     assert np.isfinite(monopole[0]).all()
     assert monopole[0].ndim == 1
     assert both[0].shape == (2, monopole[0].size)
     assert np.allclose(both[0][0], monopole[0])
     assert np.isfinite(both[0][1]).all()
     assert not np.allclose(both[0][1], both[0][0])
-    auto_default = tf.run([0], type="auto", return_power_1d=True)[0]
-    auto_ell = tf.run([0], type="auto", multipole_ells=[0, 2], return_power_1d=True)[0]
+    auto_default = run_worker("auto", return_power_1d=True)
+    auto_ell = run_worker("auto", multipole_ells=[0, 2], return_power_1d=True)
     assert np.allclose(auto_ell[0][0], auto_default[0])
     assert auto_ell[0].shape == (2, auto_default[0].size)
     assert np.isfinite(auto_ell[0][1]).all()
@@ -362,7 +373,7 @@ def test_loaded_mock_frequency_cut_and_multipoles(tmp_path):
     assert before_power.shape == auto_ell[0].shape
     assert not np.allclose(before_power[0], before_power[1])
     os.remove(prefix + "gal_mock_0.fits")
-    auto_no_cat = tf.run([0], type="auto")[0]
+    auto_no_cat = run_worker("auto")
     assert np.isfinite(auto_no_cat[0]).all()
 
 
