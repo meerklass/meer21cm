@@ -21,7 +21,6 @@ from .util import pca_clean, dft_matrix, inv_dft_matrix
 from .mock import MockSimulation
 from multiprocessing import Pool
 from .power import PowerSpectrum
-from .power_ops import fkp_count_field
 from typing import Callable
 from scipy.interpolate import interp1d
 import pickle
@@ -337,11 +336,8 @@ class TransferFunction:
             field, applied to the mock HI signal *after* beam convolution
             (``convolve_loaded_mock``) but before it is injected into
             ``uncleaned_data``. Intended for ``hit / hit_nomask`` (<=1):
-            saved mocks stay clean, pure HI, undiluted by the real
-            observation's inpainting-driven dilution (see
-            ``uhf-foreground-cleaning``'s block 7 rescaling note); this
-            applies that same dilution to a working copy of the mock signal
-            only, so the injection step sees what a real HI signal would
+            this applies that same dilution to the mock signal,
+            so the injection step sees what a real HI signal would
             have looked like after block combination. The transfer function
             denominator (the mock's own, "original" power) is taken
             *before* this dilution, so the TF still measures recovery of
@@ -350,6 +346,13 @@ class TransferFunction:
             ``hit_nomask / hit``), mirroring the rescale applied to the
             real cleaned data. ``None`` (default) leaves the mock
             undiluted, unchanged from prior behaviour.
+        gal_cat: str, default None
+            DESI tracer (e.g. ``"LRG"``, ``"ELG"``) whose mock galaxy
+            catalogue to load from ``mock_directory``, for mocks saved one
+            file per tracer (``{mock_directory}gal_{gal_cat}_mock_{seed}.fits``).
+            ``None`` uses the tracer-agnostic ``gal_mock_{seed}.fits`` name.
+            Has no effect when the mock is generated inside the worker
+            (``mock_directory=None``).
 
     """
 
@@ -375,6 +378,7 @@ class TransferFunction:
         convolve_loaded_mock: bool = False,
         construct_fkp_mock: bool = False,
         mock_dilution: np.ndarray | None = None,
+        gal_cat: str | None = None,
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -400,6 +404,7 @@ class TransferFunction:
         self.convolve_loaded_mock = convolve_loaded_mock
         self.construct_fkp_mock = construct_fkp_mock
         self.mock_dilution = mock_dilution
+        self.gal_cat = gal_cat
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -560,6 +565,7 @@ class TransferFunction:
                     self.construct_fkp_mock,
                     getattr(self.ps, "field_2_R", None) if self.construct_fkp_mock else None,
                     self.mock_dilution,
+                    self.gal_cat,
                 )
             )
         return arg_list
@@ -826,7 +832,7 @@ def _convolve_loaded_cube(mock):
     mock.data = convolved
 
 
-def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock=False):
+def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock=False, gal_cat=None):
     """
     Replace a mock's sky cube with a saved HI map and, optionally, its galaxies.
 
@@ -834,7 +840,9 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
     in MHz. Channels outside ``mock.nu_min < freq < mock.nu_max`` are dropped,
     ``mock.nu`` is set to the kept frequencies, and the sky mask is rebuilt to
     the cube shape. When ``read_galaxies`` is True, ``{prefix}gal_mock_{seed}.fits``
-    is read. ``convolve_loaded_mock`` applies the Gaussian primary beam.
+    is read (or ``{prefix}gal_{gal_cat}_mock_{seed}.fits`` when ``gal_cat`` is
+    given, for mocks saved per DESI tracer). ``convolve_loaded_mock`` applies
+    the Gaussian primary beam.
 
     Parameters
     ----------
@@ -846,6 +854,9 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
         Whether to read the galaxy FITS table.
     convolve_loaded_mock: bool, default False
         Whether to convolve the loaded cube with ``sigma_beam_ch``.
+    gal_cat: str, default None
+        DESI tracer (e.g. ``"LRG"``, ``"ELG"``) whose mock galaxy catalogue to
+        read. ``None`` uses the tracer-agnostic ``gal_mock_{seed}.fits`` name.
 
     Returns
     -------
@@ -868,7 +879,10 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
     if convolve_loaded_mock:
         _convolve_loaded_cube(mock)
     if read_galaxies:
-        mock.gal_file = f"{prefix}gal_mock_{mock.seed}.fits"
+        if gal_cat is None:
+            mock.gal_file = f"{prefix}gal_mock_{mock.seed}.fits"
+        else:
+            mock.gal_file = f"{prefix}gal_{gal_cat}_mock_{mock.seed}.fits"
         mock.read_gal_cat()
     return mock
 
@@ -901,6 +915,7 @@ def run_tf_calculation_cross(
     construct_fkp_mock=False,
     random_counts_2=None,
     mock_dilution=None,
+    gal_cat=None,
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -982,6 +997,10 @@ def run_tf_calculation_cross(
             mock HI field after beam convolution, before injection into
             ``uncleaned_data``; divided back out of the cleaned mock before
             the transfer function ratio is taken. ``None`` is a no-op.
+        gal_cat: str, default None
+            DESI tracer whose mock galaxy catalogue to load from
+            ``mock_directory``. See
+            :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
@@ -1016,6 +1035,7 @@ def run_tf_calculation_cross(
             mock_directory,
             read_galaxies=True,
             convolve_loaded_mock=convolve_loaded_mock,
+            gal_cat=gal_cat,
         )
 
     mock.ra_range = ra_range
@@ -1031,32 +1051,15 @@ def run_tf_calculation_cross(
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
     if construct_fkp_mock:
-        # Mirror ps.grid_gal_to_field(construct_fkp=True), but with this
-        # mock's own painted counts D_mock and alpha_mock = sum(D_mock) /
-        # sum(R), instead of stamping the parent's weights_field_2 (built
-        # from the real D) onto the mock's raw counts. R is the real
-        # survey's randoms (random_counts_2 = ps.field_2_R), reused
-        # unchanged for every mock -- only D_mock, and hence alpha_mock,
-        # differ seed to seed. weights_grid_2 here is the parent's taper/
-        # footprint template (all-ones from construct_fkp=True, times
-        # whatever taper was applied afterwards), not the FKP amplitude.
-        data_counts = np.asarray(mockgal_map_rg, dtype=mock.real_dtype)
-        random_counts = np.asarray(random_counts_2, dtype=mock.real_dtype)
-        taper_template = np.asarray(weights_grid_2, dtype=mock.real_dtype)
-        _, alpha_mock = fkp_count_field(data_counts, random_counts)
-        # field_2 is a derived property once field_2_has_random is True (it
-        # computes D - alpha*R itself from field_2_D/_R/_alpha) -- assigning
-        # it directly would raise, so only the pieces it's built from are
-        # set here.
-        mock.field_2_D = data_counts
-        mock.field_2_R = random_counts
-        mock.field_2_alpha = float(alpha_mock)
-        mock.field_2_has_random = True
-        mock.weights_field_2 = alpha_mock * random_counts * taper_template
-        mock.weights_grid_2 = taper_template
-        mock.mean_center_2 = False
-        mock.unitless_2 = False
-        mock._disable_galaxy_observational_weights()
+        # F_mock = D_mock - alpha_mock*R via the same assembly
+        # grid_gal_to_field(construct_fkp=True) uses, but with R reused
+        # unchanged from the real survey (random_counts_2 = ps.field_2_R)
+        # instead of painted fresh -- only D_mock, and hence alpha_mock,
+        # differ seed to seed. weights_grid_2 is the parent's taper/
+        # footprint template (not the FKP amplitude), baked in directly.
+        mock.set_fkp_field_from_counts(
+            mockgal_map_rg, random_counts_2, weights_grid_2_template=weights_grid_2
+        )
     else:
         mock.field_2 = mockgal_map_rg
         mock.weights_field_2 = weights_field_2
