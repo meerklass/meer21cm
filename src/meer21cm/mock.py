@@ -1450,15 +1450,17 @@ class MockSimulation(PowerSpectrum):
                 field, beam=beam, average=average
             )
 
-    def save_mock_products(self, prefix, seed=None):
+    def save_mock_products(
+        self, prefix, seed=None, hi_stem="HI_mock_", gal_stem="gal_mock_"
+    ):
         """
         Write the HI sky cube and the galaxy catalogue for transfer-function runs.
 
         ``prefix`` is concatenated in the same way as
         ``TransferFunction.mock_directory``:
 
-        - ``{prefix}HI_mock_{seed}.pkl``
-        - ``{prefix}gal_mock_{seed}.fits``
+        - ``{prefix}{hi_stem}{seed}.pkl``
+        - ``{prefix}{gal_stem}{seed}.fits``
 
         Pass a directory path ending in ``os.sep``, or a stem such as
         ``".../uhf_zbin5_6_"``. The parent directory of the pickle path is created
@@ -1476,6 +1478,10 @@ class MockSimulation(PowerSpectrum):
             Path prefix concatenated onto the file names.
         seed: int, default None
             Seed used in the file names. The default is ``self.seed``.
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``prefix`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``prefix`` and the seed for the galaxy FITS table.
 
         Returns
         -------
@@ -1507,8 +1513,8 @@ class MockSimulation(PowerSpectrum):
         redshift = np.asarray(z_gal, dtype=float)
         if not (ra.shape == dec.shape == redshift.shape):
             raise ValueError("ra_gal, dec_gal and z_gal must have the same shape")
-        hi_path = f"{prefix}HI_mock_{seed}.pkl"
-        gal_path = f"{prefix}gal_mock_{seed}.fits"
+        hi_path = f"{prefix}{hi_stem}{seed}.pkl"
+        gal_path = f"{prefix}{gal_stem}{seed}.fits"
         parent = os.path.dirname(hi_path)
         if parent:
             os.makedirs(parent, exist_ok=True)

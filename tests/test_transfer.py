@@ -238,7 +238,8 @@ def test_transfer_worker_argument_contract():
         assert not any(isinstance(item, PowerSpectrum) for item in arg)
     tf.convolve_loaded_mock = True
     auto_arg = tf.get_arg_list_for_parallel_auto([1])[0]
-    assert auto_arg[-4:] == (False, None, None, True)
+    assert auto_arg[-6:-2] == (False, None, None, True)
+    assert auto_arg[-2:] == ("HI_mock_", "gal_mock_")
 
 
 def test_apply_cleaning_matrix_projects_selected_cube():
@@ -375,6 +376,74 @@ def test_loaded_mock_frequency_cut_and_multipoles(tmp_path):
     os.remove(prefix + "gal_mock_0.fits")
     auto_no_cat = run_worker("auto")
     assert np.isfinite(auto_no_cat[0]).all()
+
+
+def test_loaded_mock_custom_file_stems(tmp_path):
+    nu = np.linspace(900e6, 1000e6, 4)
+    wproj = create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0])
+    cube = np.arange(4 * 4 * nu.size, dtype=float).reshape(4, 4, nu.size)
+    saver = MockSimulation(
+        nu=nu,
+        wproj=wproj,
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=3,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([0.2, -0.4])
+    saver._dec_gal = np.array([0.1, -0.2])
+    saver._z_gal = np.array([0.4, 0.45])
+    prefix = str(tmp_path) + os.sep
+    hi_stem = "cube_"
+    gal_stem = "catalogue_"
+    hi_path, gal_path = saver.save_mock_products(
+        prefix, seed=3, hi_stem=hi_stem, gal_stem=gal_stem
+    )
+    assert hi_path == prefix + "cube_3.pkl"
+    assert gal_path == prefix + "catalogue_3.fits"
+    assert os.path.isfile(hi_path)
+    assert os.path.isfile(gal_path)
+    assert not os.path.isfile(prefix + "HI_mock_3.pkl")
+    assert not os.path.isfile(prefix + "gal_mock_3.fits")
+
+    loaded = MockSimulation(
+        nu=nu,
+        nu_min=float(nu.min()) - 1.0,
+        nu_max=float(nu.max()) + 1.0,
+        wproj=wproj,
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=3,
+    )
+    load_precomputed_mock(
+        loaded,
+        prefix,
+        read_galaxies=True,
+        hi_stem=hi_stem,
+        gal_stem=gal_stem,
+    )
+    assert np.allclose(loaded.data, cube)
+    assert np.allclose(loaded.ra_gal, [0.2, -0.4])
+    assert np.allclose(loaded.dec_gal, [0.1, -0.2])
+    assert loaded.gal_file == gal_path
+    with pytest.raises(FileNotFoundError):
+        load_precomputed_mock(loaded, prefix, read_galaxies=False)
+
+    ps = _tiny_transfer_ps()
+    tf = TransferFunction(
+        ps,
+        N_fg=1,
+        highres_sim=1,
+        upres_transverse=1,
+        upres_radial=1,
+        num_process=1,
+        hi_stem=hi_stem,
+        gal_stem=gal_stem,
+    )
+    assert tf.get_arg_list_for_parallel_auto([3])[0][-2:] == (hi_stem, gal_stem)
+    assert tf.get_arg_list_for_parallel_cross([3])[0][-2:] == (hi_stem, gal_stem)
 
 
 def _high_k_power(cube):
