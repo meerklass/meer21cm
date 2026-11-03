@@ -1282,9 +1282,62 @@ class LightconeGriddingMixin:
         rand_pos = self._sky_positions_in_box(rand_ra, rand_dec, rand_freq, flat_sky)
         random_counts = self._cached_random_paint(rand_pos, rand_weights)
         random_counts_sq = self._fkp_random_paint_sq
+        return self.set_fkp_field_from_counts(
+            gal_map_rg, random_counts, data_counts_sq, random_counts_sq
+        )
+
+    def set_fkp_field_from_counts(
+        self,
+        data_counts,
+        random_counts,
+        data_counts_sq=None,
+        random_counts_sq=None,
+        weights_grid_2_template=None,
+    ):
+        """
+        Assemble the FKP field :math:`F = D - \\alpha R`,
+        :math:`\\alpha = \\sum D / \\sum R`, and its weights, from already-painted
+        data/random counts -- the shared back half of
+        ``grid_gal_to_field(construct_fkp=True)``, which paints ``D`` and
+        ``R`` fresh before calling this. Also used where ``R`` is reused
+        unchanged across many ``D`` (e.g. the same survey randoms for every
+        mock realisation in a transfer function).
+
+        Parameters
+        ----------
+        data_counts : array
+            Painted data counts :math:`D`.
+        random_counts : array
+            Painted random counts :math:`R`, same shape as ``data_counts``.
+        data_counts_sq : array, optional
+            Paint of the squared data weights, for the shot noise. ``None``
+            (the default) is exact for unit weights only.
+        random_counts_sq : array, optional
+            Paint of the squared random weights, for the shot noise. ``None``
+            (the default) is exact for unit weights only.
+        weights_grid_2_template : array, optional
+            Template multiplied onto :math:`\\alpha R` to form
+            ``weights_field_2``, and stored directly as ``weights_grid_2``.
+            ``None`` (the default) is all-ones, i.e. no taper/footprint
+            restriction yet, left for the caller to multiply in afterward.
+            Pass a pre-tapered template to bake one in directly instead.
+
+        Returns
+        -------
+        field : ndarray
+            :math:`F = D - \\alpha R`.
+        weights_field_2 : ndarray
+            :math:`\\alpha R` times ``weights_grid_2_template``.
+        field_2_D : ndarray
+            :math:`D` (``data_counts``).
+        """
         real_dtype = self.real_dtype
-        data_counts = np.asarray(gal_map_rg, dtype=real_dtype)
+        data_counts = np.asarray(data_counts, dtype=real_dtype)
         random_counts = np.asarray(random_counts, dtype=real_dtype)
+        if weights_grid_2_template is None:
+            weights_grid_2_template = np.ones(data_counts.shape, dtype=real_dtype)
+        else:
+            weights_grid_2_template = np.asarray(weights_grid_2_template, dtype=real_dtype)
         _field, alpha = fkp_count_field(data_counts, random_counts)
         self.field_2_D = data_counts
         self.field_2_R = random_counts
@@ -1292,8 +1345,10 @@ class LightconeGriddingMixin:
         self.field_2_R2 = random_counts_sq
         self.field_2_alpha = float(alpha)
         self.field_2_has_random = True
-        self.weights_field_2 = np.asarray(alpha * random_counts, dtype=real_dtype)
-        self.weights_grid_2 = np.ones(data_counts.shape, dtype=real_dtype)
+        self.weights_field_2 = np.asarray(
+            alpha * random_counts * weights_grid_2_template, dtype=real_dtype
+        )
+        self.weights_grid_2 = weights_grid_2_template
         self.mean_center_2 = False
         self.unitless_2 = False
         self._disable_galaxy_observational_weights()

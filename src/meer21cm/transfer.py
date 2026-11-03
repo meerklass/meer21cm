@@ -310,11 +310,53 @@ class TransferFunction:
             If True, convolve a cube loaded from ``mock_directory`` with a
             Gaussian primary beam using ``sigma_beam_ch``. Has no effect when
             the mock is generated inside the worker.
+        construct_fkp_mock: bool, default False
+            If True, the ``type="cross"`` worker builds an FKP field for the
+            mock galaxies instead of painting raw counts: ``F_mock = D_mock -
+            alpha_mock * R``, with ``alpha_mock = sum(D_mock) / sum(R)``
+            recomputed per mock from that mock's own painted counts, and
+            ``R`` taken from ``ps.field_2_R`` (the real survey's randoms,
+            already painted once by ``ps.grid_gal_to_field(construct_fkp=
+            True)`` -- not repainted per mock). Requires
+            ``ps.field_2_has_random`` to be True (i.e. the real data side was
+            itself built with ``construct_fkp=True``), otherwise
+            ``ps.field_2_R`` is undefined and this raises. ``ps.weights_grid_2``
+            is read as a pure taper/footprint template with no FKP amplitude
+            in it -- true for the standard real-data sequence, where
+            ``construct_fkp=True`` sets it to all-ones and any taper applied
+            afterwards multiplies it directly, never by ``alpha * R``. The
+            mock's weights are then ``weights_field_2 = alpha_mock * R *
+            template``, ``weights_grid_2 = template``. Without this, the
+            worker always stamps the parent's ``weights_field_2``/
+            ``weights_grid_2`` onto the mock's raw painted counts, which is
+            not an FKP field for that mock (see the ``tf_wmocks`` handoff
+            notes).
+        mock_dilution: np.ndarray, default None
+            Optional multiplicative array, same shape as the gridded HI
+            field, applied to the mock HI signal *after* beam convolution
+            (``convolve_loaded_mock``) but before it is injected into
+            ``uncleaned_data``. Intended for ``hit / hit_nomask`` (<=1):
+            this applies that same dilution to the mock signal,
+            so the injection step sees what a real HI signal would
+            have looked like after block combination. The transfer function
+            denominator (the mock's own, "original" power) is taken
+            *before* this dilution, so the TF still measures recovery of
+            the true, undiluted signal. After PCA cleaning, the cleaned
+            mock is divided back by ``mock_dilution`` (i.e. multiplied by
+            ``hit_nomask / hit``), mirroring the rescale applied to the
+            real cleaned data. ``None`` (default) leaves the mock
+            undiluted, unchanged from prior behaviour.
+        gal_cat: str, default None
+            Tracer name, for example ``"LRG"``. The galaxy file is then
+            ``{mock_directory}gal_{gal_cat}_mock_{seed}.fits``. ``None`` uses
+            ``gal_stem``. Has no effect when the mock is generated inside the
+            worker (``mock_directory=None``).
         hi_stem: str, default "HI_mock_"
             Filename text between ``mock_directory`` and the seed for the HI pickle.
         gal_stem: str, default "gal_mock_"
             Filename text between ``mock_directory`` and the seed for the galaxy
-            FITS table. The auto-power worker does not read that table.
+            FITS table when ``gal_cat`` is ``None``. The auto-power worker does
+            not read that table.
 
     """
 
@@ -338,6 +380,9 @@ class TransferFunction:
         mock_directory: str | None = None,
         project_combined: bool = False,
         convolve_loaded_mock: bool = False,
+        construct_fkp_mock: bool = False,
+        mock_dilution: np.ndarray | None = None,
+        gal_cat: str | None = None,
         hi_stem: str = "HI_mock_",
         gal_stem: str = "gal_mock_",
     ):
@@ -363,6 +408,9 @@ class TransferFunction:
         self.mock_directory = mock_directory
         self.project_combined = project_combined
         self.convolve_loaded_mock = convolve_loaded_mock
+        self.construct_fkp_mock = construct_fkp_mock
+        self.mock_dilution = mock_dilution
+        self.gal_cat = gal_cat
         self.hi_stem = hi_stem
         self.gal_stem = gal_stem
 
@@ -488,6 +536,14 @@ class TransferFunction:
             arg_list: list
                 The list of arguments for the parallelisation.
         """
+        if self.construct_fkp_mock and not getattr(
+            self.ps, "field_2_has_random", False
+        ):
+            raise ValueError(
+                "construct_fkp_mock=True requires ps.field_2_has_random (i.e. "
+                "ps.grid_gal_to_field(construct_fkp=True) was already called "
+                "on the real data) so ps.field_2_R is defined."
+            )
         arg_list = []
         for seed in seed_list:
             mock_attr_dict = self.get_mock_instance_attr_dict(seed)
@@ -516,6 +572,14 @@ class TransferFunction:
                     multipole_ells,
                     self.mock_directory,
                     self.convolve_loaded_mock,
+                    self.construct_fkp_mock,
+                    (
+                        getattr(self.ps, "field_2_R", None)
+                        if self.construct_fkp_mock
+                        else None
+                    ),
+                    self.mock_dilution,
+                    self.gal_cat,
                     self.hi_stem,
                     self.gal_stem,
                 )
@@ -786,11 +850,30 @@ def _convolve_loaded_cube(mock):
     mock.data = convolved
 
 
+def _galaxy_file_stem(gal_stem="gal_mock_", gal_cat=None):
+    """Galaxy filename text between the path prefix and the seed.
+
+    ``gal_cat`` selects ``gal_{gal_cat}_mock_``. With ``gal_cat`` left as
+    ``None``, the text is ``gal_stem``. Supplying both with different values
+    raises ``ValueError``.
+    """
+    if gal_cat is None:
+        return gal_stem
+    tracer_stem = f"gal_{gal_cat}_mock_"
+    if gal_stem not in ("gal_mock_", tracer_stem):
+        raise ValueError(
+            f"gal_cat={gal_cat!r} selects galaxy stem {tracer_stem!r}, "
+            f"but gal_stem is {gal_stem!r}"
+        )
+    return tracer_stem
+
+
 def load_precomputed_mock(
     mock,
     prefix,
     read_galaxies=True,
     convolve_loaded_mock=False,
+    gal_cat=None,
     hi_stem="HI_mock_",
     gal_stem="gal_mock_",
 ):
@@ -800,9 +883,10 @@ def load_precomputed_mock(
     The pickle is ``{prefix}{hi_stem}{seed}.pkl`` with ``HImap`` and ``freq``
     in MHz. Channels outside ``mock.nu_min < freq < mock.nu_max`` are dropped,
     ``mock.nu`` is set to the kept frequencies, and the sky mask is rebuilt to
-    the cube shape. When ``read_galaxies`` is True,
-    ``{prefix}{gal_stem}{seed}.fits`` is read. ``convolve_loaded_mock`` applies
-    the Gaussian primary beam.
+    the cube shape. When ``read_galaxies`` is True, the galaxy file is
+    ``{prefix}{stem}{seed}.fits``, where ``stem`` is ``gal_{gal_cat}_mock_``
+    when ``gal_cat`` is set and ``gal_stem`` otherwise.
+    ``convolve_loaded_mock`` applies the Gaussian primary beam.
 
     Parameters
     ----------
@@ -814,10 +898,13 @@ def load_precomputed_mock(
         Whether to read the galaxy FITS table.
     convolve_loaded_mock: bool, default False
         Whether to convolve the loaded cube with ``sigma_beam_ch``.
+    gal_cat: str, default None
+        Tracer name. The galaxy file stem is then ``gal_{gal_cat}_mock_``.
     hi_stem: str, default "HI_mock_"
         Filename text between ``prefix`` and the seed for the HI pickle.
     gal_stem: str, default "gal_mock_"
-        Filename text between ``prefix`` and the seed for the galaxy FITS table.
+        Filename text between ``prefix`` and the seed for the galaxy FITS table
+        when ``gal_cat`` is ``None``.
 
     Returns
     -------
@@ -840,7 +927,8 @@ def load_precomputed_mock(
     if convolve_loaded_mock:
         _convolve_loaded_cube(mock)
     if read_galaxies:
-        mock.gal_file = f"{prefix}{gal_stem}{mock.seed}.fits"
+        stem = _galaxy_file_stem(gal_stem, gal_cat)
+        mock.gal_file = f"{prefix}{stem}{mock.seed}.fits"
         mock.read_gal_cat()
     return mock
 
@@ -870,6 +958,10 @@ def run_tf_calculation_cross(
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
+    construct_fkp_mock=False,
+    random_counts_2=None,
+    mock_dilution=None,
+    gal_cat=None,
     hi_stem="HI_mock_",
     gal_stem="gal_mock_",
 ):
@@ -940,10 +1032,27 @@ def run_tf_calculation_cross(
             ``None`` generates the mock in this function.
         convolve_loaded_mock: bool, default False
             Convolve a loaded HI cube with the Gaussian primary beam.
+        construct_fkp_mock: bool, default False
+            Build ``F_mock = D_mock - alpha_mock * R`` for the mock galaxies
+            instead of stamping ``weights_field_2``/``weights_grid_2``
+            unchanged onto the mock's raw painted counts. See
+            :class:`meer21cm.transfer.TransferFunction`.
+        random_counts_2: np.ndarray, default None
+            Painted random counts ``R`` (``ps.field_2_R``), reused for every
+            mock. Required when ``construct_fkp_mock`` is True.
+        mock_dilution: np.ndarray, default None
+            See :class:`meer21cm.transfer.TransferFunction`. Applied to the
+            mock HI field after beam convolution, before injection into
+            ``uncleaned_data``; divided back out of the cleaned mock before
+            the transfer function ratio is taken. ``None`` is a no-op.
+        gal_cat: str, default None
+            Tracer name. The galaxy file stem is then ``gal_{gal_cat}_mock_``.
+            See :class:`meer21cm.transfer.TransferFunction`.
         hi_stem: str, default "HI_mock_"
             Filename text between ``mock_directory`` and the seed for the HI pickle.
         gal_stem: str, default "gal_mock_"
-            Filename text between ``mock_directory`` and the seed for the galaxy table.
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            table when ``gal_cat`` is ``None``.
     Returns
     -------
         result: list
@@ -978,6 +1087,7 @@ def run_tf_calculation_cross(
             mock_directory,
             read_galaxies=True,
             convolve_loaded_mock=convolve_loaded_mock,
+            gal_cat=gal_cat,
             hi_stem=hi_stem,
             gal_stem=gal_stem,
         )
@@ -994,15 +1104,33 @@ def run_tf_calculation_cross(
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
-    mock.field_2 = mockgal_map_rg
-    mock.weights_field_2 = weights_field_2
-    mock.weights_grid_2 = weights_grid_2
+    if construct_fkp_mock:
+        # F_mock = D_mock - alpha_mock*R via the same assembly
+        # grid_gal_to_field(construct_fkp=True) uses, but with R reused
+        # unchanged from the real survey (random_counts_2 = ps.field_2_R)
+        # instead of painted fresh -- only D_mock, and hence alpha_mock,
+        # differ seed to seed. weights_grid_2 is the parent's taper/
+        # footprint template (not the FKP amplitude), baked in directly.
+        mock.set_fkp_field_from_counts(
+            mockgal_map_rg, random_counts_2, weights_grid_2_template=weights_grid_2
+        )
+    else:
+        mock.field_2 = mockgal_map_rg
+        mock.weights_field_2 = weights_field_2
+        mock.weights_grid_2 = weights_grid_2
 
     pmock_1d_cross = multipole_power_1d(
         mock, mock.cross_power_3d, k_sel_3d_to_1d, multipole_ells
     )
     if return_power_3d:
         power_3d_uncleaned = mock.cross_power_3d
+    # mock_dilution applied here, after the mock's own (undiluted) reference
+    # power above -- the transfer function denominator stays the true, clean
+    # HI signal. The dilution only affects the copy injected into
+    # uncleaned_data and cleaned below, mimicking how a real HI signal would
+    # have looked after block combination. See TransferFunction's docstring.
+    if mock_dilution is not None:
+        mock.data = mock.data * mock_dilution
     map_to_clean = np.asarray(uncleaned_data) + mock.data
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
@@ -1017,6 +1145,10 @@ def run_tf_calculation_cross(
         mean_center_map,
         project_combined,
     )
+    if mock_dilution is not None:
+        # Undo the dilution on the cleaned output, mirroring the hit_nomask/
+        # hit rescale applied to the real cleaned data.
+        mock.data = mock.data / mock_dilution
     mock_map_rg, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
