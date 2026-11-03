@@ -294,9 +294,9 @@ class TransferFunction:
             otherwise the mock HI map may contain nan and cause errors.
         mock_directory: string, default None
             Path prefix for precomputed mocks. The workers concatenate
-            ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits`` onto this string.
-            A directory path must end with the path separator. ``None`` generates
-            each mock inside the worker.
+            ``{hi_stem}{seed}.pkl`` and ``{gal_stem}{seed}.fits`` onto this
+            string. A directory path must end with the path separator.
+            ``None`` generates each mock inside the worker.
         project_combined: bool, default False
             If True, the PCA matrix is applied to ``uncleaned_data + mock``.
             The default applies it to the mock only. With mean-centering off, that
@@ -347,12 +347,16 @@ class TransferFunction:
             real cleaned data. ``None`` (default) leaves the mock
             undiluted, unchanged from prior behaviour.
         gal_cat: str, default None
-            DESI tracer (e.g. ``"LRG"``, ``"ELG"``) whose mock galaxy
-            catalogue to load from ``mock_directory``, for mocks saved one
-            file per tracer (``{mock_directory}gal_{gal_cat}_mock_{seed}.fits``).
-            ``None`` uses the tracer-agnostic ``gal_mock_{seed}.fits`` name.
-            Has no effect when the mock is generated inside the worker
-            (``mock_directory=None``).
+            Tracer name, for example ``"LRG"``. The galaxy file is then
+            ``{mock_directory}gal_{gal_cat}_mock_{seed}.fits``. ``None`` uses
+            ``gal_stem``. Has no effect when the mock is generated inside the
+            worker (``mock_directory=None``).
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``mock_directory`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            FITS table when ``gal_cat`` is ``None``. The auto-power worker does
+            not read that table.
 
     """
 
@@ -379,6 +383,8 @@ class TransferFunction:
         construct_fkp_mock: bool = False,
         mock_dilution: np.ndarray | None = None,
         gal_cat: str | None = None,
+        hi_stem: str = "HI_mock_",
+        gal_stem: str = "gal_mock_",
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -405,6 +411,8 @@ class TransferFunction:
         self.construct_fkp_mock = construct_fkp_mock
         self.mock_dilution = mock_dilution
         self.gal_cat = gal_cat
+        self.hi_stem = hi_stem
+        self.gal_stem = gal_stem
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -528,7 +536,9 @@ class TransferFunction:
             arg_list: list
                 The list of arguments for the parallelisation.
         """
-        if self.construct_fkp_mock and not getattr(self.ps, "field_2_has_random", False):
+        if self.construct_fkp_mock and not getattr(
+            self.ps, "field_2_has_random", False
+        ):
             raise ValueError(
                 "construct_fkp_mock=True requires ps.field_2_has_random (i.e. "
                 "ps.grid_gal_to_field(construct_fkp=True) was already called "
@@ -563,9 +573,15 @@ class TransferFunction:
                     self.mock_directory,
                     self.convolve_loaded_mock,
                     self.construct_fkp_mock,
-                    getattr(self.ps, "field_2_R", None) if self.construct_fkp_mock else None,
+                    (
+                        getattr(self.ps, "field_2_R", None)
+                        if self.construct_fkp_mock
+                        else None
+                    ),
                     self.mock_dilution,
                     self.gal_cat,
+                    self.hi_stem,
+                    self.gal_stem,
                 )
             )
         return arg_list
@@ -623,6 +639,8 @@ class TransferFunction:
                     multipole_ells,
                     self.mock_directory,
                     self.convolve_loaded_mock,
+                    self.hi_stem,
+                    self.gal_stem,
                 )
             )
         return arg_list
@@ -832,17 +850,43 @@ def _convolve_loaded_cube(mock):
     mock.data = convolved
 
 
-def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock=False, gal_cat=None):
+def _galaxy_file_stem(gal_stem="gal_mock_", gal_cat=None):
+    """Galaxy filename text between the path prefix and the seed.
+
+    ``gal_cat`` selects ``gal_{gal_cat}_mock_``. With ``gal_cat`` left as
+    ``None``, the text is ``gal_stem``. Supplying both with different values
+    raises ``ValueError``.
+    """
+    if gal_cat is None:
+        return gal_stem
+    tracer_stem = f"gal_{gal_cat}_mock_"
+    if gal_stem not in ("gal_mock_", tracer_stem):
+        raise ValueError(
+            f"gal_cat={gal_cat!r} selects galaxy stem {tracer_stem!r}, "
+            f"but gal_stem is {gal_stem!r}"
+        )
+    return tracer_stem
+
+
+def load_precomputed_mock(
+    mock,
+    prefix,
+    read_galaxies=True,
+    convolve_loaded_mock=False,
+    gal_cat=None,
+    hi_stem="HI_mock_",
+    gal_stem="gal_mock_",
+):
     """
     Replace a mock's sky cube with a saved HI map and, optionally, its galaxies.
 
-    The pickle is ``{prefix}HI_mock_{seed}.pkl`` with ``HImap`` and ``freq``
+    The pickle is ``{prefix}{hi_stem}{seed}.pkl`` with ``HImap`` and ``freq``
     in MHz. Channels outside ``mock.nu_min < freq < mock.nu_max`` are dropped,
     ``mock.nu`` is set to the kept frequencies, and the sky mask is rebuilt to
-    the cube shape. When ``read_galaxies`` is True, ``{prefix}gal_mock_{seed}.fits``
-    is read (or ``{prefix}gal_{gal_cat}_mock_{seed}.fits`` when ``gal_cat`` is
-    given, for mocks saved per DESI tracer). ``convolve_loaded_mock`` applies
-    the Gaussian primary beam.
+    the cube shape. When ``read_galaxies`` is True, the galaxy file is
+    ``{prefix}{stem}{seed}.fits``, where ``stem`` is ``gal_{gal_cat}_mock_``
+    when ``gal_cat`` is set and ``gal_stem`` otherwise.
+    ``convolve_loaded_mock`` applies the Gaussian primary beam.
 
     Parameters
     ----------
@@ -855,15 +899,19 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
     convolve_loaded_mock: bool, default False
         Whether to convolve the loaded cube with ``sigma_beam_ch``.
     gal_cat: str, default None
-        DESI tracer (e.g. ``"LRG"``, ``"ELG"``) whose mock galaxy catalogue to
-        read. ``None`` uses the tracer-agnostic ``gal_mock_{seed}.fits`` name.
+        Tracer name. The galaxy file stem is then ``gal_{gal_cat}_mock_``.
+    hi_stem: str, default "HI_mock_"
+        Filename text between ``prefix`` and the seed for the HI pickle.
+    gal_stem: str, default "gal_mock_"
+        Filename text between ``prefix`` and the seed for the galaxy FITS table
+        when ``gal_cat`` is ``None``.
 
     Returns
     -------
     MockSimulation
         The same mock, updated in place.
     """
-    hi_path = f"{prefix}HI_mock_{mock.seed}.pkl"
+    hi_path = f"{prefix}{hi_stem}{mock.seed}.pkl"
     with open(hi_path, "rb") as handle:
         payload = pickle.load(handle)
     hi_map = np.asarray(payload["HImap"])
@@ -879,10 +927,8 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
     if convolve_loaded_mock:
         _convolve_loaded_cube(mock)
     if read_galaxies:
-        if gal_cat is None:
-            mock.gal_file = f"{prefix}gal_mock_{mock.seed}.fits"
-        else:
-            mock.gal_file = f"{prefix}gal_{gal_cat}_mock_{mock.seed}.fits"
+        stem = _galaxy_file_stem(gal_stem, gal_cat)
+        mock.gal_file = f"{prefix}{stem}{mock.seed}.fits"
         mock.read_gal_cat()
     return mock
 
@@ -916,6 +962,8 @@ def run_tf_calculation_cross(
     random_counts_2=None,
     mock_dilution=None,
     gal_cat=None,
+    hi_stem="HI_mock_",
+    gal_stem="gal_mock_",
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -980,7 +1028,7 @@ def run_tf_calculation_cross(
             Multipoles to bin. ``None`` is the monopole. One multipole is a 1D
             array. Several are stacked on the first axis.
         mock_directory: str, default None
-            Prefix for ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits``.
+            Prefix for ``{hi_stem}{seed}.pkl`` and ``{gal_stem}{seed}.fits``.
             ``None`` generates the mock in this function.
         convolve_loaded_mock: bool, default False
             Convolve a loaded HI cube with the Gaussian primary beam.
@@ -998,9 +1046,13 @@ def run_tf_calculation_cross(
             ``uncleaned_data``; divided back out of the cleaned mock before
             the transfer function ratio is taken. ``None`` is a no-op.
         gal_cat: str, default None
-            DESI tracer whose mock galaxy catalogue to load from
-            ``mock_directory``. See
-            :class:`meer21cm.transfer.TransferFunction`.
+            Tracer name. The galaxy file stem is then ``gal_{gal_cat}_mock_``.
+            See :class:`meer21cm.transfer.TransferFunction`.
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``mock_directory`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            table when ``gal_cat`` is ``None``.
     Returns
     -------
         result: list
@@ -1036,6 +1088,8 @@ def run_tf_calculation_cross(
             read_galaxies=True,
             convolve_loaded_mock=convolve_loaded_mock,
             gal_cat=gal_cat,
+            hi_stem=hi_stem,
+            gal_stem=gal_stem,
         )
 
     mock.ra_range = ra_range
@@ -1134,6 +1188,8 @@ def run_tf_calculation_auto(
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
+    hi_stem="HI_mock_",
+    gal_stem="gal_mock_",
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -1186,10 +1242,15 @@ def run_tf_calculation_auto(
             Multipoles to bin. ``None`` is the monopole. One multipole is a 1D
             array. Several are stacked on the first axis.
         mock_directory: str, default None
-            Prefix for ``HI_mock_{seed}.pkl``. ``None`` generates the mock here.
+            Prefix for ``{hi_stem}{seed}.pkl``. ``None`` generates the mock here.
             The galaxy file is not read on this path.
         convolve_loaded_mock: bool, default False
             Convolve a loaded HI cube with the Gaussian primary beam.
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``mock_directory`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            table. The galaxy file is not read on this path.
     Returns
     -------
         result: list
@@ -1213,6 +1274,8 @@ def run_tf_calculation_auto(
             mock_directory,
             read_galaxies=False,
             convolve_loaded_mock=convolve_loaded_mock,
+            hi_stem=hi_stem,
+            gal_stem=gal_stem,
         )
     mock.ra_range = ra_range
     mock.dec_range = dec_range

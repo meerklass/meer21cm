@@ -18,6 +18,7 @@ from meer21cm.transfer import (
     run_null_test,
 )
 import pytest
+from meer21cm.power_ops import fkp_count_field
 from meer21cm.util import create_wcs, freq_to_redshift
 
 
@@ -238,7 +239,22 @@ def test_transfer_worker_argument_contract():
         assert not any(isinstance(item, PowerSpectrum) for item in arg)
     tf.convolve_loaded_mock = True
     auto_arg = tf.get_arg_list_for_parallel_auto([1])[0]
-    assert auto_arg[-4:] == (False, None, None, True)
+    assert auto_arg[-6:-2] == (False, None, None, True)
+    assert auto_arg[-2:] == ("HI_mock_", "gal_mock_")
+
+
+def test_construct_fkp_mock_requires_randoms():
+    ps = _tiny_transfer_ps()
+    tf = TransferFunction(
+        ps,
+        N_fg=1,
+        highres_sim=1,
+        upres_transverse=1,
+        upres_radial=1,
+        construct_fkp_mock=True,
+    )
+    with pytest.raises(ValueError, match="field_2_has_random"):
+        tf.get_arg_list_for_parallel_cross([0])
 
 
 def test_apply_cleaning_matrix_projects_selected_cube():
@@ -375,6 +391,259 @@ def test_loaded_mock_frequency_cut_and_multipoles(tmp_path):
     os.remove(prefix + "gal_mock_0.fits")
     auto_no_cat = run_worker("auto")
     assert np.isfinite(auto_no_cat[0]).all()
+
+
+def test_mock_dilution_reference_power_and_rescale(tmp_path):
+    ps = _tiny_transfer_ps()
+    ps.k1dbins = np.linspace(0.02, 0.3, 6)
+    n_freq = int(ps.nu.size)
+    phase = np.linspace(0.0, 2.0 * np.pi, n_freq)
+    x_grad = np.linspace(-1.0, 1.0, ps.num_pix_x)[:, None, None]
+    y_grad = np.linspace(-1.0, 1.0, ps.num_pix_y)[None, :, None]
+    cube = (1.5 + x_grad + 0.4 * y_grad) * (2.0 + np.cos(phase))
+    saver = MockSimulation(
+        nu=np.asarray(ps.nu, dtype=float),
+        wproj=ps.wproj,
+        num_pix_x=ps.num_pix_x,
+        num_pix_y=ps.num_pix_y,
+        flat_sky=True,
+        seed=0,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([0.2, -0.3])
+    saver._dec_gal = np.array([0.15, -0.25])
+    saver._z_gal = freq_to_redshift(np.asarray(ps.nu, dtype=float)[[1, -2]])
+    prefix = str(tmp_path) + os.sep
+    saver.save_mock_products(prefix, seed=0)
+
+    def cross_powers(cleaning, dilution):
+        tf = TransferFunction(
+            ps,
+            N_fg=1,
+            highres_sim=1,
+            upres_transverse=1,
+            upres_radial=1,
+            num_process=1,
+            mock_directory=prefix,
+            mean_center_map=False,
+            project_combined=False,
+            R_mat=cleaning,
+            mock_dilution=dilution,
+        )
+        arg = tf.get_arg_list_for_parallel_cross([0], return_power_1d=True)[0]
+        result = run_tf_calculation_cross(*arg)
+        return np.asarray(result[-2]), np.asarray(result[-1])
+
+    def occupied(left, right):
+        sel = np.isfinite(left) & np.isfinite(right)
+        assert np.count_nonzero(sel) >= 1
+        return left[sel], right[sel]
+
+    raw, cleaned = cross_powers(np.eye(n_freq), 0.5 * np.ones(cube.shape))
+    raw, cleaned = occupied(raw, cleaned)
+    assert np.max(np.abs(raw)) > 0.0
+    assert np.allclose(cleaned, raw)
+
+    mix = np.eye(n_freq)
+    mix[0, 1] = 0.7
+    mix[1, 0] = -0.4
+    per_channel = np.linspace(0.4, 1.3, n_freq)
+    before_diluted, after_diluted = cross_powers(mix, per_channel)
+    before_plain, after_plain = cross_powers(mix, None)
+    before_diluted, before_plain = occupied(before_diluted, before_plain)
+    after_diluted, after_plain = occupied(after_diluted, after_plain)
+    assert np.allclose(before_diluted, before_plain)
+    assert not np.allclose(after_diluted, after_plain)
+
+
+def test_cross_worker_fkp_matches_parent_randoms(tmp_path):
+    ps = _tiny_transfer_ps()
+    ps.k1dbins = np.linspace(0.02, 0.3, 6)
+    n_freq = int(ps.nu.size)
+    phase = np.linspace(0.0, 2.0 * np.pi, n_freq)
+    x_grad = np.linspace(-1.0, 1.0, ps.num_pix_x)[:, None, None]
+    y_grad = np.linspace(-1.0, 1.0, ps.num_pix_y)[None, :, None]
+    cube = (1.5 + x_grad + 0.4 * y_grad) * (2.0 + np.cos(phase))
+    saver = MockSimulation(
+        nu=np.asarray(ps.nu, dtype=float),
+        wproj=ps.wproj,
+        num_pix_x=ps.num_pix_x,
+        num_pix_y=ps.num_pix_y,
+        flat_sky=True,
+        seed=0,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([0.2, -0.3])
+    saver._dec_gal = np.array([0.15, -0.25])
+    saver._z_gal = freq_to_redshift(np.asarray(ps.nu, dtype=float)[[1, -2]])
+    prefix = str(tmp_path) + os.sep
+    saver.save_mock_products(prefix, seed=0)
+
+    tf = TransferFunction(
+        ps,
+        N_fg=1,
+        highres_sim=1,
+        upres_transverse=1,
+        upres_radial=1,
+        num_process=1,
+        mock_directory=prefix,
+        mean_center_map=False,
+        project_combined=False,
+        R_mat=np.eye(n_freq),
+        construct_fkp_mock=True,
+    )
+    painted = MockSimulation(**tf.get_mock_instance_attr_dict(0))
+    load_precomputed_mock(painted, prefix, read_galaxies=True)
+    painted.ra_range = ps.ra_range
+    painted.dec_range = ps.dec_range
+    painted.trim_map_to_range()
+    painted.trim_gal_to_range()
+    painted.downres_factor_radial = ps.downres_factor_radial
+    painted.downres_factor_transverse = ps.downres_factor_transverse
+    painted.get_enclosing_box()
+    hi_field, _, _ = painted.grid_data_to_field()
+    data_counts, _, _ = painted.grid_gal_to_field()
+    random_counts = np.linspace(0.3, 1.4, data_counts.size).reshape(data_counts.shape)
+    template = np.linspace(0.5, 1.1, data_counts.size).reshape(data_counts.shape)
+    ps.field_2_R = random_counts
+    ps.field_2_has_random = True
+    ps.weights_grid_2 = template
+
+    def uncleaned(construct_fkp):
+        tf.construct_fkp_mock = construct_fkp
+        arg = tf.get_arg_list_for_parallel_cross([0], return_power_1d=True)[0]
+        result = run_tf_calculation_cross(*arg)
+        return np.asarray(result[-2])
+
+    measured = uncleaned(True)
+    raw_counts = uncleaned(False)
+    field_ref, alpha = fkp_count_field(data_counts, random_counts)
+    painted.field_1 = hi_field
+    painted.weights_field_1 = ps.weights_field_1
+    painted.weights_grid_1 = ps.weights_grid_1
+    painted.field_2_D = data_counts
+    painted.field_2_R = random_counts
+    painted.field_2_alpha = alpha
+    painted.field_2_has_random = True
+    painted.weights_field_2 = alpha * random_counts * template
+    painted.weights_grid_2 = template
+    painted.mean_center_2 = False
+    painted.unitless_2 = False
+    expected, _, _ = painted.get_1d_power(
+        painted.cross_power_3d, k1dweights=ps.k1dweights, multipole_ell=0
+    )
+    expected = np.asarray(expected)
+    occupied = np.isfinite(measured) & np.isfinite(expected)
+    assert np.count_nonzero(occupied) >= 1
+    assert np.max(np.abs(measured[occupied])) > 0.0
+    assert np.allclose(measured[occupied], expected[occupied])
+    raw_occupied = np.isfinite(raw_counts) & occupied
+    assert np.count_nonzero(raw_occupied) >= 1
+    assert not np.allclose(raw_counts[raw_occupied], measured[raw_occupied])
+
+
+def test_loaded_mock_custom_file_stems(tmp_path):
+    nu = np.linspace(900e6, 1000e6, 4)
+    wproj = create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0])
+    cube = np.arange(4 * 4 * nu.size, dtype=float).reshape(4, 4, nu.size)
+    saver = MockSimulation(
+        nu=nu,
+        wproj=wproj,
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=3,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([0.2, -0.4])
+    saver._dec_gal = np.array([0.1, -0.2])
+    saver._z_gal = np.array([0.4, 0.45])
+    prefix = str(tmp_path) + os.sep
+    hi_stem = "cube_"
+    gal_stem = "catalogue_"
+    hi_path, gal_path = saver.save_mock_products(
+        prefix, seed=3, hi_stem=hi_stem, gal_stem=gal_stem
+    )
+    assert hi_path == prefix + "cube_3.pkl"
+    assert gal_path == prefix + "catalogue_3.fits"
+    assert os.path.isfile(hi_path)
+    assert os.path.isfile(gal_path)
+    assert not os.path.isfile(prefix + "HI_mock_3.pkl")
+    assert not os.path.isfile(prefix + "gal_mock_3.fits")
+
+    loaded = MockSimulation(
+        nu=nu,
+        nu_min=float(nu.min()) - 1.0,
+        nu_max=float(nu.max()) + 1.0,
+        wproj=wproj,
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=3,
+    )
+    load_precomputed_mock(
+        loaded,
+        prefix,
+        read_galaxies=True,
+        hi_stem=hi_stem,
+        gal_stem=gal_stem,
+    )
+    assert np.allclose(loaded.data, cube)
+    assert np.allclose(loaded.ra_gal, [0.2, -0.4])
+    assert np.allclose(loaded.dec_gal, [0.1, -0.2])
+    assert loaded.gal_file == gal_path
+    with pytest.raises(FileNotFoundError):
+        load_precomputed_mock(loaded, prefix, read_galaxies=False)
+
+    ps = _tiny_transfer_ps()
+    tf = TransferFunction(
+        ps,
+        N_fg=1,
+        highres_sim=1,
+        upres_transverse=1,
+        upres_radial=1,
+        num_process=1,
+        hi_stem=hi_stem,
+        gal_stem=gal_stem,
+    )
+    assert tf.get_arg_list_for_parallel_auto([3])[0][-2:] == (hi_stem, gal_stem)
+    assert tf.get_arg_list_for_parallel_cross([3])[0][-2:] == (hi_stem, gal_stem)
+
+
+def test_loaded_mock_gal_cat_selects_tracer_stem(tmp_path):
+    nu = np.linspace(900e6, 1000e6, 4)
+    wproj = create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0])
+    cube = np.ones((4, 4, nu.size))
+    saver = MockSimulation(
+        nu=nu,
+        wproj=wproj,
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=1,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([1.0])
+    saver._dec_gal = np.array([-1.0])
+    saver._z_gal = np.array([0.4])
+    prefix = str(tmp_path) + os.sep
+    _, gal_path = saver.save_mock_products(prefix, seed=1, gal_stem="gal_LRG_mock_")
+    loaded = MockSimulation(
+        nu=nu,
+        nu_min=float(nu.min()) - 1.0,
+        nu_max=float(nu.max()) + 1.0,
+        wproj=wproj,
+        num_pix_x=4,
+        num_pix_y=4,
+        flat_sky=True,
+        seed=1,
+    )
+    load_precomputed_mock(loaded, prefix, gal_cat="LRG")
+    assert loaded.gal_file == gal_path
+    assert np.allclose(loaded.ra_gal, [1.0])
+    assert np.allclose(loaded.data, cube)
+    with pytest.raises(ValueError):
+        load_precomputed_mock(loaded, prefix, gal_cat="LRG", gal_stem="catalogue_")
 
 
 def _high_k_power(cube):
