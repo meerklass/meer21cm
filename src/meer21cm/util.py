@@ -431,7 +431,7 @@ def create_udres_wproj(
         The output wcs.
     """
     w = WCS(naxis=2)
-    w.wcs.crpix = wproj.wcs.crpix
+    w.wcs.crpix = (wproj.wcs.crpix - 0.5) * udres_scale + 0.5
     w.wcs.cdelt = wproj.wcs.cdelt / udres_scale
     w.wcs.crval = wproj.wcs.crval
     w.wcs.ctype = wproj.wcs.ctype
