@@ -2066,7 +2066,9 @@ class LightconeGriddingMixin:
             slice_list_i[i] = slice(None, None, None)
             slice_list_i = tuple(slice_list_i)
             taper = taper * taper_i[i][slice_list_i]
+        applied = getattr(self, f"taper_applied_{field}", None)
         setattr(self, f"weights_{field}", getattr(self, f"weights_{field}") * taper)
+        setattr(self, f"taper_applied_{field}", taper if applied is None else applied * taper)
 
     @property
     @tagging("cosmo_fiducial", "nu", "mock", "box")

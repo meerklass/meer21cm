@@ -187,6 +187,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
     @weights_grid_1.setter
     def weights_grid_1(self, value):
         self._weights_grid_1 = value
+        self.taper_applied_1 = None
         if "tracer_1_dep_attr" in dir(self):
             logger.debug(
                 f"cleaning cache of {self.tracer_1_dep_attr} and {self.field_1_dep_attr} due to resetting weights_grid_1"
@@ -220,6 +221,7 @@ class ModelPowerSpectrum(CosmologyCalculator):
     @weights_grid_2.setter
     def weights_grid_2(self, value):
         self._weights_grid_2 = value
+        self.taper_applied_2 = None
         if "tracer_2_dep_attr" in dir(self):
             logger.debug(
                 f"cleaning cache of {self.tracer_2_dep_attr} and {self.field_2_dep_attr} due to resetting weights_grid_2"
