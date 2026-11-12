@@ -297,15 +297,28 @@ class TransferFunction:
             ``{hi_stem}{seed}.pkl`` and ``{gal_stem}{seed}.fits`` onto this
             string. A directory path must end with the path separator.
             ``None`` generates each mock inside the worker.
-        project_combined: bool, default False
-            If True, the PCA matrix is applied to ``uncleaned_data + mock``.
-            The default applies it to the mock only. With mean-centering off, that
-            default is the combined-map cleaning minus the cleaning of the data
-            alone (Cunnington et al. 2024, arXiv:2407.21626, Sec 4.5). With
-            mean-centering on, the weighted frequency mean is removed from the
-            cube that is projected. ``True`` keeps the scatter from the data's
-            contribution to the cleaning, which is the choice in that paper when
-            the mock-to-mock scatter is used as an error.
+        project_combined: bool, default True
+            If True, the PCA matrix (found from ``uncleaned_data + mock``) is
+            applied to ``uncleaned_data + mock``. If False it is applied to the
+            mock only. The two differ by the cross-power between the mock tracer
+            and ``uncleaned_data`` cleaned with that matrix. Because the matrix
+            depends on the injected mock, this term does not average to zero:
+            it is extra signal loss that the real measurement also contains, so
+            ``False`` underestimates the signal loss. ``False`` is kept for
+            comparison and is expected to be removed. With mean-centering on,
+            the weighted frequency mean is removed from the cube that is
+            projected.
+        subtract_cleaned_data: bool, default True
+            Has no effect with ``project_combined=False``. If True, ``uncleaned_data``
+            cleaned with its own PCA matrix (found from ``uncleaned_data``
+            alone, or ``R_mat`` when that is given) is subtracted from each
+            cleaned ``uncleaned_data + mock`` map before the power spectrum is
+            taken. That map does not depend on the mock, so the mean transfer
+            function is unchanged and its mock-to-mock scatter is reduced. The
+            scatter then no longer contains the data's own contribution, so it
+            is not an error estimate for the data; set this to False to use the
+            scatter as an error. ``mock_dilution`` is divided out of the
+            difference.
         convolve_loaded_mock: bool, default False
             If True, convolve a cube loaded from ``mock_directory`` with a
             Gaussian primary beam using ``sigma_beam_ch``. Has no effect when
@@ -378,13 +391,14 @@ class TransferFunction:
         num_process: int | None = None,
         unmask_during_mock: bool = False,
         mock_directory: str | None = None,
-        project_combined: bool = False,
+        project_combined: bool = True,
         convolve_loaded_mock: bool = False,
         construct_fkp_mock: bool = False,
         mock_dilution: np.ndarray | None = None,
         gal_cat: str | None = None,
         hi_stem: str = "HI_mock_",
         gal_stem: str = "gal_mock_",
+        subtract_cleaned_data: bool = True,
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -413,6 +427,45 @@ class TransferFunction:
         self.gal_cat = gal_cat
         self.hi_stem = hi_stem
         self.gal_stem = gal_stem
+        self.subtract_cleaned_data = subtract_cleaned_data
+
+    def get_cleaned_data(self):
+        """
+        ``uncleaned_data`` cleaned with its own PCA matrix, for
+        ``subtract_cleaned_data``.
+
+        The matrix is ``R_mat`` when that is given, otherwise it is found from
+        ``uncleaned_data`` alone with the same ``N_fg``, weights and
+        mean-centering as the transfer function. No rescaling by
+        ``mock_dilution`` is applied here.
+
+        Returns
+        -------
+            cleaned_data: np.ndarray or None
+                The cleaned cube. ``None`` when nothing is to be subtracted:
+                ``subtract_cleaned_data`` or ``project_combined`` is False, or
+                ``uncleaned_data`` is zero everywhere.
+        """
+        if not (self.subtract_cleaned_data and self.project_combined):
+            return None
+        if not np.any(self.uncleaned_data):
+            return None
+        cleaning_matrix = self.R_mat
+        if cleaning_matrix is None:
+            cleaning_matrix = get_pca_matrix(
+                self.uncleaned_data,
+                self.N_fg,
+                self.pca_map_weights,
+                self.mean_center_map,
+            )
+        return apply_cleaning_matrix(
+            0.0,
+            self.uncleaned_data,
+            cleaning_matrix,
+            self.pca_map_weights,
+            self.mean_center_map,
+            True,
+        )
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -544,6 +597,7 @@ class TransferFunction:
                 "ps.grid_gal_to_field(construct_fkp=True) was already called "
                 "on the real data) so ps.field_2_R is defined."
             )
+        cleaned_data = self.get_cleaned_data()
         arg_list = []
         for seed in seed_list:
             mock_attr_dict = self.get_mock_instance_attr_dict(seed)
@@ -582,6 +636,7 @@ class TransferFunction:
                     self.gal_cat,
                     self.hi_stem,
                     self.gal_stem,
+                    cleaned_data,
                 )
             )
         return arg_list
@@ -614,6 +669,7 @@ class TransferFunction:
             arg_list: list
                 The list of arguments for the parallelisation.
         """
+        cleaned_data = self.get_cleaned_data()
         arg_list = []
         for seed in seed_list:
             mock_attr_dict = self.get_mock_instance_attr_dict(seed)
@@ -641,6 +697,7 @@ class TransferFunction:
                     self.convolve_loaded_mock,
                     self.hi_stem,
                     self.gal_stem,
+                    cleaned_data,
                 )
             )
         return arg_list
@@ -954,7 +1011,7 @@ def run_tf_calculation_cross(
     ra_range=None,
     dec_range=None,
     discrete_source_dndz=None,
-    project_combined=False,
+    project_combined=True,
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
@@ -964,6 +1021,7 @@ def run_tf_calculation_cross(
     gal_cat=None,
     hi_stem="HI_mock_",
     gal_stem="gal_mock_",
+    cleaned_data=None,
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -1021,7 +1079,7 @@ def run_tf_calculation_cross(
             only the shape of the dndz is used, not the normalization.
             If a list is provided, the first element is the redshift array, and the second element is the dndz array,
             and a 1D linear interpolation is used to get the dndz function.
-        project_combined: bool, default False
+        project_combined: bool, default True
             If True, apply the cleaning matrix to ``uncleaned_data + mock``.
             See :class:`meer21cm.transfer.TransferFunction`.
         multipole_ells: sequence, default None
@@ -1053,6 +1111,11 @@ def run_tf_calculation_cross(
         gal_stem: str, default "gal_mock_"
             Filename text between ``mock_directory`` and the seed for the galaxy
             table when ``gal_cat`` is ``None``.
+        cleaned_data: np.ndarray, default None
+            ``uncleaned_data`` cleaned with its own PCA matrix. When given, it
+            is subtracted from the cleaned ``uncleaned_data + mock`` cube.
+            See ``subtract_cleaned_data`` in
+            :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
@@ -1145,6 +1208,8 @@ def run_tf_calculation_cross(
         mean_center_map,
         project_combined,
     )
+    if cleaned_data is not None:
+        mock.data = mock.data - cleaned_data
     if mock_dilution is not None:
         # Undo the dilution on the cleaned output, mirroring the hit_nomask/
         # hit rescale applied to the real cleaned data.
@@ -1184,12 +1249,13 @@ def run_tf_calculation_auto(
     unmask_during_mock=False,
     ra_range=None,
     dec_range=None,
-    project_combined=False,
+    project_combined=True,
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
     hi_stem="HI_mock_",
     gal_stem="gal_mock_",
+    cleaned_data=None,
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -1235,7 +1301,7 @@ def run_tf_calculation_auto(
             The range of the RA in the sky map. Map and galaxy will be trimmed to this range.
         dec_range: tuple, default None
             The range of the Dec in the sky map. Map and galaxy will be trimmed to this range.
-        project_combined: bool, default False
+        project_combined: bool, default True
             If True, apply the cleaning matrix to ``uncleaned_data + mock``.
             See :class:`meer21cm.transfer.TransferFunction`.
         multipole_ells: sequence, default None
@@ -1251,6 +1317,11 @@ def run_tf_calculation_auto(
         gal_stem: str, default "gal_mock_"
             Filename text between ``mock_directory`` and the seed for the galaxy
             table. The galaxy file is not read on this path.
+        cleaned_data: np.ndarray, default None
+            ``uncleaned_data`` cleaned with its own PCA matrix. When given, it
+            is subtracted from the cleaned ``uncleaned_data + mock`` cube.
+            See ``subtract_cleaned_data`` in
+            :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
@@ -1315,6 +1386,8 @@ def run_tf_calculation_auto(
             mean_center_map,
             project_combined,
         )
+        if cleaned_data is not None:
+            cleaned = cleaned - cleaned_data
     mock.data = cleaned
     mock_map_rg_cleaned, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg_before

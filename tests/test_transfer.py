@@ -239,8 +239,8 @@ def test_transfer_worker_argument_contract():
         assert not any(isinstance(item, PowerSpectrum) for item in arg)
     tf.convolve_loaded_mock = True
     auto_arg = tf.get_arg_list_for_parallel_auto([1])[0]
-    assert auto_arg[-6:-2] == (False, None, None, True)
-    assert auto_arg[-2:] == ("HI_mock_", "gal_mock_")
+    assert auto_arg[-7:-3] == (True, None, None, True)
+    assert auto_arg[-3:] == ("HI_mock_", "gal_mock_", None)
 
 
 def test_construct_fkp_mock_requires_randoms():
@@ -456,6 +456,94 @@ def test_mock_dilution_reference_power_and_rescale(tmp_path):
     assert not np.allclose(after_diluted, after_plain)
 
 
+def test_subtract_cleaned_data(tmp_path):
+    ps = _tiny_transfer_ps()
+    ps.k1dbins = np.linspace(0.02, 0.3, 6)
+    n_freq = int(ps.nu.size)
+    phase = np.linspace(0.0, 2.0 * np.pi, n_freq)
+    x_grad = np.linspace(-1.0, 1.0, ps.num_pix_x)[:, None, None]
+    y_grad = np.linspace(-1.0, 1.0, ps.num_pix_y)[None, :, None]
+    cube = (1.5 + x_grad + 0.4 * y_grad) * (2.0 + np.cos(phase))
+    saver = MockSimulation(
+        nu=np.asarray(ps.nu, dtype=float),
+        wproj=ps.wproj,
+        num_pix_x=ps.num_pix_x,
+        num_pix_y=ps.num_pix_y,
+        flat_sky=True,
+        seed=0,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([0.2, -0.3])
+    saver._dec_gal = np.array([0.15, -0.25])
+    saver._z_gal = freq_to_redshift(np.asarray(ps.nu, dtype=float)[[1, -2]])
+    prefix = str(tmp_path) + os.sep
+    saver.save_mock_products(prefix, seed=0)
+
+    rng = np.random.default_rng(3)
+    data = 5.0 * (1.0 + x_grad * y_grad) * np.sin(phase + 0.3) + rng.normal(
+        size=cube.shape
+    )
+    mix = np.eye(n_freq)
+    mix[0, 1] = 0.7
+    mix[1, 0] = -0.4
+
+    def cleaned_power(kind, **kwargs):
+        tf = TransferFunction(
+            ps,
+            N_fg=1,
+            highres_sim=1,
+            upres_transverse=1,
+            upres_radial=1,
+            num_process=1,
+            mock_directory=prefix,
+            uncleaned_data=data,
+            **kwargs,
+        )
+        if kind == "cross":
+            arg = tf.get_arg_list_for_parallel_cross([0], return_power_1d=True)[0]
+            result = run_tf_calculation_cross(*arg)
+        else:
+            arg = tf.get_arg_list_for_parallel_auto([0], return_power_1d=True)[0]
+            result = run_tf_calculation_auto(*arg)
+        power = np.asarray(result[-1])
+        return power[np.isfinite(power)]
+
+    for kind in ("cross", "auto"):
+        # fixed matrix, no mean-centering: R(d + m) - R d is R m exactly
+        fixed = dict(R_mat=mix, mean_center_map=False)
+        mock_only = cleaned_power(kind, project_combined=False, **fixed)
+        combined = cleaned_power(kind, subtract_cleaned_data=False, **fixed)
+        subtracted = cleaned_power(kind, **fixed)
+        assert mock_only.size >= 1
+        assert not np.allclose(combined, mock_only)
+        assert np.allclose(subtracted, mock_only)
+        # the dilution is divided out of the difference
+        dilution = np.linspace(0.4, 1.3, n_freq)
+        diluted = cleaned_power("cross", mock_dilution=dilution, **fixed)
+        diluted_mock_only = cleaned_power(
+            "cross", project_combined=False, mock_dilution=dilution, **fixed
+        )
+        assert np.allclose(diluted, diluted_mock_only)
+        # matrix found from data + mock: the data cleaned with its own matrix is removed
+        plain = cleaned_power(kind, mean_center_map=True, subtract_cleaned_data=False)
+        with_sub = cleaned_power(kind, mean_center_map=True)
+        assert np.all(np.isfinite(with_sub))
+        assert not np.allclose(plain, with_sub)
+
+    tf = TransferFunction(ps, N_fg=1, uncleaned_data=data)
+    assert tf.project_combined is True
+    assert tf.subtract_cleaned_data is True
+    assert tf.get_cleaned_data().shape == data.shape
+    assert tf.get_arg_list_for_parallel_cross([0])[0][-1] is not None
+    # nothing to subtract: mock-only projection, flag off, or no data
+    tf.project_combined = False
+    assert tf.get_cleaned_data() is None
+    tf.project_combined = True
+    tf.subtract_cleaned_data = False
+    assert tf.get_cleaned_data() is None
+    assert TransferFunction(ps, N_fg=1).get_cleaned_data() is None
+
+
 def test_cross_worker_fkp_matches_parent_randoms(tmp_path):
     ps = _tiny_transfer_ps()
     ps.k1dbins = np.linspace(0.02, 0.3, 6)
@@ -606,8 +694,8 @@ def test_loaded_mock_custom_file_stems(tmp_path):
         hi_stem=hi_stem,
         gal_stem=gal_stem,
     )
-    assert tf.get_arg_list_for_parallel_auto([3])[0][-2:] == (hi_stem, gal_stem)
-    assert tf.get_arg_list_for_parallel_cross([3])[0][-2:] == (hi_stem, gal_stem)
+    assert tf.get_arg_list_for_parallel_auto([3])[0][-3:-1] == (hi_stem, gal_stem)
+    assert tf.get_arg_list_for_parallel_cross([3])[0][-3:-1] == (hi_stem, gal_stem)
 
 
 def test_loaded_mock_gal_cat_selects_tracer_stem(tmp_path):
