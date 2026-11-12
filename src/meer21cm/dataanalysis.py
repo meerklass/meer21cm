@@ -994,7 +994,8 @@ class Specification:
     def trim_map_to_range(self):
         """
         Trim the map to the specified range.
-        The map data and counts outside the range will be set to zero.
+        The map data and counts (and ``counts_nomask``, if read) outside the range
+        will be set to zero.
         The map_has_sampling and weights_map_pixel will be set to False outside the range.
         """
         logger.debug(
@@ -1012,6 +1013,8 @@ class Specification:
         map_sel = trim.reshape(trim.shape + (1,) * (self.data.ndim - trim.ndim))
         self.data = self.data * map_sel
         self.counts = self.counts * map_sel
+        if getattr(self, "counts_nomask", None) is not None:
+            self.counts_nomask = self.counts_nomask * map_sel
         self.map_has_sampling = self.map_has_sampling * map_sel
         self.weights_map_pixel = self.weights_map_pixel * map_sel
 

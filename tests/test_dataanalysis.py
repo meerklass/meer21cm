@@ -280,6 +280,45 @@ def test_read_pickle_counts_nomask(test_pickle, tmp_path):
     assert not np.allclose(spec.counts_nomask, spec.counts)
 
 
+def test_trim_map_to_range_counts_nomask(test_pickle, tmp_path):
+    """counts_nomask must get the same ra/dec trim as data and counts."""
+    with open(test_pickle, "rb") as handle:
+        payload = pickle.load(handle)
+    hit = np.ma.filled(np.ma.asarray(payload["hit"]), 0.0).astype(float)
+    payload["hit_nomask"] = hit + 4.0
+    path = tmp_path / "counts_nomask_trim.pickle"
+    with open(path, "wb") as handle:
+        pickle.dump(payload, handle)
+    spec = Specification(
+        pickle_file=str(path),
+        nu_min=-np.inf,
+        nu_max=np.inf,
+        counts_nomask_column="hit_nomask",
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+    )
+    spec.read_from_pickle()
+    before = spec.counts_nomask.copy()
+    sampled = spec.counts.sum(axis=-1) > 0
+    spec.ra_range = (
+        spec.ra_map[sampled].min(),
+        np.median(spec.ra_map[sampled]),
+    )
+    spec.dec_range = (spec.dec_map[sampled].min(), spec.dec_map[sampled].max())
+    sel = np.asarray(spec.skymap.trim_selector(spec.ra_range, spec.dec_range), dtype=bool)
+    # the trim must cut pixels that carry counts_nomask, and keep some
+    assert np.any(before[~sel] > 0)
+    assert np.any(before[sel] > 0)
+    spec.trim_map_to_range()
+    assert np.all(spec.counts_nomask[~sel] == 0)
+    assert np.all(spec.counts[~sel] == 0)
+    assert np.allclose(spec.counts_nomask[sel], before[sel])
+    # without counts_nomask the trim still runs
+    spec.counts_nomask = None
+    spec.trim_map_to_range()
+    assert spec.counts_nomask is None
+
+
 def test_read_fits(test_fits):
     sp = Specification(
         nu_min=-np.inf,
