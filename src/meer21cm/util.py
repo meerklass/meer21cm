@@ -643,6 +643,53 @@ def omega_hi_to_average_temp(omega_hi, z=0, cosmo=Planck18):
     return t_bar
 
 
+def periodic_hann(n):
+    """
+    Periodic Hann window.
+
+    Parameters
+    ----------
+    n: int
+        Number of samples.
+
+    Returns
+    -------
+    np.ndarray
+        ``w_j = 0.5 * (1 - cos(2 pi j / n))``, whose mean square is ``3/8``.
+    """
+    j = np.arange(int(n))
+    return 0.5 * (1.0 - np.cos(2.0 * np.pi * j / float(n)))
+
+
+def taper_values(taper, n):
+    """
+    Resolve a taper specification into ``n`` samples.
+
+    Parameters
+    ----------
+    taper: bool or callable
+        ``True`` gives a periodic Hann window, ``False`` a rectangular one,
+        and a callable ``f(n) -> (n,) array`` is used directly.
+    n: int
+        Number of samples.
+
+    Returns
+    -------
+    np.ndarray
+        The taper, shape ``(n,)``.
+    """
+    import numpy as np
+
+    if isinstance(taper, (bool, np.bool_)):
+        return periodic_hann(n) if taper else np.ones(int(n), dtype=float)
+    out = np.asarray(taper(int(n)), dtype=float)
+    if out.shape != (int(n),):
+        raise ValueError(
+            f"taper callable must return shape ({int(n)},), got {out.shape}"
+        )
+    return out
+
+
 def freq_to_redshift(freq):
     """
     Convert frequency of 21cm emission to redshift

@@ -17,7 +17,8 @@ and you need to configure MPI first (usually with openmpi or mpich), and then in
 """
 
 import numpy as np
-from .util import pca_clean, dft_matrix, inv_dft_matrix
+from numpy.typing import ArrayLike, NDArray
+from .util import pca_clean, dft_matrix, inv_dft_matrix, taper_values
 from .mock import MockSimulation
 from multiprocessing import Pool
 from .power import PowerSpectrum
@@ -294,9 +295,9 @@ class TransferFunction:
             otherwise the mock HI map may contain nan and cause errors.
         mock_directory: string, default None
             Path prefix for precomputed mocks. The workers concatenate
-            ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits`` onto this string.
-            A directory path must end with the path separator. ``None`` generates
-            each mock inside the worker.
+            ``{hi_stem}{seed}.pkl`` and ``{gal_stem}{seed}.fits`` onto this
+            string. A directory path must end with the path separator.
+            ``None`` generates each mock inside the worker.
         project_combined: bool, default False
             If True, the PCA matrix is applied to ``uncleaned_data + mock``.
             The default applies it to the mock only. With mean-centering off, that
@@ -310,6 +311,53 @@ class TransferFunction:
             If True, convolve a cube loaded from ``mock_directory`` with a
             Gaussian primary beam using ``sigma_beam_ch``. Has no effect when
             the mock is generated inside the worker.
+        construct_fkp_mock: bool, default False
+            If True, the ``type="cross"`` worker builds an FKP field for the
+            mock galaxies instead of painting raw counts: ``F_mock = D_mock -
+            alpha_mock * R``, with ``alpha_mock = sum(D_mock) / sum(R)``
+            recomputed per mock from that mock's own painted counts, and
+            ``R`` taken from ``ps.field_2_R`` (the real survey's randoms,
+            already painted once by ``ps.grid_gal_to_field(construct_fkp=
+            True)`` -- not repainted per mock). Requires
+            ``ps.field_2_has_random`` to be True (i.e. the real data side was
+            itself built with ``construct_fkp=True``), otherwise
+            ``ps.field_2_R`` is undefined and this raises. ``ps.weights_grid_2``
+            is read as a pure taper/footprint template with no FKP amplitude
+            in it -- true for the standard real-data sequence, where
+            ``construct_fkp=True`` sets it to all-ones and any taper applied
+            afterwards multiplies it directly, never by ``alpha * R``. The
+            mock's weights are then ``weights_field_2 = alpha_mock * R *
+            template``, ``weights_grid_2 = template``. Without this, the
+            worker always stamps the parent's ``weights_field_2``/
+            ``weights_grid_2`` onto the mock's raw painted counts, which is
+            not an FKP field for that mock (see the ``tf_wmocks`` handoff
+            notes).
+        mock_dilution: np.ndarray, default None
+            Optional multiplicative array, same shape as the gridded HI
+            field, applied to the mock HI signal *after* beam convolution
+            (``convolve_loaded_mock``) but before it is injected into
+            ``uncleaned_data``. Intended for ``hit / hit_nomask`` (<=1):
+            this applies that same dilution to the mock signal,
+            so the injection step sees what a real HI signal would
+            have looked like after block combination. The transfer function
+            denominator (the mock's own, "original" power) is taken
+            *before* this dilution, so the TF still measures recovery of
+            the true, undiluted signal. After PCA cleaning, the cleaned
+            mock is divided back by ``mock_dilution`` (i.e. multiplied by
+            ``hit_nomask / hit``), mirroring the rescale applied to the
+            real cleaned data. ``None`` (default) leaves the mock
+            undiluted, unchanged from prior behaviour.
+        gal_cat: str, default None
+            Tracer name, for example ``"LRG"``. The galaxy file is then
+            ``{mock_directory}gal_{gal_cat}_mock_{seed}.fits``. ``None`` uses
+            ``gal_stem``. Has no effect when the mock is generated inside the
+            worker (``mock_directory=None``).
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``mock_directory`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            FITS table when ``gal_cat`` is ``None``. The auto-power worker does
+            not read that table.
 
     """
 
@@ -333,6 +381,11 @@ class TransferFunction:
         mock_directory: str | None = None,
         project_combined: bool = False,
         convolve_loaded_mock: bool = False,
+        construct_fkp_mock: bool = False,
+        mock_dilution: np.ndarray | None = None,
+        gal_cat: str | None = None,
+        hi_stem: str = "HI_mock_",
+        gal_stem: str = "gal_mock_",
     ):
         self.ps = ps
         self.N_fg = N_fg
@@ -356,6 +409,11 @@ class TransferFunction:
         self.mock_directory = mock_directory
         self.project_combined = project_combined
         self.convolve_loaded_mock = convolve_loaded_mock
+        self.construct_fkp_mock = construct_fkp_mock
+        self.mock_dilution = mock_dilution
+        self.gal_cat = gal_cat
+        self.hi_stem = hi_stem
+        self.gal_stem = gal_stem
 
     def get_mock_instance_attr_dict(self, seed):
         """
@@ -479,6 +537,14 @@ class TransferFunction:
             arg_list: list
                 The list of arguments for the parallelisation.
         """
+        if self.construct_fkp_mock and not getattr(
+            self.ps, "field_2_has_random", False
+        ):
+            raise ValueError(
+                "construct_fkp_mock=True requires ps.field_2_has_random (i.e. "
+                "ps.grid_gal_to_field(construct_fkp=True) was already called "
+                "on the real data) so ps.field_2_R is defined."
+            )
         arg_list = []
         for seed in seed_list:
             mock_attr_dict = self.get_mock_instance_attr_dict(seed)
@@ -507,6 +573,16 @@ class TransferFunction:
                     multipole_ells,
                     self.mock_directory,
                     self.convolve_loaded_mock,
+                    self.construct_fkp_mock,
+                    (
+                        getattr(self.ps, "field_2_R", None)
+                        if self.construct_fkp_mock
+                        else None
+                    ),
+                    self.mock_dilution,
+                    self.gal_cat,
+                    self.hi_stem,
+                    self.gal_stem,
                 )
             )
         return arg_list
@@ -564,6 +640,8 @@ class TransferFunction:
                     multipole_ells,
                     self.mock_directory,
                     self.convolve_loaded_mock,
+                    self.hi_stem,
+                    self.gal_stem,
                 )
             )
         return arg_list
@@ -773,15 +851,43 @@ def _convolve_loaded_cube(mock):
     mock.data = convolved
 
 
-def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock=False):
+def _galaxy_file_stem(gal_stem="gal_mock_", gal_cat=None):
+    """Galaxy filename text between the path prefix and the seed.
+
+    ``gal_cat`` selects ``gal_{gal_cat}_mock_``. With ``gal_cat`` left as
+    ``None``, the text is ``gal_stem``. Supplying both with different values
+    raises ``ValueError``.
+    """
+    if gal_cat is None:
+        return gal_stem
+    tracer_stem = f"gal_{gal_cat}_mock_"
+    if gal_stem not in ("gal_mock_", tracer_stem):
+        raise ValueError(
+            f"gal_cat={gal_cat!r} selects galaxy stem {tracer_stem!r}, "
+            f"but gal_stem is {gal_stem!r}"
+        )
+    return tracer_stem
+
+
+def load_precomputed_mock(
+    mock,
+    prefix,
+    read_galaxies=True,
+    convolve_loaded_mock=False,
+    gal_cat=None,
+    hi_stem="HI_mock_",
+    gal_stem="gal_mock_",
+):
     """
     Replace a mock's sky cube with a saved HI map and, optionally, its galaxies.
 
-    The pickle is ``{prefix}HI_mock_{seed}.pkl`` with ``HImap`` and ``freq``
+    The pickle is ``{prefix}{hi_stem}{seed}.pkl`` with ``HImap`` and ``freq``
     in MHz. Channels outside ``mock.nu_min < freq < mock.nu_max`` are dropped,
     ``mock.nu`` is set to the kept frequencies, and the sky mask is rebuilt to
-    the cube shape. When ``read_galaxies`` is True, ``{prefix}gal_mock_{seed}.fits``
-    is read. ``convolve_loaded_mock`` applies the Gaussian primary beam.
+    the cube shape. When ``read_galaxies`` is True, the galaxy file is
+    ``{prefix}{stem}{seed}.fits``, where ``stem`` is ``gal_{gal_cat}_mock_``
+    when ``gal_cat`` is set and ``gal_stem`` otherwise.
+    ``convolve_loaded_mock`` applies the Gaussian primary beam.
 
     Parameters
     ----------
@@ -793,13 +899,20 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
         Whether to read the galaxy FITS table.
     convolve_loaded_mock: bool, default False
         Whether to convolve the loaded cube with ``sigma_beam_ch``.
+    gal_cat: str, default None
+        Tracer name. The galaxy file stem is then ``gal_{gal_cat}_mock_``.
+    hi_stem: str, default "HI_mock_"
+        Filename text between ``prefix`` and the seed for the HI pickle.
+    gal_stem: str, default "gal_mock_"
+        Filename text between ``prefix`` and the seed for the galaxy FITS table
+        when ``gal_cat`` is ``None``.
 
     Returns
     -------
     MockSimulation
         The same mock, updated in place.
     """
-    hi_path = f"{prefix}HI_mock_{mock.seed}.pkl"
+    hi_path = f"{prefix}{hi_stem}{mock.seed}.pkl"
     with open(hi_path, "rb") as handle:
         payload = pickle.load(handle)
     hi_map = np.asarray(payload["HImap"])
@@ -815,7 +928,8 @@ def load_precomputed_mock(mock, prefix, read_galaxies=True, convolve_loaded_mock
     if convolve_loaded_mock:
         _convolve_loaded_cube(mock)
     if read_galaxies:
-        mock.gal_file = f"{prefix}gal_mock_{mock.seed}.fits"
+        stem = _galaxy_file_stem(gal_stem, gal_cat)
+        mock.gal_file = f"{prefix}{stem}{mock.seed}.fits"
         mock.read_gal_cat()
     return mock
 
@@ -845,6 +959,12 @@ def run_tf_calculation_cross(
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
+    construct_fkp_mock=False,
+    random_counts_2=None,
+    mock_dilution=None,
+    gal_cat=None,
+    hi_stem="HI_mock_",
+    gal_stem="gal_mock_",
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -909,10 +1029,31 @@ def run_tf_calculation_cross(
             Multipoles to bin. ``None`` is the monopole. One multipole is a 1D
             array. Several are stacked on the first axis.
         mock_directory: str, default None
-            Prefix for ``HI_mock_{seed}.pkl`` and ``gal_mock_{seed}.fits``.
+            Prefix for ``{hi_stem}{seed}.pkl`` and ``{gal_stem}{seed}.fits``.
             ``None`` generates the mock in this function.
         convolve_loaded_mock: bool, default False
             Convolve a loaded HI cube with the Gaussian primary beam.
+        construct_fkp_mock: bool, default False
+            Build ``F_mock = D_mock - alpha_mock * R`` for the mock galaxies
+            instead of stamping ``weights_field_2``/``weights_grid_2``
+            unchanged onto the mock's raw painted counts. See
+            :class:`meer21cm.transfer.TransferFunction`.
+        random_counts_2: np.ndarray, default None
+            Painted random counts ``R`` (``ps.field_2_R``), reused for every
+            mock. Required when ``construct_fkp_mock`` is True.
+        mock_dilution: np.ndarray, default None
+            See :class:`meer21cm.transfer.TransferFunction`. Applied to the
+            mock HI field after beam convolution, before injection into
+            ``uncleaned_data``; divided back out of the cleaned mock before
+            the transfer function ratio is taken. ``None`` is a no-op.
+        gal_cat: str, default None
+            Tracer name. The galaxy file stem is then ``gal_{gal_cat}_mock_``.
+            See :class:`meer21cm.transfer.TransferFunction`.
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``mock_directory`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            table when ``gal_cat`` is ``None``.
     Returns
     -------
         result: list
@@ -947,6 +1088,9 @@ def run_tf_calculation_cross(
             mock_directory,
             read_galaxies=True,
             convolve_loaded_mock=convolve_loaded_mock,
+            gal_cat=gal_cat,
+            hi_stem=hi_stem,
+            gal_stem=gal_stem,
         )
 
     mock.ra_range = ra_range
@@ -961,15 +1105,33 @@ def run_tf_calculation_cross(
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
     mock.weights_grid_1 = weights_grid_1
-    mock.field_2 = mockgal_map_rg
-    mock.weights_field_2 = weights_field_2
-    mock.weights_grid_2 = weights_grid_2
+    if construct_fkp_mock:
+        # F_mock = D_mock - alpha_mock*R via the same assembly
+        # grid_gal_to_field(construct_fkp=True) uses, but with R reused
+        # unchanged from the real survey (random_counts_2 = ps.field_2_R)
+        # instead of painted fresh -- only D_mock, and hence alpha_mock,
+        # differ seed to seed. weights_grid_2 is the parent's taper/
+        # footprint template (not the FKP amplitude), baked in directly.
+        mock.set_fkp_field_from_counts(
+            mockgal_map_rg, random_counts_2, weights_grid_2_template=weights_grid_2
+        )
+    else:
+        mock.field_2 = mockgal_map_rg
+        mock.weights_field_2 = weights_field_2
+        mock.weights_grid_2 = weights_grid_2
 
     pmock_1d_cross = multipole_power_1d(
         mock, mock.cross_power_3d, k_sel_3d_to_1d, multipole_ells
     )
     if return_power_3d:
         power_3d_uncleaned = mock.cross_power_3d
+    # mock_dilution applied here, after the mock's own (undiluted) reference
+    # power above -- the transfer function denominator stays the true, clean
+    # HI signal. The dilution only affects the copy injected into
+    # uncleaned_data and cleaned below, mimicking how a real HI signal would
+    # have looked after block combination. See TransferFunction's docstring.
+    if mock_dilution is not None:
+        mock.data = mock.data * mock_dilution
     map_to_clean = np.asarray(uncleaned_data) + mock.data
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
@@ -984,6 +1146,10 @@ def run_tf_calculation_cross(
         mean_center_map,
         project_combined,
     )
+    if mock_dilution is not None:
+        # Undo the dilution on the cleaned output, mirroring the hit_nomask/
+        # hit rescale applied to the real cleaned data.
+        mock.data = mock.data / mock_dilution
     mock_map_rg, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
@@ -1023,6 +1189,8 @@ def run_tf_calculation_auto(
     multipole_ells=None,
     mock_directory=None,
     convolve_loaded_mock=False,
+    hi_stem="HI_mock_",
+    gal_stem="gal_mock_",
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -1075,10 +1243,15 @@ def run_tf_calculation_auto(
             Multipoles to bin. ``None`` is the monopole. One multipole is a 1D
             array. Several are stacked on the first axis.
         mock_directory: str, default None
-            Prefix for ``HI_mock_{seed}.pkl``. ``None`` generates the mock here.
+            Prefix for ``{hi_stem}{seed}.pkl``. ``None`` generates the mock here.
             The galaxy file is not read on this path.
         convolve_loaded_mock: bool, default False
             Convolve a loaded HI cube with the Gaussian primary beam.
+        hi_stem: str, default "HI_mock_"
+            Filename text between ``mock_directory`` and the seed for the HI pickle.
+        gal_stem: str, default "gal_mock_"
+            Filename text between ``mock_directory`` and the seed for the galaxy
+            table. The galaxy file is not read on this path.
     Returns
     -------
         result: list
@@ -1102,6 +1275,8 @@ def run_tf_calculation_auto(
             mock_directory,
             read_galaxies=False,
             convolve_loaded_mock=convolve_loaded_mock,
+            hi_stem=hi_stem,
+            gal_stem=gal_stem,
         )
     mock.ra_range = ra_range
     mock.dec_range = dec_range
@@ -1270,3 +1445,235 @@ def run_null_test(
     if return_power_3d:
         result.append(mock.cross_power_3d)
     return result
+
+
+def radial_transfer(
+    k: ArrayLike,
+    chi_u: ArrayLike,
+    dchi_u: float,
+    chi_ch: ArrayLike | None = None,
+    dchi_ch: ArrayLike | None = None,
+    dchi_vox: float | None = None,
+    taper: bool | Callable[[int], ArrayLike] = True,
+    clean_matrix: ArrayLike | None = None,
+) -> NDArray[np.floating]:
+    r"""
+    One-dimensional radial transfer :math:`|T(k)|^2` of the map-making chain.
+
+    Functional form of :class:`RadialTransferFunction`; see that class for the
+    operator description.  Returns an array with the shape of ``k``.
+    """
+    return RadialTransferFunction(
+        chi_u,
+        dchi_u,
+        chi_ch=chi_ch,
+        dchi_ch=dchi_ch,
+        dchi_vox=dchi_vox,
+        taper=taper,
+        clean_matrix=clean_matrix,
+    ).transfer(k)
+
+
+class RadialTransferFunction:
+    r"""
+    Radial (frequency-axis) transfer of the map-making operator.
+
+    The data chain along the line of sight is
+
+    1. the rectangular box is sampled on the voxel grid of spacing
+       ``dchi_vox``;
+    2. every voxel is assigned to the channel whose comoving interval
+       contains it, and the channel value is the mean of those voxels;
+    3. the channel-centre values are linearly interpolated onto the uniform
+       comoving grid ``chi_u``;
+    4. a taper is applied and the finite-aperture DFT is taken.
+
+    This operator is linear but is *not* a convolution (the comoving channel
+    width changes across the band and the interpolation phase drifts), so its
+    window is measured rather than approximated: a unit plane wave
+    :math:`e^{ik\chi}` is pushed through the identical chain and
+
+    .. math::
+
+        |T(k)|^2 = \left| \tilde T_{\rm out}(k) / \tilde T_{\rm in}(k) \right|^2
+
+    is the power response used by
+    :class:`meer21cm.los.LineOfSightPowerSpectrum`.
+
+    Parameters
+    ----------
+    chi_u : ndarray
+        Ascending uniform comoving grid, in Mpc, on which the analysis is
+        performed (the sightline samples).
+    dchi_u : float
+        Spacing of ``chi_u``, in Mpc.
+    chi_ch : ndarray, default None
+        Comoving centres of the frequency channels, in Mpc.  If ``None`` the
+        signal is assumed to be already on ``chi_u`` and the channelisation
+        and regridding steps are the identity.
+    dchi_ch : ndarray, default None
+        Comoving width of each channel, in Mpc.  Defaults to the median
+        spacing of ``chi_ch``.
+    dchi_vox : float, default None
+        Spacing of the voxel grid used for the channel average, in Mpc.
+        Defaults to the median ``dchi_ch``.
+    taper : str or callable, default "hann"
+        ``"hann"``, ``"none"``, or a callable ``f(n) -> (n,) array``.
+    clean_matrix : ndarray, default None
+        Optional ``(n_ch, n_ch)`` matrix applied to the channel vector before
+        regridding.  This is the extension point for a foreground-cleaning
+        transfer: pass the cleaning matrix and the returned transfer includes
+        its signal loss.
+
+    Notes
+    -----
+    The class is deliberately state-only and pickleable, so the transfer can
+    be computed inside a worker.  Subclasses may override :meth:`_channelise`,
+    :meth:`_regrid` or :meth:`_apply` to model a different radial operator.
+    """
+
+    def __init__(
+        self,
+        chi_u: ArrayLike,
+        dchi_u: float,
+        *,
+        chi_ch: ArrayLike | None = None,
+        dchi_ch: ArrayLike | None = None,
+        dchi_vox: float | None = None,
+        taper: bool | Callable[[int], ArrayLike] = True,
+        clean_matrix: ArrayLike | None = None,
+    ):
+        chi_u_arr = np.asarray(chi_u, dtype=float)
+        if chi_u_arr.ndim != 1 or chi_u_arr.size < 2:
+            raise ValueError("chi_u must be a 1-D array with at least 2 samples")
+        if np.any(np.diff(chi_u_arr) <= 0):
+            raise ValueError("chi_u must be strictly ascending")
+        self.chi_u = chi_u_arr
+        self.dchi_u = float(dchi_u)
+        if not np.isfinite(self.dchi_u) or self.dchi_u <= 0:
+            raise ValueError("dchi_u must be a positive finite number")
+        self.taper = taper
+
+        if chi_ch is None:
+            if clean_matrix is not None:
+                raise ValueError("clean_matrix requires chi_ch to be given")
+            self.chi_ch = None
+            self.dchi_ch = None
+            self.dchi_vox = None
+        else:
+            chi_ch_arr = np.asarray(chi_ch, dtype=float)
+            if chi_ch_arr.ndim != 1 or chi_ch_arr.size < 2:
+                raise ValueError("chi_ch must be a 1-D array with at least 2 values")
+            order = np.argsort(chi_ch_arr)
+            self.chi_ch = chi_ch_arr[order]
+            if dchi_ch is None:
+                dchi_ch_arr = np.full(
+                    self.chi_ch.size, float(np.median(np.diff(self.chi_ch)))
+                )
+            else:
+                dchi_ch_arr = np.asarray(dchi_ch, dtype=float)[order]
+                if dchi_ch_arr.size != self.chi_ch.size:
+                    raise ValueError("dchi_ch must have the same size as chi_ch")
+            self.dchi_ch = dchi_ch_arr
+            if dchi_vox is None:
+                dchi_vox = float(np.median(self.dchi_ch))
+            self.dchi_vox = float(dchi_vox)
+            if not np.isfinite(self.dchi_vox) or self.dchi_vox <= 0:
+                raise ValueError("dchi_vox must be a positive finite number")
+
+        if clean_matrix is None:
+            self.clean_matrix = None
+        else:
+            mat = np.asarray(clean_matrix, dtype=float)
+            if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
+                raise ValueError("clean_matrix must be a square 2-D array")
+            if mat.shape[0] != self.chi_ch.size:
+                raise ValueError(
+                    "clean_matrix must have shape (n_channels, n_channels) "
+                    f"= ({self.chi_ch.size}, {self.chi_ch.size}), got {mat.shape}"
+                )
+            self.clean_matrix = mat
+
+    # -- taper ---------------------------------------------------------
+    def _taper_values(self, n: int) -> NDArray[np.floating]:
+        """Taper samples of length ``n``."""
+        return taper_values(self.taper, n)
+
+    # -- operator pieces ----------------------------------------------
+    def voxel_grid(self) -> NDArray[np.floating]:
+        """Comoving positions of the voxels used for the channel average."""
+        if self.chi_ch is None:
+            raise ValueError("voxel_grid requires chi_ch")
+        return np.arange(
+            self.chi_ch.min(), self.chi_ch.max() + 0.5 * self.dchi_vox, self.dchi_vox
+        )
+
+    def _channelise(
+        self, values: NDArray[np.complexfloating]
+    ) -> NDArray[np.complexfloating]:
+        """Average a signal sampled on :meth:`voxel_grid` into channels."""
+        chi_v = self.voxel_grid()
+        if values.shape != chi_v.shape:
+            raise ValueError(
+                f"values must be sampled on the voxel grid, expected shape "
+                f"{chi_v.shape}, got {values.shape}"
+            )
+        out = np.zeros(self.chi_ch.size, dtype=complex)
+        for c in range(self.chi_ch.size):
+            sel = np.abs(chi_v - self.chi_ch[c]) < 0.5 * self.dchi_ch[c]
+            if np.any(sel):
+                out[c] = values[sel].mean()
+        return out
+
+    def _regrid(self, fch: NDArray[np.complexfloating]) -> NDArray[np.complexfloating]:
+        """Linear interpolation of channel values onto ``chi_u``."""
+        return np.interp(self.chi_u, self.chi_ch, fch.real) + 1j * np.interp(
+            self.chi_u, self.chi_ch, fch.imag
+        )
+
+    def _apply(
+        self, values: NDArray[np.complexfloating]
+    ) -> NDArray[np.complexfloating]:
+        """Full radial chain applied to a signal on the voxel grid."""
+        fch = self._channelise(values)
+        if self.clean_matrix is not None:
+            fch = self.clean_matrix @ fch
+        return self._regrid(fch)
+
+    def _amplitude(self, signal: NDArray[np.complexfloating], k: float) -> complex:
+        """Tapered DFT amplitude of ``signal`` at wavenumber ``k``."""
+        w = self._taper_values(signal.size)
+        fk = np.fft.fft(np.asarray(signal, dtype=complex) * w)
+        kf = 2.0 * np.pi * np.fft.fftfreq(signal.size, d=self.dchi_u)
+        return fk[int(np.argmin(np.abs(kf - k)))]
+
+    # -- public --------------------------------------------------------
+    def transfer(self, k: ArrayLike) -> NDArray[np.floating]:
+        """
+        Power transfer :math:`|T(k)|^2` at the requested wavenumbers.
+
+        Parameters
+        ----------
+        k : ArrayLike
+            Wavenumbers along the line of sight, in Mpc^-1.
+
+        Returns
+        -------
+        NDArray[np.floating]
+            ``|T(k)|^2``, with the same shape as ``k``.
+        """
+        k_arr = np.atleast_1d(np.asarray(k, dtype=float)).ravel()
+        out = np.zeros(k_arr.size, dtype=float)
+        ref = np.exp(1j * np.outer(k_arr, self.chi_u))
+        for i, q in enumerate(k_arr):
+            if self.chi_ch is None:
+                sig = ref[i]
+            else:
+                sig = self._apply(np.exp(1j * q * self.voxel_grid()))
+            num = self._amplitude(sig, q)
+            den = self._amplitude(ref[i], q)
+            out[i] = np.abs(num / den) ** 2 if den != 0 else np.nan
+        return out
+
+    def __call__(self, k: ArrayLike) -> NDArray[np.floating]:
+        return self.transfer(k)

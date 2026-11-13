@@ -804,3 +804,22 @@ def test_save_mock_products_rejects_bad_inputs(tmp_path):
     mock.weights_gal = np.ones(3)
     with pytest.raises(ValueError):
         mock.save_mock_products(str(tmp_path) + "/")
+
+
+def test_save_mock_products_custom_stems(tmp_path):
+    import os
+
+    mock = _save_ready_mock()
+    mock._ra_gal = np.array([1.0])
+    mock._dec_gal = np.array([2.0])
+    mock._z_gal = np.array([0.3])
+    prefix = str(tmp_path) + os.sep
+    hi_path, gal_path = mock.save_mock_products(
+        prefix, hi_stem="cube_", gal_stem="catalogue_"
+    )
+    assert hi_path == prefix + "cube_0.pkl"
+    assert gal_path == prefix + "catalogue_0.fits"
+    assert os.path.isfile(hi_path)
+    assert os.path.isfile(gal_path)
+    assert not os.path.isfile(prefix + "HI_mock_0.pkl")
+    assert not os.path.isfile(prefix + "gal_mock_0.fits")

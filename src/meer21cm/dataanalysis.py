@@ -150,6 +150,11 @@ class Specification:
         The column name of the map data.
     counts_column: str, default "hit"
         The column name of the number of sampling for each pixel.
+    counts_nomask_column: str, default None
+        Optional second counts-like pickle column (e.g. "hit_nomask"),
+        read the same way and trimmed to the same nu_min/nu_max range as
+        counts_column, stored as ``self.counts_nomask``. ``None`` skips it
+        (``self.counts_nomask`` stays ``None``).
     freq_column: str, default "freq"
         The column name of the frequencies of each channel in the data.
     wcs_column: str, default "wcs"
@@ -203,6 +208,7 @@ class Specification:
         filter_los_threshold=None,
         data_column="map",
         counts_column="hit",
+        counts_nomask_column=None,
         freq_column="freq",
         wcs_column="wcs",
         auto_set_radecnu_bounds=True,
@@ -363,6 +369,8 @@ class Specification:
         self.z_interp_max = z_interp_max
         self.data_column = data_column
         self.counts_column = counts_column
+        self.counts_nomask_column = counts_nomask_column
+        self.counts_nomask = None
         self.freq_column = freq_column
         self.wcs_column = wcs_column
         self.auto_set_radecnu_bounds = auto_set_radecnu_bounds
@@ -894,6 +902,17 @@ class Specification:
             freq_column=self.freq_column,
             wcs_column=self.wcs_column,
         )
+        if self.counts_nomask_column is not None:
+            self.counts_nomask = read_pickle(
+                self.pickle_file,
+                nu_min=self.nu_min,
+                nu_max=self.nu_max,
+                los_axis=self.los_axis,
+                data_column=self.data_column,
+                counts_column=self.counts_nomask_column,
+                freq_column=self.freq_column,
+                wcs_column=self.wcs_column,
+            )[1]
         self._set_wcs_skymap(
             wproj=wproj,
             num_pix_x=_ra_map.shape[0],
@@ -975,7 +994,8 @@ class Specification:
     def trim_map_to_range(self):
         """
         Trim the map to the specified range.
-        The map data and counts outside the range will be set to zero.
+        The map data and counts (and ``counts_nomask``, if read) outside the range
+        will be set to zero.
         The map_has_sampling and weights_map_pixel will be set to False outside the range.
         """
         logger.debug(
@@ -993,6 +1013,8 @@ class Specification:
         map_sel = trim.reshape(trim.shape + (1,) * (self.data.ndim - trim.ndim))
         self.data = self.data * map_sel
         self.counts = self.counts * map_sel
+        if getattr(self, "counts_nomask", None) is not None:
+            self.counts_nomask = self.counts_nomask * map_sel
         self.map_has_sampling = self.map_has_sampling * map_sel
         self.weights_map_pixel = self.weights_map_pixel * map_sel
 
