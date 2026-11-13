@@ -1,6 +1,7 @@
 import inspect
 import multiprocessing as mp
 import os
+from pathlib import Path
 import pickle
 
 mp.set_start_method("spawn", force=True)
@@ -11,6 +12,8 @@ from meer21cm.power import PowerSpectrum
 from meer21cm.transfer import (
     TransferFunction,
     apply_cleaning_matrix,
+    get_cleaning_operator,
+    MPCACleaning,
     _multipole_ells,
     load_precomputed_mock,
     run_tf_calculation_auto,
@@ -20,6 +23,7 @@ from meer21cm.transfer import (
 import pytest
 from meer21cm.power_ops import fkp_count_field
 from meer21cm.util import create_wcs, freq_to_redshift
+from meer21cm.mpca import mpca_clean
 
 
 def test_analytic_transfer_function():
@@ -239,8 +243,8 @@ def test_transfer_worker_argument_contract():
         assert not any(isinstance(item, PowerSpectrum) for item in arg)
     tf.convolve_loaded_mock = True
     auto_arg = tf.get_arg_list_for_parallel_auto([1])[0]
-    assert auto_arg[-6:-2] == (False, None, None, True)
-    assert auto_arg[-2:] == ("HI_mock_", "gal_mock_")
+    assert auto_arg[-7:-3] == (False, None, None, True)
+    assert auto_arg[-3:] == ("HI_mock_", "gal_mock_", "pca")
 
 
 def test_construct_fkp_mock_requires_randoms():
@@ -274,6 +278,103 @@ def test_apply_cleaning_matrix_projects_selected_cube():
     assert np.allclose(
         cleaned_both, np.einsum("ij,abj->abi", cleaning, uncleaned + mock_data)
     )
+
+
+def _mpca_test_cubes(seed=3):
+    rng = np.random.default_rng(seed)
+    nx, ny, nz = 14, 10, 24
+    nu = np.linspace(1.0, 1.5, nz)
+    sky = 5.0 + rng.normal(size=(nx, ny, 1))
+    data = sky * nu[None, None, :] ** -2.7 + 0.01 * rng.normal(size=(nx, ny, nz))
+    mock = 0.01 * rng.normal(size=(nx, ny, nz))
+    weights = np.repeat(1.0 + rng.random((nx, ny, 1)), nz, axis=-1)
+    weights[:2] = 0.0  # pixels outside the footprint
+    return data * (weights > 0), mock * (weights > 0), weights
+
+
+def test_mpca_cleaning_operator():
+    data, mock, w = _mpca_test_cubes()
+    inside = w[..., 0] > 0
+    # PCA path unchanged
+    assert np.array_equal(
+        get_cleaning_operator(data + mock, 3, w, True, "pca"),
+        get_pca_matrix(data + mock, 3, w, True),
+    )
+    op = get_cleaning_operator(data + mock, (3, 4), w, True, "mpca")
+    assert isinstance(op, MPCACleaning)
+    # project_combined=True: exactly mpca_clean of data + mock
+    combined = apply_cleaning_matrix(mock, data, op, w, True, True)
+    ref = mpca_clean(data + mock, 3, 4, weights=w, mean_center=True)
+    scale = np.abs(ref[inside]).max()
+    assert np.allclose(combined, ref, rtol=0, atol=1e-10 * scale)
+    assert np.all(combined[~inside] == 0)
+    # fixed matrices: linear, so mock only + data only = combined
+    mock_only = apply_cleaning_matrix(mock, data, op, w, True, False)
+    data_only = apply_cleaning_matrix(data, np.zeros_like(data), op, w, True, True)
+    assert np.allclose(mock_only + data_only, combined, rtol=0, atol=1e-10 * scale)
+    with pytest.raises(ValueError, match="cleaning must be"):
+        get_cleaning_operator(data, 3, w, True, "ica")
+
+
+def test_transfer_function_mpca_arguments():
+    with pytest.raises(ValueError, match="N_coarse, N_fine"):
+        TransferFunction(None, N_fg=3, cleaning="mpca")
+    with pytest.raises(ValueError, match="R_mat"):
+        TransferFunction(None, N_fg=(2, 3), R_mat=np.eye(4), cleaning="mpca")
+    with pytest.raises(ValueError, match="cleaning must be"):
+        TransferFunction(None, N_fg=3, cleaning="ica")
+
+
+def test_transfer_function_value_mpca():
+    """Same as the auto part of test_transfer_function_value, with mPCA."""
+    wcs = create_wcs(0.0, 0.0, [10, 10], [1.0, 1.0])
+    mock = MockSimulation(survey="meerklass_2021", band="L")
+    mock = MockSimulation(
+        nu=mock.nu[:50],
+        wproj=wcs,
+        num_pix_x=10,
+        num_pix_y=10,
+        mean_amp_1="average_hi_temp",
+        omega_hi=5e-4,
+        k1dbins=np.linspace(0.2, 3.0, 5),
+        flat_sky=True,
+        tracer_bias_2=1.0,
+        num_discrete_source=10000,
+    )
+    mock.W_HI = np.ones_like(mock.W_HI)
+    mock.w_HI = np.ones_like(mock.w_HI)
+    mock.use_flat_sky_box()
+    mock.propagate_field_k_to_model()
+    mock.k1dweights = np.ones_like(mock.kmode)
+    mock.k1dweights[:, :, :2] = 0.0
+    mock.field_1 = mock.mock_tracer_field_1
+    porig_1d, _, _ = mock.get_1d_power(mock.auto_power_3d_1)
+    fg = np.ones_like(mock.field_1) * 20
+    fg *= ((mock.nu / 408 / 1e6) ** (-2.7))[None, None, :]
+    w = np.ones_like(mock.field_1)
+    res_map = mpca_clean(fg + mock.field_1, 2, 3, weights=w, mean_center=True)
+    mock.field_1 = res_map
+    pnotf_1d, _, _ = mock.get_1d_power(mock.auto_power_3d_1)
+    tf_true = pnotf_1d / porig_1d
+    mock.data = fg + mock.field_1
+    dndz_arr = [np.linspace(0, 1, 100), np.ones_like(np.linspace(0, 1, 100))]
+    tf = TransferFunction(
+        mock,
+        N_fg=(2, 3),
+        highres_sim=1,
+        upres_transverse=1,
+        upres_radial=1,
+        num_process=1,
+        unmask_during_mock=True,
+        discrete_source_dndz=dndz_arr,
+        pca_map_weights=w,
+        project_combined=True,
+        cleaning="mpca",
+    )
+    arglist = tf.get_arg_list_for_parallel_auto(range(10))
+    results_arr = np.array([run_tf_calculation_auto(*arg)[0] for arg in arglist])
+    tf_1d = np.median(results_arr, axis=0)
+    assert np.abs(tf_true - tf_1d).mean() < 1e-1
 
 
 def _planted_transfer_ps():
@@ -328,7 +429,7 @@ def _save_wide_mock(ps, prefix):
     return pattern
 
 
-def test_loaded_mock_frequency_cut_and_multipoles(tmp_path):
+def test_loaded_mock_frequency_cut_and_multipoles(tmp_path: Path):
     ps = _planted_transfer_ps()
     prefix = str(tmp_path) + os.sep
     pattern = _save_wide_mock(ps, prefix)
@@ -393,7 +494,7 @@ def test_loaded_mock_frequency_cut_and_multipoles(tmp_path):
     assert np.isfinite(auto_no_cat[0]).all()
 
 
-def test_mock_dilution_reference_power_and_rescale(tmp_path):
+def test_mock_dilution_reference_power_and_rescale(tmp_path: Path):
     ps = _tiny_transfer_ps()
     ps.k1dbins = np.linspace(0.02, 0.3, 6)
     n_freq = int(ps.nu.size)
@@ -456,7 +557,7 @@ def test_mock_dilution_reference_power_and_rescale(tmp_path):
     assert not np.allclose(after_diluted, after_plain)
 
 
-def test_cross_worker_fkp_matches_parent_randoms(tmp_path):
+def test_cross_worker_fkp_matches_parent_randoms(tmp_path: Path):
     ps = _tiny_transfer_ps()
     ps.k1dbins = np.linspace(0.02, 0.3, 6)
     n_freq = int(ps.nu.size)
@@ -542,7 +643,7 @@ def test_cross_worker_fkp_matches_parent_randoms(tmp_path):
     assert not np.allclose(raw_counts[raw_occupied], measured[raw_occupied])
 
 
-def test_loaded_mock_custom_file_stems(tmp_path):
+def test_loaded_mock_custom_file_stems(tmp_path: Path):
     nu = np.linspace(900e6, 1000e6, 4)
     wproj = create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0])
     cube = np.arange(4 * 4 * nu.size, dtype=float).reshape(4, 4, nu.size)
@@ -606,11 +707,11 @@ def test_loaded_mock_custom_file_stems(tmp_path):
         hi_stem=hi_stem,
         gal_stem=gal_stem,
     )
-    assert tf.get_arg_list_for_parallel_auto([3])[0][-2:] == (hi_stem, gal_stem)
-    assert tf.get_arg_list_for_parallel_cross([3])[0][-2:] == (hi_stem, gal_stem)
+    assert tf.get_arg_list_for_parallel_auto([3])[0][-3:-1] == (hi_stem, gal_stem)
+    assert tf.get_arg_list_for_parallel_cross([3])[0][-3:-1] == (hi_stem, gal_stem)
 
 
-def test_loaded_mock_gal_cat_selects_tracer_stem(tmp_path):
+def test_loaded_mock_gal_cat_selects_tracer_stem(tmp_path: Path):
     nu = np.linspace(900e6, 1000e6, 4)
     wproj = create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0])
     cube = np.ones((4, 4, nu.size))
@@ -655,7 +756,7 @@ def _high_k_power(cube):
     return np.sum(np.abs(spectrum[radius >= 1.5]) ** 2)
 
 
-def test_loaded_mock_beam_flag(tmp_path):
+def test_loaded_mock_beam_flag(tmp_path: Path):
     nu = np.linspace(900e6, 1000e6, 4)
     wproj = create_wcs(0.0, 0.0, [8, 8], [1.0, 1.0])
     cube = np.zeros((8, 8, nu.size))
@@ -701,7 +802,7 @@ def test_loaded_mock_beam_flag(tmp_path):
     assert _high_k_power(beamed.data) < _high_k_power(plain.data)
 
 
-def test_multipole_list_and_loaded_mock_reject_bad_inputs(tmp_path):
+def test_multipole_list_and_loaded_mock_reject_bad_inputs(tmp_path: Path):
     with pytest.raises(ValueError):
         _multipole_ells([])
     nu = np.linspace(900e6, 1000e6, 4)
@@ -749,7 +850,7 @@ def test_multipole_list_and_loaded_mock_reject_bad_inputs(tmp_path):
         )
 
 
-def test_loaded_cube_mask_is_rebuilt(tmp_path):
+def test_loaded_cube_mask_is_rebuilt(tmp_path: Path):
     nu = np.linspace(900e6, 1000e6, 4)
     wproj = create_wcs(0.0, 0.0, [4, 4], [1.0, 1.0])
     saver = MockSimulation(
