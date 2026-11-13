@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from meer21cm.mpca import (
+    apply_mpca_matrices,
+    get_mpca_matrices,
     mpca_clean,
     starlet_forward_healpix,
     starlet_forward_wcs,
@@ -190,3 +192,26 @@ def test_mpca_healpix_sparse():
     assert np.allclose(s.sum(-1), d)
     with pytest.raises(ValueError):
         mpca_clean(d, 2, 3, hp_nside=nside)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_fixed_matrices(ref, weighted):
+    """Matrices from one cube, applied to it, give mpca_clean; with fixed matrices it is linear."""
+    d, W = ref["d"], ref["W"]
+    kw = dict(weights=W, mean_center=True) if weighted else dict(mean_center=True)
+    rng = np.random.default_rng(0)
+    m = 0.1 * d.std() * rng.normal(size=d.shape)
+    A_c, A_f = get_mpca_matrices(d + m, 4, 8, **kw)
+    res = mpca_clean(d + m, 4, 8, **kw)
+    scale = np.abs(res).max()
+    assert np.abs(apply_mpca_matrices(d + m, A_c, A_f, **kw) - res).max() <= 1e-10 * scale
+    lin = (apply_mpca_matrices(d, A_c, A_f, **kw) + apply_mpca_matrices(m, A_c, A_f, **kw)
+           - apply_mpca_matrices(d + m, A_c, A_f, **kw))
+    assert np.abs(lin).max() <= 1e-9 * scale
+    # spectral axis first
+    d0 = np.moveaxis(d + m, -1, 0)
+    kw0 = dict(kw, los_axis=0)
+    if weighted:
+        kw0["weights"] = np.moveaxis(W, -1, 0)
+    res0 = apply_mpca_matrices(d0, A_c, A_f, **kw0)
+    assert np.abs(np.moveaxis(res0, 0, -1) - res).max() <= 1e-10 * scale

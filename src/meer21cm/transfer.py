@@ -18,6 +18,7 @@ and you need to configure MPI first (usually with openmpi or mpich), and then in
 
 import numpy as np
 from .util import pca_clean, dft_matrix, inv_dft_matrix
+from .mpca import get_mpca_matrices, apply_mpca_matrices
 from .mock import MockSimulation
 from multiprocessing import Pool
 from .power import PowerSpectrum
@@ -103,6 +104,60 @@ def get_pca_matrix(map, N_fg, weights, mean_center_map):
     )
     R_mat = np.eye(map.shape[-1]) - A_mat @ A_mat.T
     return np.nan_to_num(R_mat)
+
+
+class MPCACleaning:
+    r"""
+    mPCA cleaning with fixed mixing matrices (see :mod:`meer21cm.mpca`).
+
+    Built once from the map to clean (:func:`get_cleaning_operator`), then applied to any
+    cube. With the matrices fixed the operation is linear, like a PCA matrix, but it is not
+    a frequency-only matrix: each cube is split into a coarse and a fine angular scale
+    (starlet, ``J = 1``) and each scale is projected with its own mixing matrix.
+
+    Calling the instance on a cube that is already mean-centred gives the cleaned cube,
+    zero outside the footprint (pixels with non-zero ``weights`` in some channel).
+    """
+
+    def __init__(self, A_coarse, A_fine, weights):
+        self.A_coarse = A_coarse
+        self.A_fine = A_fine
+        self.weights = weights
+
+    def __call__(self, cube):
+        weights = np.broadcast_to(self.weights, np.shape(cube))
+        return apply_mpca_matrices(cube, self.A_coarse, self.A_fine, weights=weights)
+
+
+def get_cleaning_operator(map, N_fg, weights, mean_center_map, cleaning="pca"):
+    r"""
+    The cleaning built from ``map``.
+
+    ``cleaning="pca"``: the PCA matrix :math:`R = I - AA^{\rm T}` of :func:`get_pca_matrix`.
+    ``cleaning="mpca"``: a :class:`MPCACleaning`, with ``N_fg = (N_coarse, N_fine)`` modes
+    removed on the coarse and fine scales, mixing matrices from
+    :func:`meer21cm.mpca.get_mpca_matrices` with the same ``weights`` and mean-centring.
+    """
+    if cleaning == "pca":
+        return get_pca_matrix(map, N_fg, weights, mean_center_map)
+    if cleaning == "mpca":
+        N_coarse, N_fine = N_fg
+        weights = np.broadcast_to(weights, np.shape(map))
+        A_coarse, A_fine = get_mpca_matrices(
+            map, N_coarse, N_fine, weights=weights, mean_center=mean_center_map
+        )
+        return MPCACleaning(A_coarse, A_fine, weights)
+    raise ValueError(f"cleaning must be 'pca' or 'mpca', got {cleaning!r}")
+
+
+def project_cube(cleaning_matrix, cube):
+    """
+    Apply a cleaning to a (mean-centred) cube: a frequency matrix ``(n_freq, n_freq)``
+    or a callable such as :class:`MPCACleaning`.
+    """
+    if callable(cleaning_matrix):
+        return cleaning_matrix(cube)
+    return np.einsum("ij,abj->abi", cleaning_matrix, cube)
 
 
 def analytic_transfer_function(clean_mat_1, clean_mat_2=None):
@@ -244,8 +299,9 @@ class TransferFunction:
     ----------
         ps: :class:`meer21cm.power.PowerSpectrum`
             The power spectrum instance.
-        N_fg: int
-            The number of eigenmodes for PCA cleaning.
+        N_fg: int or tuple
+            The number of eigenmodes for PCA cleaning. For ``cleaning="mpca"``,
+            ``(N_coarse, N_fine)``: modes removed on the coarse and fine scales.
         R_mat: np.ndarray, default None
             The PCA matrix. If not provided, it will be calculated from the data.
             If provided, no map injection is performed and the cleaning uses this matrix.
@@ -357,6 +413,13 @@ class TransferFunction:
             Filename text between ``mock_directory`` and the seed for the galaxy
             FITS table when ``gal_cat`` is ``None``. The auto-power worker does
             not read that table.
+        cleaning: str, default "pca"
+            ``"pca"``: PCA with ``N_fg`` modes. ``"mpca"``: multiscale PCA
+            (Carucci et al. 2025, :mod:`meer21cm.mpca`) with ``N_fg = (N_coarse,
+            N_fine)``. For each mock, the mixing matrices are built from
+            ``uncleaned_data + mock`` with ``pca_map_weights`` and
+            ``mean_center_map`` exactly as for PCA, and the cleaning is applied
+            as selected by ``project_combined``. Not compatible with ``R_mat``.
 
     """
 
@@ -385,7 +448,18 @@ class TransferFunction:
         gal_cat: str | None = None,
         hi_stem: str = "HI_mock_",
         gal_stem: str = "gal_mock_",
+        cleaning: str = "pca",
     ):
+        if cleaning not in ("pca", "mpca"):
+            raise ValueError(f"cleaning must be 'pca' or 'mpca', got {cleaning!r}")
+        if cleaning == "mpca":
+            if R_mat is not None:
+                raise ValueError(
+                    "R_mat is a PCA matrix: it can not be used with cleaning='mpca'"
+                )
+            if np.ndim(N_fg) != 1 or len(N_fg) != 2:
+                raise ValueError("cleaning='mpca' needs N_fg=(N_coarse, N_fine)")
+        self.cleaning = cleaning
         self.ps = ps
         self.N_fg = N_fg
         self.highres_sim = highres_sim
@@ -582,6 +656,7 @@ class TransferFunction:
                     self.gal_cat,
                     self.hi_stem,
                     self.gal_stem,
+                    self.cleaning,
                 )
             )
         return arg_list
@@ -641,6 +716,7 @@ class TransferFunction:
                     self.convolve_loaded_mock,
                     self.hi_stem,
                     self.gal_stem,
+                    self.cleaning,
                 )
             )
         return arg_list
@@ -780,8 +856,9 @@ def apply_cleaning_matrix(
         Mock sky cube, shape ``(nx, ny, n_freq)``.
     uncleaned_data: np.ndarray
         Data cube added to the mock when ``project_combined`` is True.
-    cleaning_matrix: np.ndarray
-        Frequency matrix with shape ``(n_freq, n_freq)``.
+    cleaning_matrix: np.ndarray or callable
+        Frequency matrix with shape ``(n_freq, n_freq)``, or a callable cleaning
+        such as :class:`MPCACleaning` (see :func:`project_cube`).
     map_weights: np.ndarray
         Weights for the frequency mean, same sky shape as the cube.
     mean_center_map: bool
@@ -801,7 +878,7 @@ def apply_cleaning_matrix(
             map_weights, axis=(0, 1)
         )
         array_to_clean = array_to_clean - data_mean[None, None, :]
-    return np.einsum("ij,abj->abi", cleaning_matrix, array_to_clean)
+    return project_cube(cleaning_matrix, array_to_clean)
 
 
 def _align_loaded_cube_masks(mock):
@@ -964,6 +1041,7 @@ def run_tf_calculation_cross(
     gal_cat=None,
     hi_stem="HI_mock_",
     gal_stem="gal_mock_",
+    cleaning="pca",
 ):
     """
     Run the transfer function calculation by calculating the ratio of the 1D cross-power spectrum of
@@ -1053,6 +1131,8 @@ def run_tf_calculation_cross(
         gal_stem: str, default "gal_mock_"
             Filename text between ``mock_directory`` and the seed for the galaxy
             table when ``gal_cat`` is ``None``.
+        cleaning: str, default "pca"
+            ``"pca"`` or ``"mpca"``. See :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
@@ -1134,8 +1214,8 @@ def run_tf_calculation_cross(
     map_to_clean = np.asarray(uncleaned_data) + mock.data
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
-        cleaning_matrix = get_pca_matrix(
-            map_to_clean, N_fg, pca_map_weights, mean_center_map
+        cleaning_matrix = get_cleaning_operator(
+            map_to_clean, N_fg, pca_map_weights, mean_center_map, cleaning
         )
     mock.data = apply_cleaning_matrix(
         mock.data,
@@ -1190,6 +1270,7 @@ def run_tf_calculation_auto(
     convolve_loaded_mock=False,
     hi_stem="HI_mock_",
     gal_stem="gal_mock_",
+    cleaning="pca",
 ):
     """
     Run the transfer function calculation by calculating the ratio between the 1D power spectrum of
@@ -1251,6 +1332,8 @@ def run_tf_calculation_auto(
         gal_stem: str, default "gal_mock_"
             Filename text between ``mock_directory`` and the seed for the galaxy
             table. The galaxy file is not read on this path.
+        cleaning: str, default "pca"
+            ``"pca"`` or ``"mpca"``. See :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
@@ -1295,8 +1378,8 @@ def run_tf_calculation_auto(
     map_to_clean = np.asarray(uncleaned_data) + mock.data
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
-        cleaning_matrix = get_pca_matrix(
-            map_to_clean, N_fg, pca_map_weights, mean_center_map
+        cleaning_matrix = get_cleaning_operator(
+            map_to_clean, N_fg, pca_map_weights, mean_center_map, cleaning
         )
     if mean_center_map and not project_combined:
         # Flat-sky gridding aliases field_1 with this map. Subtract in place so
@@ -1305,7 +1388,7 @@ def run_tf_calculation_auto(
             pca_map_weights, axis=(0, 1)
         )
         mock.data -= data_mean[None, None, :]
-        cleaned = np.einsum("ij,abj->abi", cleaning_matrix, mock.data)
+        cleaned = project_cube(cleaning_matrix, mock.data)
     else:
         cleaned = apply_cleaning_matrix(
             mock.data,

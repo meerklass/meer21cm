@@ -43,6 +43,8 @@ __all__ = [
     "starlet_forward_healpix",
     "starlet_split",
     "mpca_clean",
+    "get_mpca_matrices",
+    "apply_mpca_matrices",
 ]
 
 #: B3-spline scaling filter of the starlet transform.
@@ -345,6 +347,78 @@ def _healpix_geometry(n_pix, hp_nside, pixel_id, skymap):
 # ----------------------------------------------------------------------------
 # mPCA
 # ----------------------------------------------------------------------------
+def _mpca_scales(
+    signal,
+    weights,
+    mean_center,
+    mean_center_weights,
+    los_axis,
+    J,
+    footprint,
+    fill,
+    hp_nside,
+    pixel_id,
+    skymap,
+    lmax,
+    n_iter,
+):
+    """
+    Common first steps of :func:`mpca_clean` and :func:`apply_mpca_matrices`:
+    footprint, optional mean-centring, starlet split.
+
+    Returns the channel-first maps ``x``, the footprint ``inside``, the weights of the
+    footprint pixels ``w_obs`` (``(n_ch, n_obs)`` or None) and the scales of the
+    footprint pixels ``s_obs`` (``(n_ch, n_obs, J + 1)``, coarse last).
+    """
+    signal = np.asarray(signal, dtype=float)
+    if signal.ndim not in (2, 3):
+        raise ValueError("expected a 3D WCS cube or 2D HEALPix maps")
+    x = np.moveaxis(signal, los_axis, 0)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if weights.shape != signal.shape:
+            raise ValueError("weights must have the same shape as signal")
+        w = np.moveaxis(weights, los_axis, 0)
+    else:
+        w = None
+    if footprint is None:
+        inside = np.all(np.isfinite(x), axis=0)
+        if w is not None:
+            inside &= np.any(w > 0, axis=0)
+    else:
+        inside = _footprint(x, footprint)
+    if not inside.any():
+        raise ValueError("empty footprint")
+
+    # data and weights of the footprint pixels, (n_ch, n_obs)
+    d = x[:, inside]
+    w_obs = None if w is None else w[:, inside]
+    if mean_center:
+        if mean_center_weights is None:
+            mw = w_obs
+        else:
+            mw = np.moveaxis(np.asarray(mean_center_weights, dtype=float), los_axis, 0)
+            mw = mw[:, inside]
+        d = mean_center_signal(d, mw, los_axis=0)
+    x_mc = np.zeros_like(x)
+    x_mc[:, inside] = d
+
+    scales = starlet_split(
+        x_mc,
+        J=J,
+        los_axis=0,
+        footprint=inside,
+        fill=fill,
+        hp_nside=hp_nside,
+        pixel_id=pixel_id,
+        skymap=skymap,
+        lmax=lmax,
+        n_iter=n_iter,
+    )
+    s_obs = scales[:, inside]  # (n_ch, n_obs, J + 1)
+    return x, inside, w_obs, s_obs
+
+
 def mpca_clean(
     signal,
     N_coarse,
@@ -393,8 +467,10 @@ def mpca_clean(
     transform (they do not enter the covariances). The paper used a rectangular footprint.
     The output is zero outside the footprint.
 
-    The cleaning is not a frequency-only operation, so it can not be used with
-    :class:`meer21cm.transfer.TransferFunction` in its current form.
+    The cleaning is not a frequency-only operation, but once the mixing matrices are fixed it
+    is linear in the maps: :func:`get_mpca_matrices` builds them from one set of maps and
+    :func:`apply_mpca_matrices` applies them to any other. This is how
+    :class:`meer21cm.transfer.TransferFunction` runs mPCA (``cleaning="mpca"``).
 
     Parameters
     ----------
@@ -448,53 +524,22 @@ def mpca_clean(
         residual_scales: array, if ``return_scales=True``.
             The cleaned maps of each scale.
     """
-    signal = np.asarray(signal, dtype=float)
-    if signal.ndim not in (2, 3):
-        raise ValueError("expected a 3D WCS cube or 2D HEALPix maps")
-    x = np.moveaxis(signal, los_axis, 0)
-    if weights is not None:
-        weights = np.asarray(weights, dtype=float)
-        if weights.shape != signal.shape:
-            raise ValueError("weights must have the same shape as signal")
-        w = np.moveaxis(weights, los_axis, 0)
-    else:
-        w = None
-    if footprint is None:
-        inside = np.all(np.isfinite(x), axis=0)
-        if w is not None:
-            inside &= np.any(w > 0, axis=0)
-    else:
-        inside = _footprint(x, footprint)
-    if not inside.any():
-        raise ValueError("empty footprint")
-    n_ch = x.shape[0]
-
-    # data and weights of the footprint pixels, (n_ch, n_obs)
-    d = x[:, inside]
-    w_obs = None if w is None else w[:, inside]
-    if mean_center:
-        if mean_center_weights is None:
-            mw = w_obs
-        else:
-            mw = np.moveaxis(np.asarray(mean_center_weights, dtype=float), los_axis, 0)
-            mw = mw[:, inside]
-        d = mean_center_signal(d, mw, los_axis=0)
-    x_mc = np.zeros_like(x)
-    x_mc[:, inside] = d
-
-    scales = starlet_split(
-        x_mc,
-        J=J,
-        los_axis=0,
-        footprint=inside,
-        fill=fill,
-        hp_nside=hp_nside,
-        pixel_id=pixel_id,
-        skymap=skymap,
-        lmax=lmax,
-        n_iter=n_iter,
+    x, inside, w_obs, s_obs = _mpca_scales(
+        signal,
+        weights,
+        mean_center,
+        mean_center_weights,
+        los_axis,
+        J,
+        footprint,
+        fill,
+        hp_nside,
+        pixel_id,
+        skymap,
+        lmax,
+        n_iter,
     )
-    s_obs = scales[:, inside]  # (n_ch, n_obs, J + 1)
+    n_ch = x.shape[0]
     n_obs = s_obs.shape[1]
 
     coarse = s_obs[..., J]
@@ -518,3 +563,77 @@ def mpca_clean(
     if return_scales:
         out.append(np.moveaxis(res_scales, 0, los_axis if los_axis >= 0 else los_axis - 1))
     return out[0] if len(out) == 1 else tuple(out)
+
+
+def get_mpca_matrices(signal, N_coarse, N_fine, **kwargs):
+    """
+    The coarse and fine mixing matrices of :func:`mpca_clean` for ``signal``.
+
+    ``kwargs`` are those of :func:`mpca_clean` (``weights``, ``mean_center``, ``footprint``,
+    ...). Returns ``(A_coarse, A_fine)``, shapes ``(n_ch, N_coarse)`` and ``(n_ch, N_fine)``.
+    """
+    kwargs = dict(kwargs, return_A=True, return_scales=False)
+    _, A_coarse, A_fine = mpca_clean(signal, N_coarse, N_fine, **kwargs)
+    return A_coarse, A_fine
+
+
+def apply_mpca_matrices(
+    signal,
+    A_coarse,
+    A_fine,
+    weights=None,
+    mean_center=False,
+    mean_center_weights=None,
+    los_axis=-1,
+    J=1,
+    footprint=None,
+    fill="mean",
+    hp_nside=None,
+    pixel_id=None,
+    skymap=None,
+    lmax=None,
+    n_iter=3,
+):
+    r"""
+    Clean ``signal`` with fixed mPCA mixing matrices (e.g. from :func:`get_mpca_matrices`
+    run on other maps).
+
+    Same steps as :func:`mpca_clean` (footprint, optional mean-centring, starlet split), then
+    each scale is projected with its own matrix, :math:`(I - A A^{\rm T})`, and the scales are
+    summed. With the matrices of ``signal`` itself the result equals ``mpca_clean(signal, ...)``;
+    with fixed matrices the operation is linear in ``signal``.
+
+    ``weights`` only enter through the default footprint and the mean-centring (the
+    covariances are not recomputed). Arguments as in :func:`mpca_clean`.
+
+    Returns
+    -------
+        residual: array.
+            The cleaned maps, same shape as ``signal``, zero outside the footprint.
+    """
+    x, inside, w_obs, s_obs = _mpca_scales(
+        signal,
+        weights,
+        mean_center,
+        mean_center_weights,
+        los_axis,
+        J,
+        footprint,
+        fill,
+        hp_nside,
+        pixel_id,
+        skymap,
+        lmax,
+        n_iter,
+    )
+    A_coarse = np.asarray(A_coarse, dtype=float)
+    A_fine = np.asarray(A_fine, dtype=float)
+    res_obs = np.zeros(s_obs.shape[:2])
+    coarse = s_obs[..., J]
+    res_obs += coarse - A_coarse @ (A_coarse.T @ coarse)
+    for j in range(J):
+        fine = s_obs[..., j]
+        res_obs += fine - A_fine @ (A_fine.T @ fine)
+    residual = np.zeros_like(x)
+    residual[:, inside] = res_obs
+    return np.moveaxis(residual, 0, los_axis)
