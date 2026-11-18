@@ -39,6 +39,9 @@ Issues = "https://github.com/meerklass/meer21cm/issues"
 test = [
     "pytest",
     "pytest-cov",
+    # 7.17.1 opens combine inputs read-only, then crashes pytest if a parallel
+    # data file has no coverage_schema table.
+    "coverage>=7.10.6,<7.17.1",
     "mpi4py",
     "baccoemu",
 ]
