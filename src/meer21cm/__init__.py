@@ -19,6 +19,8 @@ __all__ = [
     "SmoothWindowEstimator",
     "WindowedMultipoleModel",
     "DiscreteShellWindowMatrix",
+    "LineOfSightPowerSpectrum",
+    "RadialTransferFunction",
 ]
 
 
@@ -33,6 +35,8 @@ _LAZY_ATTRS = {
         "meer21cm.smooth_window",
         "DiscreteShellWindowMatrix",
     ),
+    "LineOfSightPowerSpectrum": ("meer21cm.los", "LineOfSightPowerSpectrum"),
+    "RadialTransferFunction": ("meer21cm.transfer", "RadialTransferFunction"),
 }
 
 

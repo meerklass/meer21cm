@@ -16,6 +16,8 @@ from meer21cm.transfer import (
     run_tf_calculation_auto,
     run_tf_calculation_cross,
     run_null_test,
+    RadialTransferFunction,
+    radial_transfer,
 )
 import pytest
 from meer21cm.power_ops import fkp_count_field
@@ -888,3 +890,177 @@ def test_loaded_cube_mask_is_rebuilt(tmp_path):
     assert mock.map_has_sampling.shape == mock.data.shape
     assert mock.weights_map_pixel.shape == mock.data.shape
     assert mock.map_has_sampling.all()
+
+
+def test_radial_transfer_identity():
+    """No channelisation: the transfer is unity."""
+    chi_u = np.linspace(2272.0, 2868.0, 255)
+    dchi_u = float(chi_u[1] - chi_u[0])
+    k = np.array([0.02, 0.1, 0.3])
+    transfer = radial_transfer(k, chi_u, dchi_u)
+    assert np.allclose(transfer, 1.0)
+
+
+def test_radial_transfer_channel_tophat():
+    """One voxel per channel reproduces the top-hat transfer at low k."""
+    n = 128
+    chi_ch = np.linspace(2272.4, 2867.9, n)
+    dchi_ch = np.full(n, float(np.median(np.diff(chi_ch))))
+    chi_u = np.linspace(chi_ch.min(), chi_ch.max(), 512)
+    dchi_u = float(chi_u[1] - chi_u[0])
+    k = np.array([0.02, 0.05])
+    transfer = radial_transfer(
+        k, chi_u, dchi_u, chi_ch=chi_ch, dchi_ch=dchi_ch, dchi_vox=dchi_ch[0]
+    )
+    expected = np.sinc(k * dchi_ch[0] / 2.0 / np.pi) ** 2
+    assert np.allclose(transfer, expected, rtol=0.05)
+    assert np.all(transfer <= 1.0 + 1e-12)
+    # the transfer decreases with k
+    assert transfer[0] > transfer[1]
+
+
+def test_radial_transfer_cleaning_matrix():
+    """An identity cleaning matrix leaves the transfer unchanged; zero kills it."""
+    n = 32
+    chi_ch = np.linspace(2272.4, 2867.9, n)
+    dchi_ch = np.full(n, float(np.median(np.diff(chi_ch))))
+    chi_u = np.linspace(chi_ch.min(), chi_ch.max(), 200)
+    dchi_u = float(chi_u[1] - chi_u[0])
+    k = np.array([0.05, 0.1])
+    base = radial_transfer(k, chi_u, dchi_u, chi_ch=chi_ch, dchi_ch=dchi_ch)
+    ident = radial_transfer(
+        k, chi_u, dchi_u, chi_ch=chi_ch, dchi_ch=dchi_ch, clean_matrix=np.eye(n)
+    )
+    assert np.allclose(base, ident)
+    zeroed = radial_transfer(
+        k, chi_u, dchi_u, chi_ch=chi_ch, dchi_ch=dchi_ch, clean_matrix=np.zeros((n, n))
+    )
+    assert np.allclose(zeroed, 0.0)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (dict(chi_u=np.ones((2, 2)), dchi_u=1.0), "chi_u must be a 1-D array"),
+        (dict(chi_u=np.array([1.0]), dchi_u=1.0), "chi_u must be a 1-D array"),
+        (
+            dict(chi_u=np.array([1.0, 0.0]), dchi_u=1.0),
+            "chi_u must be strictly ascending",
+        ),
+        (
+            dict(chi_u=np.linspace(0.0, 10.0, 8), dchi_u=0.0),
+            "dchi_u must be a positive finite number",
+        ),
+        (
+            dict(chi_u=np.linspace(0.0, 10.0, 8), dchi_u=np.nan),
+            "dchi_u must be a positive finite number",
+        ),
+        (
+            dict(
+                chi_u=np.linspace(0.0, 10.0, 8),
+                dchi_u=1.0,
+                clean_matrix=np.eye(2),
+            ),
+            "clean_matrix requires chi_ch",
+        ),
+        (
+            dict(
+                chi_u=np.linspace(0.0, 10.0, 8),
+                dchi_u=1.0,
+                chi_ch=np.array([1.0]),
+            ),
+            "chi_ch must be a 1-D array",
+        ),
+        (
+            dict(
+                chi_u=np.linspace(0.0, 10.0, 8),
+                dchi_u=1.0,
+                chi_ch=np.array([1.0, 2.0, 3.0]),
+                dchi_ch=np.ones((3, 2)),
+            ),
+            "dchi_ch must have the same size",
+        ),
+        (
+            dict(
+                chi_u=np.linspace(0.0, 10.0, 8),
+                dchi_u=1.0,
+                chi_ch=np.array([1.0, 2.0]),
+                dchi_vox=0.0,
+            ),
+            "dchi_vox must be a positive finite number",
+        ),
+        (
+            dict(
+                chi_u=np.linspace(0.0, 10.0, 8),
+                dchi_u=1.0,
+                chi_ch=np.array([1.0, 2.0]),
+                clean_matrix=np.ones(3),
+            ),
+            "clean_matrix must be a square 2-D array",
+        ),
+        (
+            dict(
+                chi_u=np.linspace(0.0, 10.0, 8),
+                dchi_u=1.0,
+                chi_ch=np.array([1.0, 2.0]),
+                clean_matrix=np.eye(3),
+            ),
+            "clean_matrix must have shape",
+        ),
+    ],
+)
+def test_radial_transfer_function_validation(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        RadialTransferFunction(**kwargs)
+
+
+def test_radial_transfer_function_defaults_and_helpers():
+    chi_u = np.linspace(0.0, 10.0, 20)
+    chi_ch = np.array([3.0, 1.0, 2.0])
+    dchi_ch = np.array([0.3, 0.1, 0.2])
+    radial = RadialTransferFunction(chi_u, 0.05, chi_ch=chi_ch, dchi_ch=dchi_ch)
+    assert np.allclose(radial.chi_ch, np.array([1.0, 2.0, 3.0]))
+    assert np.allclose(radial.dchi_ch, np.array([0.1, 0.2, 0.3]))
+    centres = np.array([1.0, 2.0, 4.0])
+    defaulted = RadialTransferFunction(chi_u, 0.05, chi_ch=centres)
+    assert np.allclose(defaulted.dchi_ch, np.median(np.diff(defaulted.chi_ch)))
+    assert defaulted.dchi_vox == pytest.approx(float(np.median(defaulted.dchi_ch)))
+    identity = RadialTransferFunction(chi_u, 0.05)
+    with pytest.raises(ValueError, match="voxel_grid requires chi_ch"):
+        identity.voxel_grid()
+    with pytest.raises(ValueError, match="values must be sampled on the voxel grid"):
+        radial._channelise(np.zeros(3, dtype=complex))
+    k = np.array([0.05, 0.1])
+    assert np.allclose(radial(k), radial.transfer(k))
+    assert np.allclose(
+        radial_transfer(k, chi_u, 0.05, chi_ch=chi_ch, dchi_ch=dchi_ch),
+        radial.transfer(k),
+    )
+
+
+def test_radial_transfer_zero_taper_is_nan():
+    chi_u = np.linspace(0.0, 10.0, 32)
+    radial = RadialTransferFunction(
+        chi_u, float(chi_u[1] - chi_u[0]), taper=lambda n: np.zeros(n)
+    )
+    assert np.all(np.isnan(radial.transfer(np.array([0.1, 0.2]))))
+
+
+def test_radial_transfer_channel_order_invariant():
+    chi_ch = np.linspace(100.0, 200.0, 16)
+    dchi_ch = np.linspace(1.0, 1.5, 16)
+    chi_u = np.linspace(chi_ch.min(), chi_ch.max(), 64)
+    dchi_u = float(chi_u[1] - chi_u[0])
+    k = np.array([0.02, 0.08])
+    forward = radial_transfer(
+        k, chi_u, dchi_u, chi_ch=chi_ch, dchi_ch=dchi_ch, dchi_vox=0.5
+    )
+    backward = radial_transfer(
+        k,
+        chi_u,
+        dchi_u,
+        chi_ch=chi_ch[::-1],
+        dchi_ch=dchi_ch[::-1],
+        dchi_vox=0.5,
+    )
+    assert np.allclose(forward, backward, rtol=1e-12, atol=0.0)
