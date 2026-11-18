@@ -56,6 +56,91 @@ def test_analytic_transfer_function():
     assert np.abs(np.diagonal(wab)[6:].mean() - 1) < 0.01
 
 
+def _los_projector(modes):
+    """R = I - A A^T for real line-of-sight modes."""
+    basis, _ = np.linalg.qr(np.atleast_2d(np.asarray(modes, dtype=float)).T)
+    n_chan = basis.shape[0]
+    return np.eye(n_chan) - basis @ basis.T
+
+
+def _quadrature_response(clean, bin_index):
+    """Power landed in each real-FFT bin by a unit mode at ``bin_index``.
+
+    A cosine and a sine at the same frequency have opposite +k/-k cross terms,
+    so their average is the phase-averaged response of white noise in that bin.
+    DC and Nyquist have only one real mode.
+    """
+    n_chan = clean.shape[0]
+    channel = np.arange(n_chan)
+    n_k = n_chan // 2 + 1
+    angle = 2.0 * np.pi * bin_index * channel / n_chan
+    # DC, and the Nyquist mode when N is even, are single real modes.
+    # For odd N every non-zero real-FFT bin has a distinct negative partner.
+    single_real_mode = bin_index == 0 or (n_chan % 2 == 0 and bin_index == n_chan // 2)
+    modes = (np.cos(angle),) if single_real_mode else (np.cos(angle), np.sin(angle))
+    landed = np.zeros(n_k)
+    injected = 0.0
+    for mode in modes:
+        spectrum = np.fft.rfft(mode)
+        landed += np.abs(np.fft.rfft(clean @ mode)) ** 2
+        injected += np.abs(spectrum[bin_index]) ** 2
+    return landed / injected
+
+
+def test_analytic_transfer_function_white_noise():
+    """White noise keeps the power given by the sum of H over every frequency.
+
+    Removing one cosine keeps half the power at that k_parallel: the cosine
+    part is removed and the sine part remains.
+    """
+    n_chan = 64
+    mode_index = 5
+    channel = np.arange(n_chan)
+    cosine = np.cos(2.0 * np.pi * mode_index * channel / n_chan)
+    coordinate = np.linspace(-1.0, 1.0, n_chan)
+    cases = (
+        _los_projector(cosine),
+        _los_projector(np.vstack([np.ones(n_chan), coordinate, coordinate**2])),
+    )
+    rng = np.random.default_rng(0)
+    n_los = 4000
+    for clean in cases:
+        transfer, window = analytic_transfer_function(clean)
+        assert transfer.shape == (n_chan // 2 + 1,)
+        assert window.shape == (n_chan // 2 + 1, n_chan // 2 + 1)
+        retained = 1.0 / transfer
+        noise = rng.standard_normal((n_los, n_chan))
+        power_in = np.mean(np.abs(np.fft.rfft(noise, axis=-1)) ** 2, axis=0)
+        power_out = np.mean(np.abs(np.fft.rfft(noise @ clean.T, axis=-1)) ** 2, axis=0)
+        assert np.max(np.abs(power_out / power_in - retained)) < 2e-2
+        kept = retained > 1e-8
+        assert np.allclose(window[kept].sum(axis=1), 1.0)
+        for bin_index in range(retained.size):
+            response = _quadrature_response(clean, bin_index)
+            # A fully removed output mode has retained = 0 and an infinite
+            # transfer, so that window row is 0/0. The landed power is zero.
+            predicted = retained * window[:, bin_index]
+            missing = ~np.isfinite(predicted)
+            predicted = np.where(missing, 0.0, predicted)
+            assert np.allclose(response, predicted, atol=1e-10)
+            assert np.allclose(response[missing], 0.0, atol=1e-10)
+
+    odd = 63
+    odd_channel = np.arange(odd)
+    odd_clean = _los_projector(np.cos(2.0 * np.pi * mode_index * odd_channel / odd))
+    odd_transfer, odd_window = analytic_transfer_function(odd_clean)
+    odd_retained = 1.0 / odd_transfer
+    assert odd_retained[mode_index] == pytest.approx(0.5, abs=1e-10)
+    for bin_index in range(odd_retained.size):
+        response = _quadrature_response(odd_clean, bin_index)
+        predicted = odd_retained * odd_window[:, bin_index]
+        assert np.allclose(response, predicted, atol=1e-10)
+
+    retained = 1.0 / analytic_transfer_function(cases[0])[0]
+    assert retained[mode_index] == pytest.approx(0.5, abs=1e-10)
+    assert np.allclose(retained[np.arange(retained.size) != mode_index], 1.0)
+
+
 def test_numerical_transfer_function():
     wcs = create_wcs(0.0, 0.0, [10, 10], [1.0, 1.0])
     mock = MockSimulation(
