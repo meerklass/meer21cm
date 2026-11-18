@@ -1337,7 +1337,9 @@ class LightconeGriddingMixin:
         if weights_grid_2_template is None:
             weights_grid_2_template = np.ones(data_counts.shape, dtype=real_dtype)
         else:
-            weights_grid_2_template = np.asarray(weights_grid_2_template, dtype=real_dtype)
+            weights_grid_2_template = np.asarray(
+                weights_grid_2_template, dtype=real_dtype
+            )
         _field, alpha = fkp_count_field(data_counts, random_counts)
         self.field_2_D = data_counts
         self.field_2_R = random_counts
@@ -1365,7 +1367,7 @@ class LightconeGriddingMixin:
             Unused painter weights. The field weight is the lightcone mask.
         gal_map_sq : ndarray, optional
             Paint of the squared per-galaxy weights. ``None`` for unit weights.
-            
+
         Returns
         -------
         None
@@ -1701,6 +1703,13 @@ class LightconeGriddingMixin:
     ):
         """
         Grid a box field onto the WCS map cube (raster ``(num_pix_x, num_pix_y, n_ch)``).
+
+        Voxel centres are painted with nearest-neighbour cells. Astropy pixel
+        ``i`` is centred at coordinate ``i`` and covers ``[i - 0.5, i + 0.5)``,
+        while mesh cell ``i`` covers ``[i, i + 1)``. Half a pixel is added so
+        the pixel centre falls on the mesh-cell centre. Frequencies use the
+        same shift, in channel units measured from ``nu[0]``, and the
+        frequency axis has one cell per channel.
         """
         if wproj is None:
             wproj = self.wproj
@@ -1732,16 +1741,14 @@ class LightconeGriddingMixin:
         pos_xyz[:, 2] = np.tile(z_vec, nx * ny)
         pos_ra, pos_dec, pos_z, _ = self.ra_dec_z_for_coord_in_box(pos_xyz)
         pos_indx_1, pos_indx_2 = radec_to_indx(pos_ra, pos_dec, wproj, to_int=False)
-        #pos_indx_z = redshift_to_freq(pos_z) - self.nu.min()
-        pos_indx_z = (redshift_to_freq(pos_z) - self.nu[0]) / self.freq_resol
         # pixel/channel i spans [i-0.5, i+0.5); mesh cell i spans [i, i+1)
+        pos_indx_z = (redshift_to_freq(pos_z) - self.nu[0]) / self.freq_resol
         pos_indx_array = np.empty((nxyz, 3), dtype=self.real_dtype)
         pos_indx_array[:, 0] = pos_indx_1 + 0.5
         pos_indx_array[:, 1] = pos_indx_2 + 0.5
         pos_indx_array[:, 2] = pos_indx_z + 0.5
         map_bin, _, count_bin = project_particle_to_regular_grid(
             pos_indx_array,
-            #np.array([num_pix_x, num_pix_y, self.nu.max() - self.nu.min()]),
             np.array([num_pix_x, num_pix_y, self.nu.size]),
             np.array([num_pix_x, num_pix_y, self.nu.size]),
             particle_mass=field.ravel(),
@@ -1840,6 +1847,13 @@ class LightconeGriddingMixin:
     ):
         """
         Grid a field in the rectangular box onto the sky.
+
+        For a WCS map, pixel ``i`` is centred at coordinate ``i``. The painter
+        shifts those coordinates by half a cell so nearest-neighbour mesh cell
+        ``i``, which covers ``[i, i + 1)``, receives that pixel. The frequency
+        axis is in channel units from ``nu[0]``, with the same half-channel
+        shift and one cell per channel. The HEALPix path assigns pixels with
+        ``ang2pix`` and channels with :func:`~meer21cm.util.find_ch_id`.
 
         Parameters
         ----------

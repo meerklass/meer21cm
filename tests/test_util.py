@@ -157,24 +157,68 @@ def test_sample_map_from_highres():
     assert np.allclose(map_lowres, np.ones_like(map_lowres))
 
 
+def _assert_udres_footprint(w_in, w_out, scale, num_pix_x, num_pix_y):
+    """Edges stay fixed, and odd-scale pixel centres land on the middle subpixel."""
+    assert np.allclose(
+        np.asarray(w_out.wcs.cdelt, dtype=float),
+        np.asarray(w_in.wcs.cdelt, dtype=float) / scale,
+    )
+    assert np.allclose(
+        np.asarray(w_out.wcs.crpix, dtype=float),
+        (np.asarray(w_in.wcs.crpix, dtype=float) - 0.5) * scale + 0.5,
+    )
+    corners = (
+        (-0.5, -0.5, -0.5, -0.5),
+        (
+            num_pix_x - 0.5,
+            num_pix_y - 0.5,
+            num_pix_x * scale - 0.5,
+            num_pix_y * scale - 0.5,
+        ),
+    )
+    for x_in, y_in, x_out, y_out in corners:
+        sky_in = w_in.pixel_to_world(x_in, y_in)
+        sky_out = w_out.pixel_to_world(x_out, y_out)
+        assert sky_in.separation(sky_out).arcsec < 1e-6
+    mid = (scale - 1) / 2.0
+    for i_pix, j_pix in ((0, 0), (2, 1)):
+        sky_in = w_in.pixel_to_world(i_pix, j_pix)
+        sky_out = w_out.pixel_to_world(i_pix * scale + mid, j_pix * scale + mid)
+        assert sky_in.separation(sky_out).arcsec < 1e-6
+
+
 def test_create_udres_wproj():
     mock = PowerSpectrum(
         survey="meerklass_2021",
         band="L",
     )
-    w = create_udres_wproj(mock.wproj, 3)
+    scale = 3
+    w = create_udres_wproj(mock.wproj, scale)
+    # Do not pass survey/band: that preset overwrites wproj and num_pix_*.
     mock2 = PowerSpectrum(
-        survey="meerklass_2021",
-        band="L",
+        nu=mock.nu,
         wproj=w,
-        num_pix_x=mock.num_pix_x * 3,
-        num_pix_y=mock.num_pix_y * 3,
+        num_pix_x=mock.num_pix_x * scale,
+        num_pix_y=mock.num_pix_y * scale,
     )
-    assert mock2.ra_map[0, 0] == mock.ra_map[0, 0]
-    assert mock2.dec_map[0, 0] == mock.dec_map[0, 0]
+    _assert_udres_footprint(mock.wproj, w, scale, mock.num_pix_x, mock.num_pix_y)
     mock.W_HI = np.ones_like(mock.W_HI)
     mock2.W_HI = np.ones_like(mock2.W_HI)
     assert np.allclose(mock.survey_volume, mock2.survey_volume)
+
+
+def test_create_udres_wproj_crpix_away_from_one():
+    scale = 3
+    num_pix_x, num_pix_y = 10, 12
+    w_in = create_wcs(
+        20.0,
+        -35.0,
+        [num_pix_x, num_pix_y],
+        [0.2, -0.25],
+        crpix=[4.0, 7.0],
+    )
+    w_out = create_udres_wproj(w_in, scale)
+    _assert_udres_footprint(w_in, w_out, scale, num_pix_x, num_pix_y)
 
 
 def test_super_sample_array():

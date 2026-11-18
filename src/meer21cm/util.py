@@ -418,6 +418,12 @@ def create_udres_wproj(
     The ratio between the output resolution and input is determined by
     ``udres_scale``.
 
+    ``CDELT`` is divided by ``udres_scale``. ``CRPIX`` is scaled about the
+    pixel edge, ``(crpix - 0.5) * udres_scale + 0.5``, so the footprint
+    edges stay on the same sky. For an odd integer scale, the centre of
+    input pixel ``(i, j)`` is the centre of output pixel
+    ``(i * scale + (scale - 1) / 2, j * scale + (scale - 1) / 2)``.
+
     Parameters
     ----------
     wproj: :class:`astropy.wcs.WCS` object.

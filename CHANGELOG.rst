@@ -7,6 +7,14 @@ dev
 * transfer function can load precomputed HI and galaxy mocks, return several
   multipoles, and apply the cleaning matrix to the combined map
 
+Fixes
++++++
+* paint lightcone voxels onto WCS pixel and channel centres in
+  ``grid_field_to_sky_map`` (half-pixel sky offset and a half-channel
+  stretch at the band edges)
+* scale ``CRPIX`` from the pixel edge in ``create_udres_wproj`` so a
+  resolution change keeps the same footprint
+
 v0.10.0
 -------
 Features
