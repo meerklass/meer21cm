@@ -12,3 +12,12 @@ def test_dir():
     import meer21cm
 
     assert "MockSimulation" in dir(meer21cm)
+
+
+def test_dir_los():
+    import meer21cm
+    import meer21cm.los
+
+    assert "LineOfSightPowerSpectrum" in dir(meer21cm)
+    assert "RadialTransferFunction" in dir(meer21cm)
+    assert meer21cm.LineOfSightPowerSpectrum is meer21cm.los.LineOfSightPowerSpectrum

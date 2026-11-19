@@ -117,18 +117,28 @@ def analytic_transfer_function(clean_mat_1, clean_mat_2=None):
 
     Under the flat sky approximation, the signal loss, as well as the mode-mixing,
     is along the line-of-sight (k_para) direction.
-    The unnormalised window function matrix is
+    With :math:`\tilde{R} = \mathcal{F} R \mathcal{F}^{-1}`, the unnormalised
+    coupling is
 
     .. math::
-        H_{ab} = |\tilde{R}^1_{ab} (\tilde{R}^2_{ab})^*|_{\rm Re}
+        H_{ab} = \mathrm{Re}\!\left(\tilde{R}^1_{ab} (\tilde{R}^2_{ab})^*\right).
 
-    The corresponding signal loss is :math:`\sum_b H_{ab}`, and the analytical
-    transfer function is the inverse of the signal loss.
+    A real field has :math:`P(-k_\parallel) = P(k_\parallel)`, and a cleaning
+    matrix mixes positive and negative :math:`k_\parallel`. The retained
+    fraction at output mode :math:`a` is therefore :math:`\sum_b H_{ab}` over
+    every input frequency, including negative :math:`k_\parallel`. The
+    transfer function is the inverse of that sum. Both are returned on the
+    real-FFT grid, :math:`a = 0, \ldots, N/2`.
 
-    After normalisation, the window function matrix is
+    The window is the same coupling with each negative-frequency column added
+    onto its positive partner (:math:`H_{ab} + H_{a,-b}` for
+    :math:`0 < b < N/2`; the Nyquist mode, when present, has no distinct
+    partner). For a real-FFT spectrum,
 
     .. math::
-        W = {\rm diag}\Big(\sum_b H_{ab}\Big)^{-1} H
+        P^{\mathrm{out}}_a = \sum_{b=0}^{N/2} H^{\mathrm{fold}}_{ab}\, P_b.
+
+    Each row of ``Wab`` is that folded row divided by the retained fraction.
 
     Parameters
     ----------
@@ -141,9 +151,11 @@ def analytic_transfer_function(clean_mat_1, clean_mat_2=None):
     Returns
     -------
         transfer_func: np.ndarray
-            The analytical transfer function.
+            Inverse of the retained fraction on the real-FFT grid.
+            Shape ``(N // 2 + 1,)``.
         Wab: np.ndarray
-            The normalised window function matrix.
+            Normalised folded window on the real-FFT grid.
+            Shape ``(N // 2 + 1, N // 2 + 1)``.
 
     References
     ----------
@@ -153,15 +165,24 @@ def analytic_transfer_function(clean_mat_1, clean_mat_2=None):
     if clean_mat_2 is None:
         clean_mat_2 = clean_mat_1
     assert np.allclose(clean_mat_1.shape, clean_mat_2.shape)
-    num_k = clean_mat_1.shape[0] // 2 + 1
+    n_chan = clean_mat_1.shape[0]
+    num_k = n_chan // 2 + 1
     R_mat_fourier_1 = fft_matrix(clean_mat_1)
     R_mat_fourier_2 = fft_matrix(clean_mat_2)
-    Hab = (np.conj(R_mat_fourier_1) * R_mat_fourier_2).real
-    Hab = Hab[:num_k, :num_k]
-    signal_loss = Hab.sum(1)
-    renorm_mat = np.diag(1 / signal_loss)
-    Wab = renorm_mat @ Hab
-    return 1 / signal_loss, Wab
+    # Rows of the real-FFT output modes; columns still run over all N frequencies.
+    Hab_full = (np.conj(R_mat_fourier_1) * R_mat_fourier_2).real
+    retained = Hab_full[:num_k].sum(axis=1)
+    # P(-k) = P(k), so add each negative-frequency column onto its partner.
+    # For even N the Nyquist column is its own partner and is not added twice.
+    Hab = Hab_full[:num_k, :num_k].copy()
+    n_pair = (n_chan - 1) // 2
+    if n_pair:
+        Hab[:, 1 : 1 + n_pair] += Hab_full[
+            :num_k, n_chan - 1 : n_chan - 1 - n_pair : -1
+        ]
+    transfer = 1.0 / retained
+    Wab = transfer[:, None] * Hab
+    return transfer, Wab
 
 
 required_attrs = [

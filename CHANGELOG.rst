@@ -73,6 +73,13 @@ Changed
   z-taper experiment — window leakage)
 * transfer function can load precomputed HI and galaxy mocks, return several
   multipoles, and apply the cleaning matrix to the combined map
+* add ``LineOfSightPowerSpectrum`` (``meer21cm.los``): the one-dimensional
+  line-of-sight estimator and its transverse-integral model
+* add ``RadialTransferFunction`` and ``radial_transfer`` for the radial window
+  of channel averaging and regridding
+* add ``periodic_hann`` and ``taper_values``
+* field-level Kaiser RSD uses the local plane-parallel operator
+  :math:`f\,\hat n_i\hat n_j\partial_i u_j`
 
 v0.10.0
 -------

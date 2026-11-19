@@ -572,12 +572,9 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
                 "radial_transfer must be a RadialTransferFunction, None or 'auto'"
             )
         self.radial_transfer = radial_transfer
-        self._auto_radial_transfer = None
         self.power_kmu_func = power_kmu_func
 
         self.data_2 = None if data_2 is None else np.asarray(data_2, dtype=float)
-
-        self._transverse_window_cache = None
 
     # -- data aliases --------------------------------------------------
     @property
@@ -593,41 +590,30 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
     @property
     def chi_ch(self) -> NDArray[np.floating]:
         """Comoving distance to each channel centre, in Mpc (fiducial cosmology)."""
-        if getattr(self, "_chi_ch_cache", None) is None:
-            z = np.asarray(self.z_ch, dtype=float)
-            self._chi_ch_cache = (
-                self.astropy_cosmo_fiducial.comoving_distance(z).to("Mpc").value
-            )
-        return self._chi_ch_cache
+        z = np.asarray(self.z_ch, dtype=float)
+        return self.astropy_cosmo_fiducial.comoving_distance(z).to("Mpc").value
 
     @property
     def dchi_ch(self) -> NDArray[np.floating]:
         """Comoving width of each channel, in Mpc."""
-        if getattr(self, "_dchi_ch_cache", None) is None:
-            nu = np.asarray(self.nu, dtype=float)
-            dnu = float(self.freq_resol)
-            z_hi = f_21 / (nu - 0.5 * dnu) - 1.0
-            z_lo = f_21 / (nu + 0.5 * dnu) - 1.0
-            chi = self.astropy_cosmo_fiducial.comoving_distance(
-                np.concatenate([z_hi, z_lo])
-            ).value
-            self._dchi_ch_cache = np.abs(chi[: nu.size] - chi[nu.size :])
-        return self._dchi_ch_cache
+        nu = np.asarray(self.nu, dtype=float)
+        dnu = float(self.freq_resol)
+        z_hi = f_21 / (nu - 0.5 * dnu) - 1.0
+        z_lo = f_21 / (nu + 0.5 * dnu) - 1.0
+        chi = self.astropy_cosmo_fiducial.comoving_distance(
+            np.concatenate([z_hi, z_lo])
+        ).value
+        return np.abs(chi[: nu.size] - chi[nu.size :])
 
     @property
     def chi_u(self) -> NDArray[np.floating]:
         """Uniform comoving grid on which the sightlines are analysed, in Mpc."""
-        if getattr(self, "_chi_u_cache", None) is None:
-            self._chi_u_cache, self._dchi_u_cache = uniform_comoving_grid(
-                self.chi_ch, over=self.over
-            )
-        return self._chi_u_cache
+        return uniform_comoving_grid(self.chi_ch, over=self.over)[0]
 
     @property
     def dchi_u(self) -> float:
         """Spacing of :attr:`chi_u`, in Mpc."""
-        _ = self.chi_u
-        return float(self._dchi_u_cache)
+        return float(uniform_comoving_grid(self.chi_ch, over=self.over)[1])
 
     # -- map handling ---------------------------------------------------
     def _map_for(self, which: str) -> NDArray[np.floating]:
@@ -768,28 +754,26 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
     @property
     def kperp_edges(self) -> NDArray[np.floating]:
         """Edges of the :math:`k_\\perp` integration bins, in Mpc^-1."""
-        if getattr(self, "_kperp_edges_cache", None) is None:
-            edges = self._kperp_edges
-            if edges is None:
-                dperp_min = (
-                    np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(self.chi_u.min())
-                )
-                kmax = self.kperp_max
-                if kmax is None:
-                    kmax = 4.0 * np.pi / dperp_min
-                else:
-                    kmax = float(kmax)
-                    if kmax <= 2.0 * np.pi / dperp_min:
-                        raise ValueError(
-                            "kperp_max is below the first zero of the pixel "
-                            f"window ({2 * np.pi / dperp_min:.4f} Mpc^-1); the "
-                            "k_perp integral would be truncated."
-                        )
-                edges = np.linspace(0.0, kmax, self.n_kperp + 1)
-            if np.any(np.diff(edges) <= 0):
-                raise ValueError("kperp_edges must be strictly increasing")
-            self._kperp_edges_cache = np.asarray(edges, dtype=float)
-        return self._kperp_edges_cache
+        edges = self._kperp_edges
+        if edges is None:
+            dperp_min = (
+                np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(self.chi_u.min())
+            )
+            kmax = self.kperp_max
+            if kmax is None:
+                kmax = 4.0 * np.pi / dperp_min
+            else:
+                kmax = float(kmax)
+                if kmax <= 2.0 * np.pi / dperp_min:
+                    raise ValueError(
+                        "kperp_max is below the first zero of the pixel "
+                        f"window ({2 * np.pi / dperp_min:.4f} Mpc^-1); the "
+                        "k_perp integral would be truncated."
+                    )
+            edges = np.linspace(0.0, kmax, self.n_kperp + 1)
+        if np.any(np.diff(edges) <= 0):
+            raise ValueError("kperp_edges must be strictly increasing")
+        return np.asarray(edges, dtype=float)
 
     def _chi_nodes(self) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """Comoving radii across the band and their taper weights."""
@@ -814,9 +798,6 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
             :math:`\langle \overline{W_\perp^2}\, W_{\\rm beam}^2 \rangle_\chi`,
             shape ``(n_kperp,)``.
         """
-        if self._transverse_window_cache is not None:
-            return self._transverse_window_cache
-
         kperp = self.kperp
         nodes, weights = self._chi_nodes()
 
@@ -829,6 +810,11 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
             if sigma_b.size != np.size(self.chi_ch):
                 sigma_b = np.full(np.size(self.chi_ch), float(sigma_b.flat[0]))
             sigma_b = np.abs(sigma_b)
+            # chi_ch follows the frequency axis and is descending for an
+            # ascending band. np.interp requires an ascending coordinate.
+            order = np.argsort(np.asarray(self.chi_ch, dtype=float))
+            chi_for_beam = np.asarray(self.chi_ch, dtype=float)[order]
+            sigma_b = sigma_b[order]
 
         acc = np.zeros_like(kperp)
         for node, wt in zip(nodes, weights):
@@ -837,11 +823,10 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
                 dperp = np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(node)
                 w_node = w_node * azimuthal_pixel_window_power(kperp, dperp)
             if sigma_b is not None:
-                sb = float(np.interp(node, self.chi_ch, sigma_b))
+                sb = float(np.interp(node, chi_for_beam, sigma_b))
                 w_node = w_node * beam_window_power(kperp, sb)
             acc += wt * w_node
 
-        self._transverse_window_cache = acc
         return acc
 
     def build_model_mesh(
@@ -947,17 +932,15 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
             return None
         if not isinstance(self.radial_transfer, str):
             return self.radial_transfer
-        if self._auto_radial_transfer is None:
-            self._auto_radial_transfer = RadialTransferFunction(
-                self.chi_u,
-                self.dchi_u,
-                chi_ch=self.chi_ch,
-                dchi_ch=self.dchi_ch,
-                # a few samples per channel so that the average is converged
-                dchi_vox=float(np.median(self.dchi_ch)) / 4.0,
-                taper=self.taper,
-            )
-        return self._auto_radial_transfer
+        return RadialTransferFunction(
+            self.chi_u,
+            self.dchi_u,
+            chi_ch=self.chi_ch,
+            dchi_ch=self.dchi_ch,
+            # a few samples per channel so that the average is converged
+            dchi_vox=float(np.median(self.dchi_ch)) / 4.0,
+            taper=self.taper,
+        )
 
     # -- convenience ----------------------------------------------------
     def run(

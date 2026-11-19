@@ -12,6 +12,7 @@ from meer21cm import Specification
 from meer21cm.util import create_udres_wproj, create_wcs
 from meer21cm.util import center_to_edges
 from meer21cm.util import radec_to_indx, find_ch_id, redshift_to_freq
+from meer21cm.util import get_nd_slicer
 from scipy.signal import windows
 from scipy.interpolate import interp1d
 
@@ -823,3 +824,110 @@ def test_save_mock_products_custom_stems(tmp_path):
     assert os.path.isfile(gal_path)
     assert not os.path.isfile(prefix + "HI_mock_0.pkl")
     assert not os.path.isfile(prefix + "gal_mock_0.fits")
+
+
+def _small_kaiser_mock(parallel_plane=True):
+    mock = MockSimulation(
+        nu=np.linspace(789.1e6, 887.8e6, 16),
+        hp_nside=8,
+        ra_range=(0.0, 20.0),
+        dec_range=(-10.0, 10.0),
+        density="gaussian",
+        kaiser_rsd=True,
+        rsd_from_field=True,
+        parallel_plane=parallel_plane,
+        tracer_bias_1=1.5,
+        seed=1,
+    )
+    mock.get_enclosing_box()
+    return mock
+
+
+def _mu2_times_delta(mock, delta):
+    delta_k = np.fft.rfftn(np.asarray(delta), norm="forward")
+    slicer = get_nd_slicer()
+    kz = np.broadcast_to(np.asarray(mock.k_vec[2][slicer[2]]), delta_k.shape)
+    k = np.asarray(mock.kmode)
+    mu2 = np.zeros(delta_k.shape, dtype=float)
+    nonzero = k != 0
+    mu2[nonzero] = (kz[nonzero] / k[nonzero]) ** 2
+    return float(mock.f_growth_true) * mu2 * delta_k
+
+
+def _rms(values):
+    return float(np.sqrt(np.mean(np.abs(np.asarray(values)) ** 2)))
+
+
+def test_kaiser_parallel_plane_is_mu2():
+    mock = _small_kaiser_mock(parallel_plane=True)
+    rhs = _mu2_times_delta(mock, mock.mock_matter_field_r)
+    got = mock.mock_kaiser_field_k_matter
+    rms = _rms(rhs)
+    assert np.allclose(got, rhs, rtol=1e-6, atol=1e-8 * rms)
+    assert np.allclose(got[np.asarray(mock.kmode) == 0], 0.0, atol=1e-8 * rms)
+
+
+def test_kaiser_tracer_uses_matter_velocity():
+    mock = _small_kaiser_mock(parallel_plane=True)
+    matter = mock.mock_tracer_field_1_r / mock.tracer_bias_1
+    rhs = _mu2_times_delta(mock, matter)
+    got = mock.mock_kaiser_field_k_tracer_1
+    rms = _rms(rhs)
+    assert np.allclose(got, rhs, rtol=1e-6, atol=1e-8 * rms)
+    biased = _mu2_times_delta(mock, mock.mock_tracer_field_1_r)
+    assert _rms(got - biased) / _rms(biased) > 0.2
+
+
+def test_kaiser_local_los_is_nij_chi():
+    mock = _small_kaiser_mock(parallel_plane=False)
+    source = np.asarray(mock.mock_matter_field_r)
+    delta_k = np.fft.rfftn(source, norm="forward")
+    slicer = get_nd_slicer()
+    kcomp = [np.asarray(mock.k_vec[i][slicer[i]]) for i in range(3)]
+    k2 = np.asarray(mock.kmode) ** 2
+    zero = np.asarray(mock.kmode) == 0
+    box = np.array(np.meshgrid(*mock.x_vec, indexing="ij"))
+    box = box + np.asarray(mock.box_origin)[:, None, None, None]
+    nhat = box / np.sqrt((box**2).sum(axis=0))[None]
+    kaiser_x = np.zeros(source.shape, dtype=float)
+    for i in range(3):
+        for j in range(i, 3):
+            kij = (kcomp[i] * kcomp[j]) / k2
+            kij = np.array(kij, dtype=float, copy=True)
+            kij[zero] = 0.0
+            chi = np.fft.irfftn(
+                kij * delta_k,
+                s=source.shape,
+                axes=tuple(range(source.ndim)),
+                norm="forward",
+            )
+            weight = 1.0 if i == j else 2.0
+            kaiser_x += weight * nhat[i] * nhat[j] * chi
+    expected = np.fft.rfftn(float(mock.f_growth_true) * kaiser_x, norm="forward")
+    got = mock.mock_kaiser_field_k_matter
+    rms = _rms(expected)
+    assert np.allclose(got, expected, rtol=1e-6, atol=1e-8 * rms)
+
+    u_r = np.asarray(mock.mock_velocity_u_matter)
+    u_parallel = (u_r * nhat).sum(axis=0)
+    y_dot = 0.0
+    for i in range(3):
+        y_k = np.fft.rfftn(u_parallel * nhat[i], norm="forward")
+        y_dot = y_dot + y_k * kcomp[i]
+    old = 1j * float(mock.f_growth_true) * y_dot
+    assert _rms(got - old) / _rms(got) > 1e-3
+
+
+def test_tracer_velocity_properties_are_built():
+    mock = _small_kaiser_mock()
+    mock.tracer_bias_2 = 1.5
+    velocity_1 = mock.mock_velocity_u_tracer_1
+    velocity_2 = mock.mock_velocity_u_tracer_2
+    assert velocity_1.shape[0] == 3
+    assert velocity_2.shape == velocity_1.shape
+
+
+def test_kaiser_source_density_rejects_unknown_field():
+    mock = _small_kaiser_mock()
+    with pytest.raises(ValueError, match="field must be"):
+        mock.get_mock_kaiser_field_k("galaxy")
