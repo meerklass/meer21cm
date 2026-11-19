@@ -90,7 +90,8 @@ class MockSimulation(PowerSpectrum):
         Whether to simulate the mock field in the parallel-plane limit (i.e. k_z = k_parallel).
         Only used if ``rsd_from_field`` is True, otherwise parallel-plane is hard-coded to True.
     rsd_from_field: bool, default False
-        Whether to generate the RSD effect at field level. If False, the RSD effect is generated at power spectrum level.
+        If True, apply linear Kaiser at field level (local plane-parallel).
+        If False, draw the field from the global plane-parallel :math:`P(k,\mu)`.
     discrete_source_dndz: function, default np.ones_like
         The redshift distribution of the discrete tracer sources.
         Must be a function of redshift.
@@ -416,14 +417,22 @@ class MockSimulation(PowerSpectrum):
         )
         self.clean_cache(self.rsd_dep_attr)
 
+    def _parallel_plane_los_xhat_stacked(self, real_dtype):
+        """Global box :math:`\\hat z` for Kaiser RSD when ``parallel_plane``."""
+        ndim = tuple(int(n) for n in np.asarray(self.box_ndim))
+        z = np.ones(ndim, dtype=real_dtype)
+        zero = np.zeros(ndim, dtype=real_dtype)
+        return np.stack([zero, zero, z], axis=0)
+
     @property
     def rsd_from_field(self):
         """
-        If True, the kaiser rsd effect is generated at field level by
-        calculating the corresponding peculiar velocity field.
-        This allows the lognormal mock to go beyond the parallel-plane limit.
-        If False, the kaiser rsd effect is generated at power spectrum level assuming parallel-plane,
-        and then the field is generated from the anistropic power spectrum.
+        If True, linear Kaiser RSD is applied at field level from the
+        real-space density and the linear velocity (local plane-parallel
+        operator; see ``get_mock_kaiser_field_k``). This is the path that
+        can leave the global plane-parallel limit. If False, Kaiser is
+        applied at power-spectrum level assuming global plane-parallel,
+        and the field is drawn from that anisotropic :math:`P(k,\\mu)`.
         """
         return self._rsd_from_field
 
@@ -862,46 +871,76 @@ class MockSimulation(PowerSpectrum):
             self.get_mock_kaiser_field_k(field="tracer_2")
         return self._mock_kaiser_field_k_tracer_2
 
+    def _rsd_source_density(self, field):
+        """Real-space density used to build the linear velocity / Kaiser term."""
+        if field == "matter":
+            return self.mock_matter_field_r
+        if field == "tracer_1":
+            return self.mock_tracer_field_1_r / self.tracer_bias_1
+        if field == "tracer_2":
+            return self.mock_tracer_field_2_r / self.tracer_bias_2
+        raise ValueError("field must be 'matter', 'tracer_1', or 'tracer_2'")
+
     def get_mock_kaiser_field_k(self, field):
         r"""
-        Generate the Kaiser rsd effect for the mock matter field in k-space.
+        Linear local plane-parallel Kaiser correction in :math:`k`-space.
 
-        In the parrallel-plane limit, the Kaiser rsd effect is given by:
+        Real-space operator (derivatives on Cartesian :math:`u_j` only,
+        then contract with the per-voxel line of sight):
 
         .. math::
 
-            \delta_{\rm rsd} = f \mu^2 \delta_k
+            \delta_{\rm rsd}(\mathbf{x})
+            = f\,\hat{n}_i(\mathbf{x})\,\hat{n}_j(\mathbf{x})\,
+            \partial_i u_j(\mathbf{x})
+            = f\,\hat{n}_i\hat{n}_j\,\chi_{ij}(\mathbf{x}),
 
-        where :math:`f` is the growth rate, :math:`\mu` is the cosine of the angle
-        between the wave vector and the line of sight, and :math:`\delta_k` is the Fourier
-        transform of the real-space matter density field.
+        with :math:`\chi_{ij}=\mathrm{IFFT}[(k_i k_j/k^2)\,\delta(\mathbf{k})]`
+        from linear continuity. This is **not**
+        :math:`f\,\nabla\cdot(u_{\parallel}\hat{n})`, which adds
+        :math:`2f u_{\parallel}/r`.
 
-        This function returns :math:`\delta_{\rm rsd}` in k-space so that for any mock tracer field,
-        the Kaiser effect can be applied by adding :math:`\delta_{\rm rsd}` to the real-space tracer field in k-space.
+        In the global plane-parallel limit :math:`\hat{n}\to\hat{z}` this
+        reduces to :math:`f\mu_z^2\delta(\mathbf{k})`. The returned array
+        is the FFT of :math:`\delta_{\rm rsd}(\mathbf{x})`, added to the
+        real-space tracer FFT in :meth:`get_mock_field_in_redshift_space`.
         """
-        u_r = getattr(self, f"mock_velocity_u_{field}")
+        source = np.asarray(self._rsd_source_density(field))
+        real_dtype = real_dtype_from_array(source)
+        shape = tuple(int(n) for n in source.shape)
+        delta_k = np.fft.rfftn(source, norm="forward")
         slicer = get_nd_slicer()
-        real_dtype = real_dtype_from_array(u_r)
+        kcomp = [
+            np.asarray(self.k_vec[i][slicer[i]], dtype=real_dtype) for i in range(3)
+        ]
+        k2 = np.asarray(self.kmode, dtype=real_dtype) ** 2
+        zero_k = np.asarray(self.kmode) == 0
         if self.parallel_plane:
-            box_coord_l = np.zeros((3,) + tuple(self.box_ndim), dtype=real_dtype)
-            box_coord_l[-1] = np.asarray(1.0, dtype=real_dtype)
+            nhat = self._parallel_plane_los_xhat_stacked(real_dtype)
         else:
             box_coord = np.meshgrid(*self.x_vec, indexing="ij")
             box_coord = np.array(box_coord, dtype=real_dtype) + np.asarray(
                 self.box_origin[:, None, None, None], dtype=real_dtype
             )
-            box_coord_l = box_coord / np.sqrt((box_coord**2).sum(axis=0))[None]
-        self._box_coord_l = box_coord_l
-        u_in_xhat = (u_r * box_coord_l).sum(axis=0)
-        y_k = np.array(
-            [np.fft.rfftn(u_in_xhat * box_coord_l[i], norm="forward") for i in range(3)]
-        )
-        y_k_dot_k = np.array(
-            [(y_k[i] * self.k_vec[i][slicer[i]]) for i in range(3)]
-        ).sum(axis=0)
-        delta_rsd_k = (
-            np.asarray(1j * self.f_growth_true, dtype=y_k_dot_k.dtype) * y_k_dot_k
-        )
+            nhat = box_coord / np.sqrt((box_coord**2).sum(axis=0))[None]
+        kaiser_x = np.zeros(shape, dtype=real_dtype)
+        axes = tuple(range(source.ndim))
+        for i in range(3):
+            for j in range(i, 3):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    kij_over_k2 = (kcomp[i] * kcomp[j]) / k2
+                kij_over_k2 = np.asarray(kij_over_k2, dtype=real_dtype)
+                kij_over_k2[zero_k] = 0
+                chi = np.fft.irfftn(
+                    kij_over_k2.astype(delta_k.dtype, copy=False) * delta_k,
+                    s=shape,
+                    axes=axes,
+                    norm="forward",
+                ).astype(real_dtype, copy=False)
+                weight = np.asarray(1.0 if i == j else 2.0, dtype=real_dtype)
+                kaiser_x += weight * nhat[i] * nhat[j] * chi
+        kaiser_x *= np.asarray(self.f_growth_true, dtype=real_dtype)
+        delta_rsd_k = np.fft.rfftn(kaiser_x, norm="forward")
         logger.info(
             f"{inspect.currentframe().f_code.co_name}: "
             f"setting _mock_kaiser_field_k_{field} "

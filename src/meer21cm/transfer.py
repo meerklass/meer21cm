@@ -17,7 +17,8 @@ and you need to configure MPI first (usually with openmpi or mpich), and then in
 """
 
 import numpy as np
-from .util import pca_clean, dft_matrix, inv_dft_matrix
+from numpy.typing import ArrayLike, NDArray
+from .util import pca_clean, dft_matrix, inv_dft_matrix, taper_values
 from .mock import MockSimulation
 from multiprocessing import Pool
 from .power import PowerSpectrum
@@ -1465,3 +1466,235 @@ def run_null_test(
     if return_power_3d:
         result.append(mock.cross_power_3d)
     return result
+
+
+def radial_transfer(
+    k: ArrayLike,
+    chi_u: ArrayLike,
+    dchi_u: float,
+    chi_ch: ArrayLike | None = None,
+    dchi_ch: ArrayLike | None = None,
+    dchi_vox: float | None = None,
+    taper: bool | Callable[[int], ArrayLike] = True,
+    clean_matrix: ArrayLike | None = None,
+) -> NDArray[np.floating]:
+    r"""
+    One-dimensional radial transfer :math:`|T(k)|^2` of the map-making chain.
+
+    Functional form of :class:`RadialTransferFunction`; see that class for the
+    operator description.  Returns an array with the shape of ``k``.
+    """
+    return RadialTransferFunction(
+        chi_u,
+        dchi_u,
+        chi_ch=chi_ch,
+        dchi_ch=dchi_ch,
+        dchi_vox=dchi_vox,
+        taper=taper,
+        clean_matrix=clean_matrix,
+    ).transfer(k)
+
+
+class RadialTransferFunction:
+    r"""
+    Radial (frequency-axis) transfer of the map-making operator.
+
+    The data chain along the line of sight is
+
+    1. the rectangular box is sampled on the voxel grid of spacing
+       ``dchi_vox``;
+    2. every voxel is assigned to the channel whose comoving interval
+       contains it, and the channel value is the mean of those voxels;
+    3. the channel-centre values are linearly interpolated onto the uniform
+       comoving grid ``chi_u``;
+    4. a taper is applied and the finite-aperture DFT is taken.
+
+    This operator is linear but is *not* a convolution (the comoving channel
+    width changes across the band and the interpolation phase drifts), so its
+    window is measured rather than approximated: a unit plane wave
+    :math:`e^{ik\chi}` is pushed through the identical chain and
+
+    .. math::
+
+        |T(k)|^2 = \left| \tilde T_{\rm out}(k) / \tilde T_{\rm in}(k) \right|^2
+
+    is the power response used by
+    :class:`meer21cm.los.LineOfSightPowerSpectrum`.
+
+    Parameters
+    ----------
+    chi_u : ndarray
+        Ascending uniform comoving grid, in Mpc, on which the analysis is
+        performed (the sightline samples).
+    dchi_u : float
+        Spacing of ``chi_u``, in Mpc.
+    chi_ch : ndarray, default None
+        Comoving centres of the frequency channels, in Mpc.  If ``None`` the
+        signal is assumed to be already on ``chi_u`` and the channelisation
+        and regridding steps are the identity.
+    dchi_ch : ndarray, default None
+        Comoving width of each channel, in Mpc.  Defaults to the median
+        spacing of ``chi_ch``.
+    dchi_vox : float, default None
+        Spacing of the voxel grid used for the channel average, in Mpc.
+        Defaults to the median ``dchi_ch``.
+    taper : str or callable, default "hann"
+        ``"hann"``, ``"none"``, or a callable ``f(n) -> (n,) array``.
+    clean_matrix : ndarray, default None
+        Optional ``(n_ch, n_ch)`` matrix applied to the channel vector before
+        regridding.  This is the extension point for a foreground-cleaning
+        transfer: pass the cleaning matrix and the returned transfer includes
+        its signal loss.
+
+    Notes
+    -----
+    The class is deliberately state-only and pickleable, so the transfer can
+    be computed inside a worker.  Subclasses may override :meth:`_channelise`,
+    :meth:`_regrid` or :meth:`_apply` to model a different radial operator.
+    """
+
+    def __init__(
+        self,
+        chi_u: ArrayLike,
+        dchi_u: float,
+        *,
+        chi_ch: ArrayLike | None = None,
+        dchi_ch: ArrayLike | None = None,
+        dchi_vox: float | None = None,
+        taper: bool | Callable[[int], ArrayLike] = True,
+        clean_matrix: ArrayLike | None = None,
+    ):
+        chi_u_arr = np.asarray(chi_u, dtype=float)
+        if chi_u_arr.ndim != 1 or chi_u_arr.size < 2:
+            raise ValueError("chi_u must be a 1-D array with at least 2 samples")
+        if np.any(np.diff(chi_u_arr) <= 0):
+            raise ValueError("chi_u must be strictly ascending")
+        self.chi_u = chi_u_arr
+        self.dchi_u = float(dchi_u)
+        if not np.isfinite(self.dchi_u) or self.dchi_u <= 0:
+            raise ValueError("dchi_u must be a positive finite number")
+        self.taper = taper
+
+        if chi_ch is None:
+            if clean_matrix is not None:
+                raise ValueError("clean_matrix requires chi_ch to be given")
+            self.chi_ch = None
+            self.dchi_ch = None
+            self.dchi_vox = None
+        else:
+            chi_ch_arr = np.asarray(chi_ch, dtype=float)
+            if chi_ch_arr.ndim != 1 or chi_ch_arr.size < 2:
+                raise ValueError("chi_ch must be a 1-D array with at least 2 values")
+            order = np.argsort(chi_ch_arr)
+            self.chi_ch = chi_ch_arr[order]
+            if dchi_ch is None:
+                dchi_ch_arr = np.full(
+                    self.chi_ch.size, float(np.median(np.diff(self.chi_ch)))
+                )
+            else:
+                dchi_ch_arr = np.asarray(dchi_ch, dtype=float)[order]
+                if dchi_ch_arr.size != self.chi_ch.size:
+                    raise ValueError("dchi_ch must have the same size as chi_ch")
+            self.dchi_ch = dchi_ch_arr
+            if dchi_vox is None:
+                dchi_vox = float(np.median(self.dchi_ch))
+            self.dchi_vox = float(dchi_vox)
+            if not np.isfinite(self.dchi_vox) or self.dchi_vox <= 0:
+                raise ValueError("dchi_vox must be a positive finite number")
+
+        if clean_matrix is None:
+            self.clean_matrix = None
+        else:
+            mat = np.asarray(clean_matrix, dtype=float)
+            if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
+                raise ValueError("clean_matrix must be a square 2-D array")
+            if mat.shape[0] != self.chi_ch.size:
+                raise ValueError(
+                    "clean_matrix must have shape (n_channels, n_channels) "
+                    f"= ({self.chi_ch.size}, {self.chi_ch.size}), got {mat.shape}"
+                )
+            self.clean_matrix = mat
+
+    # -- taper ---------------------------------------------------------
+    def _taper_values(self, n: int) -> NDArray[np.floating]:
+        """Taper samples of length ``n``."""
+        return taper_values(self.taper, n)
+
+    # -- operator pieces ----------------------------------------------
+    def voxel_grid(self) -> NDArray[np.floating]:
+        """Comoving positions of the voxels used for the channel average."""
+        if self.chi_ch is None:
+            raise ValueError("voxel_grid requires chi_ch")
+        return np.arange(
+            self.chi_ch.min(), self.chi_ch.max() + 0.5 * self.dchi_vox, self.dchi_vox
+        )
+
+    def _channelise(
+        self, values: NDArray[np.complexfloating]
+    ) -> NDArray[np.complexfloating]:
+        """Average a signal sampled on :meth:`voxel_grid` into channels."""
+        chi_v = self.voxel_grid()
+        if values.shape != chi_v.shape:
+            raise ValueError(
+                f"values must be sampled on the voxel grid, expected shape "
+                f"{chi_v.shape}, got {values.shape}"
+            )
+        out = np.zeros(self.chi_ch.size, dtype=complex)
+        for c in range(self.chi_ch.size):
+            sel = np.abs(chi_v - self.chi_ch[c]) < 0.5 * self.dchi_ch[c]
+            if np.any(sel):
+                out[c] = values[sel].mean()
+        return out
+
+    def _regrid(self, fch: NDArray[np.complexfloating]) -> NDArray[np.complexfloating]:
+        """Linear interpolation of channel values onto ``chi_u``."""
+        return np.interp(self.chi_u, self.chi_ch, fch.real) + 1j * np.interp(
+            self.chi_u, self.chi_ch, fch.imag
+        )
+
+    def _apply(
+        self, values: NDArray[np.complexfloating]
+    ) -> NDArray[np.complexfloating]:
+        """Full radial chain applied to a signal on the voxel grid."""
+        fch = self._channelise(values)
+        if self.clean_matrix is not None:
+            fch = self.clean_matrix @ fch
+        return self._regrid(fch)
+
+    def _amplitude(self, signal: NDArray[np.complexfloating], k: float) -> complex:
+        """Tapered DFT amplitude of ``signal`` at wavenumber ``k``."""
+        w = self._taper_values(signal.size)
+        fk = np.fft.fft(np.asarray(signal, dtype=complex) * w)
+        kf = 2.0 * np.pi * np.fft.fftfreq(signal.size, d=self.dchi_u)
+        return fk[int(np.argmin(np.abs(kf - k)))]
+
+    # -- public --------------------------------------------------------
+    def transfer(self, k: ArrayLike) -> NDArray[np.floating]:
+        """
+        Power transfer :math:`|T(k)|^2` at the requested wavenumbers.
+
+        Parameters
+        ----------
+        k : ArrayLike
+            Wavenumbers along the line of sight, in Mpc^-1.
+
+        Returns
+        -------
+        NDArray[np.floating]
+            ``|T(k)|^2``, with the same shape as ``k``.
+        """
+        k_arr = np.atleast_1d(np.asarray(k, dtype=float)).ravel()
+        out = np.zeros(k_arr.size, dtype=float)
+        ref = np.exp(1j * np.outer(k_arr, self.chi_u))
+        for i, q in enumerate(k_arr):
+            if self.chi_ch is None:
+                sig = ref[i]
+            else:
+                sig = self._apply(np.exp(1j * q * self.voxel_grid()))
+            num = self._amplitude(sig, q)
+            den = self._amplitude(ref[i], q)
+            out[i] = np.abs(num / den) ** 2 if den != 0 else np.nan
+        return out
+
+    def __call__(self, k: ArrayLike) -> NDArray[np.floating]:
+        return self.transfer(k)

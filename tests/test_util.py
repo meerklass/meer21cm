@@ -483,6 +483,25 @@ def test_convert_hpmap_in_jy_to_temp():
     convert_hpmap_in_jy_to_temp(hpmap, 1e8)
 
 
+def test_periodic_hann():
+    w = periodic_hann(8)
+    assert w[0] == 0.0
+    assert w[4] == pytest.approx(1.0)
+    assert np.allclose(w[1:], w[1:][::-1])
+    assert np.mean(w**2) == pytest.approx(3.0 / 8.0)
+
+
+def test_taper_values():
+    n = 8
+    assert np.allclose(taper_values(True, n), periodic_hann(n))
+    assert np.allclose(taper_values(False, n), np.ones(n))
+    assert np.allclose(taper_values(np.bool_(False), n), np.ones(n))
+    custom = np.arange(n, dtype=float)
+    assert np.allclose(taper_values(lambda m: custom, n), custom)
+    with pytest.raises(ValueError, match="taper callable must return shape"):
+        taper_values(lambda m: np.ones((m, 1)), n)
+
+
 def test_map_los_array_shape():
     test_arr = np.ones((4, 5))
     los_axis = -3  # wrong axis
