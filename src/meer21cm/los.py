@@ -810,6 +810,11 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
             if sigma_b.size != np.size(self.chi_ch):
                 sigma_b = np.full(np.size(self.chi_ch), float(sigma_b.flat[0]))
             sigma_b = np.abs(sigma_b)
+            # chi_ch follows the frequency axis and is descending for an
+            # ascending band. np.interp requires an ascending coordinate.
+            order = np.argsort(np.asarray(self.chi_ch, dtype=float))
+            chi_for_beam = np.asarray(self.chi_ch, dtype=float)[order]
+            sigma_b = sigma_b[order]
 
         acc = np.zeros_like(kperp)
         for node, wt in zip(nodes, weights):
@@ -818,7 +823,7 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
                 dperp = np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(node)
                 w_node = w_node * azimuthal_pixel_window_power(kperp, dperp)
             if sigma_b is not None:
-                sb = float(np.interp(node, self.chi_ch, sigma_b))
+                sb = float(np.interp(node, chi_for_beam, sigma_b))
                 w_node = w_node * beam_window_power(kperp, sb)
             acc += wt * w_node
 

@@ -710,6 +710,33 @@ def test_los_beam_window_constant_sigma(monkeypatch):
     )
 
 
+def test_los_beam_window_follows_comoving_distance():
+    """A channel-dependent beam is sampled on chi, independent of nu order."""
+    nu = np.linspace(789.1e6, 887.8e6, 16)
+    sigma = np.linspace(0.3, 1.2, nu.size)
+    common = dict(
+        include_pixel_window=False,
+        include_beam_window=True,
+        power_kmu_func=_unit_power,
+        kperp_edges=np.linspace(0.0, 0.05, 33),
+    )
+    forward = _small_los(nu=nu, sigma_beam_ch=sigma, **common)
+    backward = _small_los(
+        nu=nu[::-1].copy(), sigma_beam_ch=sigma[::-1].copy(), **common
+    )
+    assert np.allclose(
+        forward.transverse_window(),
+        backward.transverse_window(),
+        rtol=1e-10,
+        atol=0.0,
+    )
+    # One channel's beam width does not describe the whole band.
+    stuck = beam_window_power(
+        forward.kperp, float(np.abs(forward.sigma_beam_ch_in_mpc[-1]))
+    )
+    assert not np.allclose(forward.transverse_window(), stuck, rtol=1e-3)
+
+
 def test_los_radial_transfer_paths():
     kpar = np.array([0.02, 0.05])
     los = _small_los(
