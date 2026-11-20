@@ -2,6 +2,7 @@ import numpy as np
 from meer21cm.stack import (
     Stacking,
     correlate_cubelet,
+    data_and_fkp_cubelets,
     paint_sky_counts,
     rebin_sightlines,
     sky_mesh_positions,
@@ -806,4 +807,125 @@ def test_stacking_rejects_inconsistent_settings():
         worker.run_stack()
     worker.stack_estimator = "mesh"
     with pytest.raises(ValueError, match="stack_estimator"):
+        worker.run_stack()
+
+
+def test_fkp_numerator_uses_data_pair_counts():
+    """F drops a spike that sits only on randoms and keeps one that sits on galaxies."""
+    shape = (5, 5, 4)
+    temperature = np.zeros(shape)
+    temperature[2, 2, 1] = 4.0
+    weight = np.ones(shape)
+    data_counts = np.zeros(shape)
+    data_counts[2, 2, 1] = 1.0
+    random_counts = np.zeros(shape)
+    random_counts[0, 0, 0] = 1.0
+    random_counts[0, 1, 3] = 1.0
+    random_counts[4, 4, 2] = 1.0
+    data, fkp, denominator, alpha = data_and_fkp_cubelets(
+        weight * temperature,
+        weight,
+        data_counts,
+        1,
+        random_counts=random_counts,
+    )
+    direct, direct_weight = correlate_cubelet(
+        weight * temperature, weight, data_counts, 1
+    )
+    assert np.allclose(data, direct)
+    assert np.allclose(denominator, direct_weight)
+    assert alpha == pytest.approx(1.0 / 3.0)
+    centre = data.shape[-1] // 2
+    mid = data.shape[0] // 2
+    assert data[mid, mid, centre] == pytest.approx(4.0)
+    assert fkp[mid, mid, centre] == pytest.approx(4.0)
+    # a constant temperature is the random-position stack, which F removes
+    constant = np.full(shape, 2.5)
+    data_c, fkp_c, _den_c, _alpha_c = data_and_fkp_cubelets(
+        weight * constant, weight, data_counts, 1, random_counts=random_counts
+    )
+    assert data_c[mid, mid, centre] == pytest.approx(2.5)
+    assert np.allclose(fkp_c, 0.0)
+    # a mask on the random voxels leaves that lag empty rather than equal to T
+    masked = weight.copy()
+    masked[random_counts > 0] = 0.0
+    data_m, fkp_m, _den_m, _alpha_m = data_and_fkp_cubelets(
+        masked * constant, masked, data_counts, 1, random_counts=random_counts
+    )
+    assert data_m[mid, mid, centre] == pytest.approx(2.5)
+    assert fkp_m[mid, mid, centre] == pytest.approx(0.0)
+    _data_z, fkp_z, _den_z, _alpha_z = data_and_fkp_cubelets(
+        np.zeros(shape), np.zeros(shape), data_counts, 1, random_counts=random_counts
+    )
+    assert np.all(fkp_z == 0.0)
+    plain, _fkp_none, _den, alpha_none = data_and_fkp_cubelets(
+        weight * temperature, weight, data_counts, 1
+    )
+    assert alpha_none is None
+    assert _fkp_none is None
+    assert np.allclose(plain, data)
+
+
+def test_stacking_fkp_matches_the_data_stack_on_a_spike():
+    n_pix = 6
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 712e6, 4)
+    galaxy = wcs.pixel_to_world(3, 2)
+    random = wcs.pixel_to_world(1, 1)
+    z_gal = np.array([freq_to_redshift(nu[1])])
+    z_ran = np.array([freq_to_redshift(nu[3])])
+    temperature = np.zeros((n_pix, n_pix, nu.size))
+    position = sky_mesh_positions(
+        np.array([galaxy.ra.deg]),
+        np.array([galaxy.dec.deg]),
+        z_gal,
+        wcs,
+        nu,
+        temperature.shape,
+        centre_pixels=True,
+    )[0][0]
+    temperature[int(np.floor(position[0])), int(np.floor(position[1])), 1] = 4.0
+    weight = np.ones_like(temperature)
+    worker = Stacking(
+        data=temperature,
+        weights_map_pixel=weight,
+        nu=nu,
+        wproj=wcs,
+        num_pix_x=n_pix,
+        num_pix_y=n_pix,
+        ra_gal=np.array([galaxy.ra.deg]),
+        dec_gal=np.array([galaxy.dec.deg]),
+        z_gal=z_gal,
+        ra_rand=np.array([random.ra.deg]),
+        dec_rand=np.array([random.dec.deg]),
+        z_rand=z_ran,
+        weights_rand=np.array([1.0]),
+        stack_estimator="correlation",
+        stack_angular_num_nearby_pix=1,
+        dchi_mpc=4.0,
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        init_box_from_map_data=False,
+    )
+    _uniform_chi(worker)
+    worker.weights_rand = None
+    data, _weight = worker.run_stack()
+    fkp = worker.stack_fkp
+    mid = data.shape[0] // 2
+    centre = data.shape[-1] // 2
+    assert worker.fkp_alpha == pytest.approx(1.0)
+    assert worker.n_ran_stacked == 1
+    assert data[mid, mid, centre] == pytest.approx(4.0)
+    assert fkp[mid, mid, centre] == pytest.approx(4.0)
+    worker.weights_rand = np.array([2.0])
+    data_w, _weight_w = worker.run_stack()
+    assert worker.fkp_alpha == pytest.approx(0.5)
+    assert data_w[mid, mid, centre] == pytest.approx(4.0)
+    assert worker.stack_fkp[mid, mid, centre] == pytest.approx(4.0)
+    worker.data = np.full_like(temperature, 2.5)
+    data_c, _weight_c = worker.run_stack()
+    assert data_c[mid, mid, centre] == pytest.approx(2.5)
+    assert np.allclose(worker.stack_fkp, 0.0)
+    worker.stack_estimator = "loop"
+    with pytest.raises(ValueError, match="randoms"):
         worker.run_stack()

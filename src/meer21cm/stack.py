@@ -1,9 +1,19 @@
+"""Galaxy--intensity stacking on a map cube.
+
+:func:`stack` loops over galaxies on the native channels.
+:class:`Stacking` with ``stack_estimator='correlation'`` paints those
+galaxies on the sky voxels, sums the channels into uniform comoving bins,
+and estimates the same cubelet with a real FFT. With a random catalogue
+the worker also stores the data stack minus the random-position stack.
+"""
+
 import logging
 
 import numpy as np
 
 from .grid import project_particle_to_regular_grid
 from .power import PowerSpectrum
+from .power_ops import fkp_count_field
 from .util import find_ch_id, radec_to_indx, redshift_to_freq
 
 logger = logging.getLogger(__name__)
@@ -356,6 +366,8 @@ def sky_mesh_positions(ra, dec, z, wproj, nu, shape, centre_pixels=True):
     covers ``[i, i + 1)``, so ``centre_pixels`` adds half a cell and the
     pixel centre falls on the mesh-cell centre. The channel coordinate is
     the centre of the channel from :func:`meer21cm.util.find_ch_id`.
+    An object is kept when that shifted coordinate lies in ``[0, n)`` on
+    each angular axis and the channel index lies in the cube.
 
     Parameters
     ----------
@@ -380,21 +392,18 @@ def sky_mesh_positions(ra, dec, z, wproj, nu, shape, centre_pixels=True):
     channel = find_ch_id(redshift_to_freq(np.asarray(z, dtype=float)), nu)
     ix, iy = radec_to_indx(np.asarray(ra), np.asarray(dec), wproj, to_int=False)
     shift = 0.5 if centre_pixels else 0.0
+    x = np.asarray(ix, dtype=float) + shift
+    y = np.asarray(iy, dtype=float) + shift
+    z = np.asarray(channel, dtype=float) + 0.5
     inside = (
         (channel >= 0)
         & (channel < shape[2])
-        & (ix >= 0)
-        & (ix < shape[0])
-        & (iy >= 0)
-        & (iy < shape[1])
+        & (x >= 0)
+        & (x < shape[0])
+        & (y >= 0)
+        & (y < shape[1])
     )
-    positions = np.column_stack(
-        [
-            np.asarray(ix, dtype=float)[inside] + shift,
-            np.asarray(iy, dtype=float)[inside] + shift,
-            np.asarray(channel, dtype=float)[inside] + 0.5,
-        ]
-    )
+    positions = np.column_stack([x[inside], y[inside], z[inside]])
     return positions, np.asarray(inside, dtype=bool)
 
 
@@ -567,6 +576,66 @@ def correlate_cubelet(weighted_map, weight, galaxy, n_nearby):
     return _divide_cubelet(numerator, denominator), denominator
 
 
+def _pair_hit(denominator):
+    """Lags whose pair-count denominator is above the FFT roundoff floor."""
+    scale = np.max(np.abs(denominator))
+    if scale == 0.0:
+        return np.zeros(denominator.shape, dtype=bool)
+    return np.abs(denominator) > 1e-8 * scale
+
+
+def data_and_fkp_cubelets(
+    weighted_map, weight, data_counts, n_nearby, random_counts=None
+):
+    """
+    Number-count stack, and that stack minus the random-position stack.
+
+    The data cubelet divides :math:`w_L L \\star D` by the galaxy pair
+    counts :math:`w_L \\star D`. The random-position stack divides
+    :math:`w_L L \\star R` by the random pair counts :math:`w_L \\star R`.
+    Their difference removes a temperature that is the same around
+    galaxies and around randoms, including a constant map. A lag with no
+    random pairs is left empty. :math:`\\alpha = \\sum D / \\sum R` is
+    returned and is not used to scale the random stack.
+
+    Parameters
+    ----------
+        weighted_map: array.
+            :math:`w_L L` on the map mesh.
+        weight: array.
+            :math:`w_L` on the map mesh.
+        data_counts: array.
+            Painted galaxy counts :math:`D`.
+        n_nearby: int.
+            Angular lags on each side of the centre pixel.
+        random_counts: array, optional.
+            Painted random counts :math:`R`. ``None`` skips the subtraction.
+
+    Returns
+    -------
+        data, fkp, denominator, alpha: arrays and float.
+            ``fkp`` and ``alpha`` are ``None`` when ``random_counts`` is
+            omitted. ``denominator`` is the galaxy pair count.
+    """
+    denominator = linear_correlation(weight, data_counts, n_nearby)
+    data = _divide_cubelet(
+        linear_correlation(weighted_map, data_counts, n_nearby),
+        denominator,
+    )
+    if random_counts is None:
+        return data, None, denominator, None
+    random_denominator = linear_correlation(weight, random_counts, n_nearby)
+    random_stack = _divide_cubelet(
+        linear_correlation(weighted_map, random_counts, n_nearby),
+        random_denominator,
+    )
+    fkp = np.zeros_like(data)
+    both = _pair_hit(denominator) & _pair_hit(random_denominator)
+    fkp[both] = data[both] - random_stack[both]
+    _field, alpha = fkp_count_field(data_counts, random_counts)
+    return data, fkp, denominator, float(alpha)
+
+
 class Stacking(PowerSpectrum):
     r"""
     Galaxy--intensity stacking on a map cube.
@@ -576,8 +645,14 @@ class Stacking(PowerSpectrum):
     the weighted galaxy counts on the map mesh, sums the sightlines into
     uniform comoving bins, and estimates the same conventional cubelet
     with a linear real FFT. The galaxy field is the weighted counts.
+    Randoms, when set, add :attr:`stack_fkp`, the data stack minus the
+    random-position stack. :attr:`fkp_alpha` is :math:`\sum D/\sum R`
+    and does not scale that subtraction. The loop estimator raises if
+    randoms are set.
 
-    The sky stack does not use the survey enclosing box.
+    The sky stack does not use the survey enclosing box. :attr:`n_gal_stacked`
+    and :attr:`n_ran_stacked` count objects whose shifted coordinates fall
+    inside the cube.
 
     Parameters
     ----------
@@ -600,6 +675,11 @@ class Stacking(PowerSpectrum):
             Galaxy catalogue. Stored on the worker.
         weights_gal: array, optional.
             Per-galaxy weights. ``None`` is unit weight.
+        ra_rand, dec_rand, z_rand: arrays, optional.
+            Random catalogue. The correlation estimator then stores the
+            data stack minus the random-position stack on :attr:`stack_fkp`.
+        weights_rand: array, optional.
+            Per-random weights. ``None`` is unit weight.
         **params:
             Passed to :class:`meer21cm.power.PowerSpectrum`. ``data`` and
             ``weights_map_pixel`` are the intensity map and :math:`w_L`.
@@ -617,6 +697,10 @@ class Stacking(PowerSpectrum):
         dec_gal=None,
         z_gal=None,
         weights_gal=None,
+        ra_rand=None,
+        dec_rand=None,
+        z_rand=None,
+        weights_rand=None,
         **params,
     ):
         if stack_estimator not in ("loop", "correlation"):
@@ -640,20 +724,32 @@ class Stacking(PowerSpectrum):
         self.centre_pixels = bool(centre_pixels)
         self._stack_3d = None
         self._stack_weight = None
+        self._stack_fkp = None
+        self.fkp_alpha = None
         self.n_gal_stacked = 0
+        self.n_ran_stacked = 0
         if ra_gal is not None:
             self._ra_gal = np.asarray(ra_gal)
             self._dec_gal = np.asarray(dec_gal)
             self._z_gal = np.asarray(z_gal, dtype=float)
         if weights_gal is not None:
             self.weights_gal = weights_gal
+        if ra_rand is not None:
+            self.ra_rand = ra_rand
+            self.dec_rand = dec_rand
+            self.z_rand = z_rand
+        if weights_rand is not None:
+            self.weights_rand = weights_rand
 
     @property
     def stack_3d(self):
         """
-        Normalised cubelet from the last :meth:`run_stack`.
+        Number-count cubelet from the last :meth:`run_stack`.
 
-        Returns ``None`` if :meth:`run_stack` has not been called.
+        This is the average of the map around the galaxies. A run with
+        randoms leaves this cubelet unchanged and stores the subtraction
+        on :attr:`stack_fkp`. Returns ``None`` if :meth:`run_stack` has
+        not been called.
         """
         if self._stack_3d is None:
             logger.warning("stack_3d is unset; call run_stack() first")
@@ -673,6 +769,17 @@ class Stacking(PowerSpectrum):
             return None
         return self._stack_weight
 
+    @property
+    def stack_fkp(self):
+        """
+        Data stack minus the random-position stack.
+
+        Each stack is divided by its own pair counts. ``None`` when the
+        last correlation run had no randoms. A lag with no random pairs
+        is zero.
+        """
+        return self._stack_fkp
+
     def channel_chi_mpc(self):
         """
         Comoving distance of each frequency channel, in Mpc.
@@ -686,12 +793,20 @@ class Stacking(PowerSpectrum):
         """
         Measure the cubelet with the selected estimator.
 
+        The return value is the number-count stack and its pair-count
+        weight. A correlation run with randoms also sets :attr:`stack_fkp`
+        and :attr:`fkp_alpha`.
+
         Returns
         -------
             stack_3d, stack_weight: arrays.
-                Normalised cubelet and its weight.
+                Number-count cubelet and its pair-count weight.
         """
         if self.stack_estimator == "loop":
+            if self.ra_rand is not None:
+                raise ValueError("randoms are used by the correlation estimator")
+            self._stack_fkp = None
+            self.fkp_alpha = None
             cube, weight = stack(
                 self,
                 weights_gal=self.weights_gal,
@@ -742,19 +857,56 @@ class Stacking(PowerSpectrum):
             mass = np.asarray(self.weights_gal, dtype=float)[inside]
         self.n_gal_stacked = int(inside.sum())
         counts = paint_sky_counts(positions, self.data.shape, mass=mass)
+        chi = self.channel_chi_mpc()
         weighted, weight, counts_b, _centres = rebin_sightlines(
             np.asarray(self.w_HI, dtype=float) * np.asarray(self.data, dtype=float),
             np.asarray(self.w_HI, dtype=float),
             counts,
-            self.channel_chi_mpc(),
+            chi,
             self.dchi_mpc,
         )
-        return correlate_cubelet(
+        random_b = None
+        self.n_ran_stacked = 0
+        if self.ra_rand is not None:
+            random_b, self.n_ran_stacked = self._rebinned_random_counts(chi)
+        data, fkp, denominator, alpha = data_and_fkp_cubelets(
             weighted,
             weight,
             counts_b,
             self.stack_angular_num_nearby_pix,
+            random_counts=random_b,
         )
+        self._stack_fkp = fkp
+        self.fkp_alpha = alpha
+        return data, denominator
+
+    def _rebinned_random_counts(self, chi):
+        """Paint the random catalogue and sum it onto the stack's LOS bins."""
+        ra = self.ra_rand
+        dec = self.dec_rand
+        redshift = self.z_rand
+        positions, inside = sky_mesh_positions(
+            ra,
+            dec,
+            redshift,
+            self.wproj,
+            self.nu,
+            self.data.shape,
+            centre_pixels=self.centre_pixels,
+        )
+        if self.weights_rand is None:
+            mass = np.ones(int(np.size(ra)), dtype=float)[inside]
+        else:
+            mass = np.asarray(self.weights_rand, dtype=float)[inside]
+        painted = paint_sky_counts(positions, self.data.shape, mass=mass)
+        _weighted, _weight, counts, _centres = rebin_sightlines(
+            painted,
+            painted,
+            painted,
+            chi,
+            self.dchi_mpc,
+        )
+        return counts, int(inside.sum())
 
     def model_1d_stack(self):
         """
