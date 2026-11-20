@@ -703,6 +703,9 @@ def test_stacking_loop_and_correlation_dispatch():
 
 
 def test_unknown_stack_estimator_and_model_stub():
+    import meer21cm
+
+    assert meer21cm.Stacking is Stacking
     with pytest.raises(ValueError):
         Stacking(stack_estimator="config")
     n_pix = 4
@@ -722,3 +725,85 @@ def test_unknown_stack_estimator_and_model_stub():
     with pytest.raises(NotImplementedError):
         worker.model_1d_stack()
     assert worker.stack_3d is None
+    assert worker.stack_weight is None
+
+
+def test_galaxy_weight_scales_the_correlation_weight():
+    """A per-galaxy weight scales the cubelet weight and leaves the average."""
+    n_pix = 4
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 708e6, 3)
+    sky = wcs.pixel_to_world(2, 2)
+    ra = np.array([sky.ra.deg])
+    dec = np.array([sky.dec.deg])
+    z = np.array([freq_to_redshift(nu[1])])
+    temperature = np.ones((n_pix, n_pix, nu.size))
+    weight = np.ones_like(temperature)
+    unit = _tiny_worker(temperature, weight, ra, dec, z, nu, wcs, "correlation")
+    weighted = Stacking(
+        data=temperature,
+        weights_map_pixel=weight,
+        nu=nu,
+        wproj=wcs,
+        num_pix_x=n_pix,
+        num_pix_y=n_pix,
+        ra_gal=ra,
+        dec_gal=dec,
+        z_gal=z,
+        weights_gal=np.array([2.5]),
+        stack_estimator="correlation",
+        stack_angular_num_nearby_pix=1,
+        dchi_mpc=4.0,
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        init_box_from_map_data=False,
+    )
+    _uniform_chi(unit)
+    _uniform_chi(weighted)
+    cube_unit, weight_unit = unit.run_stack()
+    cube_weighted, weight_weighted = weighted.run_stack()
+    assert np.allclose(cube_weighted, cube_unit)
+    assert np.allclose(weight_weighted, 2.5 * weight_unit)
+    assert weighted.stack_weight is weight_weighted
+    assert weighted.stack_3d is cube_weighted
+
+
+def test_stacking_rejects_inconsistent_settings():
+    empty = paint_sky_counts(np.zeros((0, 3)), (2, 2, 2))
+    assert empty.shape == (2, 2, 2)
+    assert empty.sum() == 0.0
+    with pytest.raises(ValueError):
+        Stacking(stack_weighting="nope")
+    with pytest.raises(ValueError):
+        Stacking(dchi_mpc=0.0)
+    n_pix = 4
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 704e6, 2)
+    sky = wcs.pixel_to_world(1, 1)
+    ra = np.array([sky.ra.deg])
+    dec = np.array([sky.dec.deg])
+    z = np.array([freq_to_redshift(nu[0])])
+    worker = _tiny_worker(
+        np.ones((n_pix, n_pix, 2)),
+        np.ones((n_pix, n_pix, 2)),
+        ra,
+        dec,
+        z,
+        nu,
+        wcs,
+        "correlation",
+    )
+    worker.stack_weighting = "quadratic"
+    with pytest.raises(ValueError):
+        worker.run_stack()
+    worker.stack_weighting = "conventional"
+    worker.symmetrize = True
+    with pytest.raises(ValueError):
+        worker.run_stack()
+    worker.symmetrize = False
+    del worker._ra_gal
+    with pytest.raises(ValueError, match="ra_gal"):
+        worker.run_stack()
+    worker.stack_estimator = "mesh"
+    with pytest.raises(ValueError, match="stack_estimator"):
+        worker.run_stack()
