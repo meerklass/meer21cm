@@ -26,6 +26,14 @@ dev
   metadata, support ``symmetrize=True`` and ``stack_weighting="quadratic"`` in
   correlation mode, and add ``read_rand_cat``, ``from_power_spectrum``, and
   ``project_1d`` / ``aperture_weights_2d``
+* implement the exact channel-space forward model on ``Stacking``
+  (``model_1d_power``, ``model_3d_stack``, ``model_1d_stack``,
+  ``transverse_window``, ``azimuthal_pixel_window_lag``,
+  ``beam_window_amplitude``, ``discrete_beam_window_amplitude``,
+  ``channel_cross_covariance``, and ``contract_channel_covariance``) supporting
+  :math:`|W_{\rm pix}|^2`, continuous or discrete-grid dish beams, non-separable
+  3D map/galaxy weights, jagged comoving bins, and optional linear cleaning
+  matrices :math:`\mathbb{M}`
 
 Fixes
 +++++

@@ -11,13 +11,396 @@ import logging
 from pathlib import Path
 
 import numpy as np
+from scipy.interpolate import CubicSpline
 
 from .grid import project_particle_to_regular_grid
 from .io import read_catalogue_fits
 from .power import PowerSpectrum
-from .util import find_ch_id, radec_to_indx, redshift_to_freq
+from .util import center_to_edges, f_21, find_ch_id, radec_to_indx, redshift_to_freq
 
 logger = logging.getLogger(__name__)
+_DEG2RAD = np.pi / 180.0
+
+
+def _sinc(x):
+    r"""Unnormalised ``sin(x) / x`` with the ``x -> 0`` limit."""
+    return np.sinc(np.asarray(x, dtype=float) / np.pi)
+
+
+def azimuthal_pixel_window_lag(kperp, dperp, di=0, dj=0, n_phi=64, pixel_power=2):
+    r"""Azimuthally averaged square-pixel window at angular lag :math:`(\Delta i, \Delta j)`.
+
+    Evaluates
+
+    .. math::
+        \overline{W}_{\rm pix}^{(\Delta i, \Delta j)}(k_\perp; D_\perp)
+        = \left\langle
+            \cos\!\big(k_\perp D_\perp(\Delta i\cos\phi + \Delta j\sin\phi)\big)\,
+            \left[\operatorname{sinc}\!\left(\frac{k_\perp D_\perp\cos\phi}{2}\right)
+                  \operatorname{sinc}\!\left(\frac{k_\perp D_\perp\sin\phi}{2}\right)\right]^p
+          \right\rangle_\phi .
+
+    For sky-cube stacking where the intensity map is averaged over square
+    pixels and galaxies are snapped to the same pixel grid, both legs
+    contribute one factor of the pixel top-hat so ``pixel_power=2``
+    (:math:`|W_{\rm pix}|^2`).
+
+    Parameters
+    ----------
+    kperp : array_like
+        Transverse wavenumbers, in Mpc^-1.
+    dperp : float
+        Comoving pixel side length :math:`D_\perp`, in Mpc.
+    di, dj : int, default 0
+        Integer angular lag offsets in map-pixel units.
+    n_phi : int, default 64
+        Number of azimuthal quadrature angles on :math:`[0, 2\pi)`.
+    pixel_power : int or float, default 2
+        Exponent :math:`p` of the pixel top-hat window (``2`` for
+        :math:`|W_{\rm pix}|^2`, ``1`` for single-leg diagnostics, ``0`` for
+        no pixel smoothing).
+
+    Returns
+    -------
+    window : ndarray
+        Azimuthally averaged pixel window, shape ``(len(kperp),)``.
+    """
+    dperp_f = float(dperp)
+    if dperp_f < 0.0:
+        raise ValueError(f"dperp must be non-negative, got {dperp!r}")
+    if int(n_phi) < 4:
+        raise ValueError(f"n_phi must be >= 4, got {n_phi!r}")
+    if float(pixel_power) < 0.0:
+        raise ValueError(f"pixel_power must be non-negative, got {pixel_power!r}")
+    kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
+    u = kperp_arr * dperp_f
+    phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
+    ux = u[:, None] * np.cos(phi)[None, :]
+    uy = u[:, None] * np.sin(phi)[None, :]
+    phase = np.cos(int(di) * ux + int(dj) * uy)
+    if float(pixel_power) == 0.0:
+        return phase.mean(axis=1)
+    wpix = _sinc(0.5 * ux) * _sinc(0.5 * uy)
+    if float(pixel_power) == 2.0:
+        wpix = wpix * wpix
+    elif float(pixel_power) != 1.0:
+        wpix = np.abs(wpix) ** float(pixel_power)
+    return (phase * wpix).mean(axis=1)
+
+
+def beam_window_amplitude(kperp, sigma_b):
+    r"""Field-level Gaussian dish-beam amplitude window :math:`\exp(-\tfrac12 k_\perp^2 \sigma_B^2)`.
+
+    Unlike the HI auto-power spectrum (which uses :math:`W_{\rm beam}^2`),
+    galaxy--HI stacking carries only one factor of the beam because only the
+    intensity map is convolved with the primary beam.
+
+    Parameters
+    ----------
+    kperp : array_like
+        Transverse wavenumbers, in Mpc^-1.
+    sigma_b : float
+        Comoving Gaussian beam standard deviation :math:`\sigma_B`, in Mpc.
+
+    Returns
+    -------
+    window : ndarray
+        Beam amplitude window with the same shape as ``kperp``.
+    """
+    k_arr = np.asarray(kperp, dtype=float)
+    return np.exp(-0.5 * (k_arr**2) * float(sigma_b) ** 2)
+
+
+def discrete_beam_window_amplitude(
+    kperp,
+    dperp,
+    sigma_b,
+    di=0,
+    dj=0,
+    n_phi=64,
+    pixel_power=2,
+    truncate_sigma=5.0,
+):
+    r"""Azimuthally averaged pixel + discrete pixel-grid Gaussian beam window.
+
+    When a Gaussian beam is applied *after* pixelisation via a sum-normalised
+    discrete kernel :math:`B[\delta i, \delta j] = b[\delta i]\,b[\delta j]`
+    with :math:`b[m] \propto \exp(-m^2 / (2\sigma_{\rm pix}^2))` and
+    :math:`\sigma_{\rm pix} = \sigma_B / D_\perp`, its Fourier response is the
+    periodic DFT
+
+    .. math::
+        \tilde{B}_{\rm disc}(k_x, k_y)
+        = \tilde{b}(k_x D_\perp)\,\tilde{b}(k_y D_\perp),
+        \qquad
+        \tilde{b}(u) = b[0] + 2\sum_{m=1}^{M} b[m]\cos(m u).
+
+    This differs from the continuous-sky :func:`beam_window_amplitude` when
+    :math:`\sigma_B \lesssim 2 D_\perp`.
+
+    Parameters
+    ----------
+    kperp : array_like
+        Transverse wavenumbers, in Mpc^-1.
+    dperp : float
+        Comoving pixel side length :math:`D_\perp`, in Mpc.
+    sigma_b : float
+        Comoving Gaussian beam width :math:`\sigma_B`, in Mpc.
+    di, dj : int, default 0
+        Integer angular lag offsets in map-pixel units.
+    n_phi : int, default 64
+        Number of azimuthal quadrature angles.
+    pixel_power : int or float, default 2
+        Exponent of the square-pixel window.
+    truncate_sigma : float, default 5.0
+        Kernel truncation half-width in units of :math:`\sigma_{\rm pix}`.
+
+    Returns
+    -------
+    window : ndarray
+        Azimuthally averaged product of lag phase, pixel window, and discrete
+        beam DFT, shape ``(len(kperp),)``.
+    """
+    dperp_f = float(dperp)
+    sigma_f = abs(float(sigma_b))
+    if dperp_f <= 0.0 or sigma_f == 0.0:
+        return azimuthal_pixel_window_lag(
+            kperp, dperp_f, di=di, dj=dj, n_phi=n_phi, pixel_power=pixel_power
+        )
+    sigma_pix = sigma_f / dperp_f
+    half = max(1, int(np.ceil(float(truncate_sigma) * sigma_pix)))
+    m_vals = np.arange(-half, half + 1, dtype=float)
+    b1d = np.exp(-0.5 * (m_vals / sigma_pix) ** 2)
+    b1d /= b1d.sum()
+    m_pos = np.arange(1, half + 1, dtype=float)
+    b0 = float(b1d[half])
+    b_pos = b1d[half + 1 :]
+
+    kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
+    u = kperp_arr * dperp_f
+    phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
+    ux = u[:, None] * np.cos(phi)[None, :]
+    uy = u[:, None] * np.sin(phi)[None, :]
+    bx = b0 + 2.0 * np.sum(
+        b_pos[None, None, :] * np.cos(ux[:, :, None] * m_pos[None, None, :]),
+        axis=-1,
+    )
+    by = b0 + 2.0 * np.sum(
+        b_pos[None, None, :] * np.cos(uy[:, :, None] * m_pos[None, None, :]),
+        axis=-1,
+    )
+    phase = np.cos(int(di) * ux + int(dj) * uy)
+    if float(pixel_power) == 0.0:
+        wpix = 1.0
+    else:
+        wpix = _sinc(0.5 * ux) * _sinc(0.5 * uy)
+        if float(pixel_power) == 2.0:
+            wpix = wpix * wpix
+        elif float(pixel_power) != 1.0:
+            wpix = np.abs(wpix) ** float(pixel_power)
+    return (phase * wpix * bx * by).mean(axis=1)
+
+
+def _trapezoid_weights(x):
+    """Trapezoidal quadrature weights for a strictly ascending 1D grid."""
+    x_arr = np.asarray(x, dtype=float).ravel()
+    if x_arr.size < 2 or np.any(np.diff(x_arr) <= 0.0):
+        raise ValueError("kpar must be a strictly ascending 1D array with >= 2 points")
+    w = np.empty_like(x_arr)
+    w[0] = 0.5 * (x_arr[1] - x_arr[0])
+    w[-1] = 0.5 * (x_arr[-1] - x_arr[-2])
+    if x_arr.size > 2:
+        w[1:-1] = 0.5 * (x_arr[2:] - x_arr[:-2])
+    return w
+
+
+def channel_cross_covariance(
+    chi_ch,
+    dchi_ch,
+    kpar,
+    p1d_kpar,
+    clean_matrix=None,
+    dchi_gal=None,
+):
+    r"""Native channel-to-channel cross-covariance matrix from :math:`P_{1D}(k_\parallel)`.
+
+    Evaluates the exact continuous-to-channel cross-covariance
+
+    .. math::
+        C^{\rm ch}_{c_1, c_2}
+        = \frac{1}{\pi}\int_0^{k_{\parallel,\max}}\mathrm{d}k_\parallel\;
+          P_{1D}(k_\parallel)\,
+          \operatorname{sinc}\!\left(\frac{k_\parallel\Delta\chi_{c_1}}{2}\right)
+          \operatorname{sinc}\!\left(\frac{k_\parallel\Delta\chi_{{\rm gal},c_2}}{2}\right)
+          \cos\!\big(k_\parallel(\chi_{c_1} - \chi_{c_2})\big)
+
+    via a single BLAS matrix product, supporting arbitrary signed
+    :math:`P_{1D}(k_\parallel)` (for nonzero angular lags) and an optional
+    linear frequency-axis cleaning matrix :math:`\mathbb{M}` acting on the map
+    leg (:math:`\mathbf{C}^{\rm obs} = \mathbb{M}\,\mathbf{C}^{\rm ch}`).
+
+    Parameters
+    ----------
+    chi_ch : array_like
+        Comoving channel centres, in Mpc, shape ``(n_ch,)``.
+    dchi_ch : array_like
+        Comoving channel widths on the intensity-map leg, in Mpc, shape
+        ``(n_ch,)``.
+    kpar : array_like
+        Strictly ascending non-negative :math:`k_\parallel` quadrature nodes
+        in Mpc^-1, shape ``(n_kpar,)``.
+    p1d_kpar : array_like
+        One-dimensional cross-power :math:`P_{1D}(k_\parallel)` evaluated at
+        ``kpar``, shape ``(n_kpar,)``.
+    clean_matrix : array_like, optional
+        Linear cleaning operator :math:`\mathbb{M}` of shape
+        ``(n_ch, n_ch)``, ordered identically to ``chi_ch``. Applied on the
+        left (map leg).
+    dchi_gal : array_like or float, optional
+        Comoving channel widths on the galaxy leg. ``None`` defaults to
+        ``dchi_ch`` (galaxies binned into native channels); ``0.0`` sets the
+        galaxy radial window to unity (:math:`W_\parallel^g = 1`).
+
+    Returns
+    -------
+    cov : ndarray
+        Channel cross-covariance matrix of shape ``(n_ch, n_ch)``.
+    """
+    chi = np.asarray(chi_ch, dtype=float).ravel()
+    dchi_l = np.asarray(dchi_ch, dtype=float).ravel()
+    if chi.size == 0 or dchi_l.shape != chi.shape:
+        raise ValueError(
+            "chi_ch and dchi_ch must be non-empty 1D arrays of equal length"
+        )
+    if dchi_gal is None:
+        dchi_g = dchi_l
+    elif np.ndim(dchi_gal) == 0:
+        dchi_g = np.full(chi.size, float(dchi_gal), dtype=float)
+    else:
+        dchi_g = np.asarray(dchi_gal, dtype=float).ravel()
+        if dchi_g.shape != chi.shape:
+            raise ValueError("dchi_gal must match chi_ch length")
+
+    kpar_arr = np.asarray(kpar, dtype=float).ravel()
+    p1d_arr = np.asarray(p1d_kpar, dtype=float).ravel()
+    if p1d_arr.shape != kpar_arr.shape:
+        raise ValueError("p1d_kpar must have the same shape as kpar")
+    weights = _trapezoid_weights(kpar_arr) / np.pi
+
+    # Shift chi by its midpoint to keep complex phases well-conditioned.
+    chi_rel = chi - 0.5 * (chi.min() + chi.max())
+    phase = np.exp(1j * chi_rel[:, None] * kpar_arr[None, :])
+    a_l = _sinc(0.5 * dchi_l[:, None] * kpar_arr[None, :]) * phase
+    if np.array_equal(dchi_g, dchi_l):
+        a_g = a_l
+    else:
+        a_g = _sinc(0.5 * dchi_g[:, None] * kpar_arr[None, :]) * phase
+
+    cov = np.real((a_l * (weights * p1d_arr)[None, :]) @ a_g.conj().T)
+    if clean_matrix is not None:
+        m_mat = np.asarray(clean_matrix, dtype=float)
+        if m_mat.shape != (chi.size, chi.size):
+            raise ValueError(
+                f"clean_matrix must have shape {(chi.size, chi.size)}, got {m_mat.shape}"
+            )
+        cov = m_mat @ cov
+    return cov
+
+
+def contract_channel_covariance(
+    cov_ch,
+    pair_weight,
+    bin_which=None,
+    n_bin=None,
+    weighting="conventional",
+    symmetrize=False,
+):
+    r"""Contract a channel covariance matrix with pair weights and LOS binning.
+
+    Computes the exact expected stacked 1D lag profile for one angular lag
+    :math:`(\Delta i, \Delta j)`:
+
+    .. math::
+        \mathbf{N}^{\rm bin} = S\,\big(W \odot \mathbf{C}^{\rm obs}\big)\,S^T,
+        \qquad
+        \mathbf{D}^{\rm bin} = S\,W\,S^T,
+
+    where :math:`S_{b,c} \in \{0, 1\}` maps native channels into uniform
+    comoving bins (or :math:`S = \mathbb{I}` when ``bin_which is None``), and
+    sums each diagonal :math:`\Delta b = -(N_b - 1), \dots, +(N_b - 1)` of
+    :math:`\mathbf{N}^{\rm bin}` and :math:`\mathbf{D}^{\rm bin}` identically
+    to :func:`correlate_cubelet` and :func:`stack_cubelet`.
+
+    Parameters
+    ----------
+    cov_ch : array_like
+        Channel-to-channel cross-covariance :math:`\mathbf{C}^{\rm obs}`,
+        shape ``(n_ch, n_ch)``.
+    pair_weight : array_like
+        Exact pair-weight matrix :math:`W_{c_1, c_2} = \sum_{i,j} w_L(i+\Delta i,
+        j+\Delta j, c_1)\,\bar{N}_g(i, j, c_2)`, shape ``(n_ch, n_ch)``.
+    bin_which : array_like of int, optional
+        Bin index ``0 .. n_bin - 1`` for each channel. ``None`` keeps native
+        channels without binning.
+    n_bin : int, optional
+        Total number of LOS bins (required when empty trailing bins exist;
+        defaults to ``max(bin_which) + 1``).
+    weighting : {'conventional', 'quadratic'}, default 'conventional'
+        Normalisation scheme matching the estimator.
+    symmetrize : bool, default False
+        Fold :math:`\pm \Delta b` before normalising, matching the estimator.
+
+    Returns
+    -------
+    profile : ndarray
+        Model stacked spectrum of shape ``(2 * n_los - 1,)``.
+    denom : ndarray
+        Model pair-count denominator of shape ``(2 * n_los - 1,)``.
+    """
+    if weighting not in ("conventional", "quadratic"):
+        raise ValueError(
+            f"weighting must be 'conventional' or 'quadratic', got {weighting!r}"
+        )
+    cov = np.asarray(cov_ch, dtype=float)
+    wt = np.asarray(pair_weight, dtype=float)
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1] or wt.shape != cov.shape:
+        raise ValueError(
+            "cov_ch and pair_weight must be square 2D arrays of equal shape"
+        )
+    n_ch = cov.shape[0]
+    if bin_which is not None:
+        which = np.asarray(bin_which, dtype=int).ravel()
+        if which.size != n_ch:
+            raise ValueError("bin_which length must match cov_ch size")
+        nb = int(which.max()) + 1 if n_bin is None else int(n_bin)
+        s_mat = np.zeros((nb, n_ch), dtype=float)
+        s_mat[which, np.arange(n_ch)] = 1.0
+        num_bin = s_mat @ (wt * cov) @ s_mat.T
+        den_bin = s_mat @ wt @ s_mat.T
+    else:
+        nb = n_ch
+        num_bin = wt * cov
+        den_bin = wt
+
+    lags = np.arange(-(nb - 1), nb, dtype=int)
+    num_diag = np.array(
+        [np.trace(num_bin, offset=-int(db)) for db in lags], dtype=float
+    )
+    den_diag = np.array(
+        [np.trace(den_bin, offset=-int(db)) for db in lags], dtype=float
+    )
+    if symmetrize:
+        num_diag = num_diag + num_diag[::-1]
+        den_diag = den_diag + den_diag[::-1]
+
+    if weighting == "conventional":
+        out = np.zeros_like(num_diag)
+        hit = _pair_hit(den_diag)
+        out[hit] = num_diag[hit] / den_diag[hit]
+    else:
+        q0 = float(den_diag[nb - 1])
+        out = num_diag / q0 if q0 != 0.0 else np.zeros_like(num_diag)
+    return out, den_diag
 
 
 def _validate_catalogue_arrays(name, ra, dec, z, weights=None):
@@ -952,6 +1335,15 @@ class Stacking(PowerSpectrum):
         dec_rand=None,
         z_rand=None,
         weights_rand=None,
+        n_chi=5,
+        kperp_edges=None,
+        n_kperp=256,
+        kperp_max=None,
+        include_pixel_window=True,
+        include_beam_window=True,
+        pixel_power=2,
+        beam_mode="continuous",
+        power_kmu_func=None,
         **params,
     ):
         if stack_estimator not in ("loop", "correlation"):
@@ -971,6 +1363,21 @@ class Stacking(PowerSpectrum):
             )
         if not np.isfinite(float(dchi_mpc)) or float(dchi_mpc) <= 0.0:
             raise ValueError("dchi_mpc must be positive")
+        if int(n_chi) < 1:
+            raise ValueError("n_chi must be >= 1")
+        if int(n_kperp) < 8:
+            raise ValueError("n_kperp must be at least 8")
+        if beam_mode not in ("continuous", "discrete"):
+            raise ValueError(
+                f"beam_mode must be 'continuous' or 'discrete', got {beam_mode!r}"
+            )
+        kperp_edges_arr = (
+            None if kperp_edges is None else np.asarray(kperp_edges, dtype=float)
+        )
+        if kperp_edges_arr is not None and (
+            kperp_edges_arr.ndim != 1 or kperp_edges_arr.size < 2
+        ):
+            raise ValueError("kperp_edges must be a 1-D array with at least two edges")
         gal_cat = _validate_catalogue_arrays("gal", ra_gal, dec_gal, z_gal, weights_gal)
         rand_cat = _validate_catalogue_arrays(
             "rand", ra_rand, dec_rand, z_rand, weights_rand
@@ -982,6 +1389,15 @@ class Stacking(PowerSpectrum):
         self.symmetrize = bool(symmetrize)
         self.dchi_mpc = float(dchi_mpc)
         self.centre_pixels = bool(centre_pixels)
+        self.n_chi = int(n_chi)
+        self._kperp_edges = kperp_edges_arr
+        self.n_kperp = int(n_kperp)
+        self.kperp_max = None if kperp_max is None else float(kperp_max)
+        self.include_pixel_window = bool(include_pixel_window)
+        self.include_beam_window = bool(include_beam_window)
+        self.pixel_power = float(pixel_power)
+        self.beam_mode = beam_mode
+        self.power_kmu_func = power_kmu_func
         self._stack_3d = None
         self._stack_weight = None
         self._stack_fkp = None
@@ -1482,17 +1898,660 @@ class Stacking(PowerSpectrum):
         counts, _centres = rebin_cube(painted, chi, self.dchi_mpc)
         return counts, int(inside.sum())
 
-    def model_1d_stack(self):
-        """
-        One-dimensional stacked spectrum.
+    # -- forward model -------------------------------------------------
+    @property
+    def chi_ch(self):
+        """Comoving distance to each frequency channel centre, in Mpc."""
+        return self.channel_chi_mpc()
 
-        The spectrum is the inverse Fourier transform, along the line of
-        sight, of the transverse integral of the galaxy--intensity
-        cross-power, including the pixel, beam, and radial windows.
+    @property
+    def dchi_ch(self):
+        """Comoving width of each frequency channel, in Mpc."""
+        nu = np.asarray(self.nu, dtype=float)
+        if nu.size == 1:
+            return np.zeros(1, dtype=float)
+        nu_edges = np.asarray(center_to_edges(nu), dtype=float)
+        z_edges = f_21 / nu_edges - 1.0
+        chi_edges = np.asarray(
+            self.astropy_cosmo_fiducial.comoving_distance(z_edges).to("Mpc").value,
+            dtype=float,
+        )
+        return np.abs(np.diff(chi_edges))
 
-        Raises
-        ------
-        NotImplementedError
-            The integral is not available.
+    @property
+    def kperp_edges(self):
+        """Edges of the :math:`k_\\perp` integration bins, in Mpc^-1."""
+        edges = self._kperp_edges
+        if edges is None:
+            dperp_min = (
+                np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(np.min(self.chi_ch))
+            )
+            kmax = self.kperp_max
+            if kmax is None:
+                kmax = 4.0 * np.pi / dperp_min
+            else:
+                kmax = float(kmax)
+                if not np.isfinite(kmax) or kmax <= 0.0:
+                    raise ValueError(f"kperp_max must be positive, got {kmax!r}")
+            edges = np.linspace(0.0, kmax, self.n_kperp + 1)
+        if np.any(np.diff(edges) <= 0.0):
+            raise ValueError("kperp_edges must be strictly increasing")
+        return np.asarray(edges, dtype=float)
+
+    @property
+    def kperp(self):
+        """Centres of the :math:`k_\\perp` integration bins, in Mpc^-1."""
+        edges = self.kperp_edges
+        return 0.5 * (edges[:-1] + edges[1:])
+
+    @property
+    def dk_perp(self):
+        """Widths of the :math:`k_\\perp` integration bins, in Mpc^-1."""
+        return np.diff(self.kperp_edges)
+
+    def _pair_weight_cubes(self, sort_chi=True):
+        """Return ``(w_map, n_cube)`` cubes ordered by ascending chi or native channels."""
+        if self.data is not None:
+            shape = tuple(int(n) for n in self.data.shape)
+        else:
+            shape = (int(self.num_pix_x), int(self.num_pix_y), int(np.size(self.nu)))
+        w_hi = getattr(self, "w_HI", None)
+        if w_hi is not None and tuple(w_hi.shape) == shape:
+            w_map = np.asarray(w_hi, dtype=float)
+        else:
+            w_map = np.ones(shape, dtype=float)
+
+        # Prefer randoms (smooth selection estimate), fall back to galaxies, else W_HI / uniform
+        if (
+            self.ra_rand is not None
+            and self.dec_rand is not None
+            and self.z_rand is not None
+        ):
+            positions, inside = sky_mesh_positions(
+                self.ra_rand,
+                self.dec_rand,
+                self.z_rand,
+                self.wproj,
+                self.nu,
+                shape,
+                centre_pixels=self.centre_pixels,
+            )
+            mass = (
+                np.ones(int(np.size(self.ra_rand)), dtype=float)[inside]
+                if self.weights_rand is None
+                else np.asarray(self.weights_rand, dtype=float)[inside]
+            )
+            n_cube = paint_sky_counts(positions, shape, mass=mass)
+        elif (
+            getattr(self, "_ra_gal", None) is not None
+            and getattr(self, "_dec_gal", None) is not None
+            and getattr(self, "_z_gal", None) is not None
+        ):
+            positions, inside = sky_mesh_positions(
+                self.ra_gal,
+                self.dec_gal,
+                self.z_gal,
+                self.wproj,
+                self.nu,
+                shape,
+                centre_pixels=self.centre_pixels,
+            )
+            mass = (
+                np.ones(int(np.size(self.ra_gal)), dtype=float)[inside]
+                if self.weights_gal is None
+                else np.asarray(self.weights_gal, dtype=float)[inside]
+            )
+            n_cube = paint_sky_counts(positions, shape, mass=mass)
+        else:
+            w_mask = getattr(self, "W_HI", None)
+            if w_mask is not None and tuple(w_mask.shape) == shape:
+                n_cube = np.asarray(w_mask, dtype=float)
+            else:
+                n_cube = np.ones(shape, dtype=float)
+
+        if sort_chi:
+            order = np.argsort(self.chi_ch)
+            return w_map[..., order], n_cube[..., order]
+        return w_map, n_cube
+
+    @staticmethod
+    def _pair_weight_matrix_for_lag(w_map, n_cube, di, dj, separable=False):
+        """Build the ``(n_ch, n_ch)`` pair-weight matrix at angular lag ``(di, dj)``."""
+        nx, ny, n_ch = w_map.shape
+        if abs(int(di)) >= nx or abs(int(dj)) >= ny:
+            return np.zeros((n_ch, n_ch), dtype=float)
+        di_i, dj_i = int(di), int(dj)
+        x_m = slice(max(0, di_i), nx + min(0, di_i))
+        x_g = slice(max(0, -di_i), nx - max(0, di_i))
+        y_m = slice(max(0, dj_i), ny + min(0, dj_i))
+        y_g = slice(max(0, -dj_i), ny - max(0, dj_i))
+        w_sub = w_map[x_m, y_m, :]
+        n_sub = n_cube[x_g, y_g, :]
+        if separable:
+            return np.outer(w_sub.sum(axis=(0, 1)), n_sub.sum(axis=(0, 1)))
+        w_flat = w_sub.reshape(-1, n_ch)
+        n_flat = n_sub.reshape(-1, n_ch)
+        return w_flat.T @ n_flat
+
+    def _chi_nodes(self, n_chi=None, channel_weights=None):
+        """Comoving distance nodes across the band and their pair weights."""
+        chi_all = self.chi_ch
+        order = np.argsort(chi_all)
+        chi_s = chi_all[order]
+        n = self.n_chi if n_chi is None else int(n_chi)
+        if n < 1:
+            raise ValueError("n_chi must be >= 1")
+        if chi_s.size == 1 or n == 1:
+            return np.array([float(np.mean(chi_s))]), np.array([1.0])
+        edges = np.linspace(chi_s[0], chi_s[-1], n + 1)
+        nodes = 0.5 * (edges[:-1] + edges[1:])
+        if channel_weights is None:
+            cw = np.ones(chi_s.size, dtype=float)
+        else:
+            cw = np.asarray(channel_weights, dtype=float).ravel()
+        idx = np.clip(np.digitize(chi_s, edges) - 1, 0, n - 1)
+        weights = np.bincount(idx, weights=cw, minlength=n)[:n].astype(float)
+        total = float(weights.sum())
+        if total <= 0.0:
+            weights = np.ones(n, dtype=float) / float(n)
+        else:
+            weights = weights / total
+        return nodes, weights
+
+    def transverse_window(
+        self,
+        di=0,
+        dj=0,
+        n_chi=None,
+        n_phi=64,
+        include_pixel_window=None,
+        include_beam_window=None,
+        pixel_power=None,
+        beam_mode=None,
+        channel_weights=None,
+    ):
+        r"""Band-averaged transverse stacking window at angular lag :math:`(\Delta i, \Delta j)`.
+
+        Averages the product of the square-pixel window (default
+        :math:`|W_{\rm pix}|^2`, ``pixel_power=2``) and the linear map-leg dish
+        beam :math:`W_{\rm beam}` over comoving distance nodes weighted by the
+        survey's channel pair weights.
+
+        Parameters
+        ----------
+        di, dj : int, default 0
+            Integer angular lag offsets in map-pixel units.
+        n_chi : int, optional
+            Number of comoving distance nodes. Defaults to :attr:`n_chi`.
+        n_phi : int, default 64
+            Number of azimuthal angles for the square-pixel average.
+        include_pixel_window : bool, optional
+            Include the pixel top-hat window. Defaults to
+            :attr:`include_pixel_window`.
+        include_beam_window : bool, optional
+            Include the dish beam window when :attr:`sigma_beam_ch` is set.
+            Defaults to :attr:`include_beam_window`.
+        pixel_power : int or float, optional
+            Pixel-window exponent (default :attr:`pixel_power`, ``2``).
+        beam_mode : {'continuous', 'discrete'}, optional
+            ``'continuous'`` uses :func:`beam_window_amplitude` (continuous sky
+            smoothing prior to pixelisation); ``'discrete'`` uses
+            :func:`discrete_beam_window_amplitude` (pixel-grid Gaussian
+            convolution). Defaults to :attr:`beam_mode`.
+        channel_weights : array_like, optional
+            Non-negative per-channel weights (in ascending :math:`\chi` order)
+            used to weight the comoving distance nodes.
+
+        Returns
+        -------
+        window : ndarray
+            Band-averaged transverse window on :attr:`kperp`, shape
+            ``(len(kperp),)``.
         """
-        raise NotImplementedError("model_1d_stack is not implemented")
+        use_pix = (
+            self.include_pixel_window
+            if include_pixel_window is None
+            else bool(include_pixel_window)
+        )
+        use_beam = (
+            self.include_beam_window
+            if include_beam_window is None
+            else bool(include_beam_window)
+        )
+        pix_pow = self.pixel_power if pixel_power is None else float(pixel_power)
+        b_mode = self.beam_mode if beam_mode is None else str(beam_mode)
+        if b_mode not in ("continuous", "discrete"):
+            raise ValueError(
+                f"beam_mode must be 'continuous' or 'discrete', got {b_mode!r}"
+            )
+        effective_pix_pow = pix_pow if use_pix else 0.0
+
+        kperp = self.kperp
+        nodes, weights = self._chi_nodes(n_chi=n_chi, channel_weights=channel_weights)
+        theta_pix = np.sqrt(float(self.pixel_area)) * _DEG2RAD
+
+        sigma_b = None
+        if use_beam and getattr(self, "sigma_beam_ch", None) is not None:
+            chi_all = self.chi_ch
+            sigma_arr = np.atleast_1d(
+                np.asarray(self.sigma_beam_ch_in_mpc, dtype=float)
+            )
+            order = np.argsort(chi_all)
+            chi_for_beam = chi_all[order]
+            sigma_b = np.abs(sigma_arr[order])
+
+        acc = np.zeros_like(kperp)
+        for node, wt in zip(nodes, weights):
+            dperp = theta_pix * float(node)
+            if sigma_b is not None and b_mode == "discrete":
+                sb = float(np.interp(node, chi_for_beam, sigma_b))
+                w_node = discrete_beam_window_amplitude(
+                    kperp,
+                    dperp,
+                    sb,
+                    di=di,
+                    dj=dj,
+                    n_phi=n_phi,
+                    pixel_power=effective_pix_pow,
+                )
+            else:
+                if use_pix or int(di) != 0 or int(dj) != 0:
+                    w_node = azimuthal_pixel_window_lag(
+                        kperp,
+                        dperp,
+                        di=di,
+                        dj=dj,
+                        n_phi=n_phi,
+                        pixel_power=effective_pix_pow,
+                    )
+                else:
+                    w_node = np.ones_like(kperp)
+                if sigma_b is not None:
+                    sb = float(np.interp(node, chi_for_beam, sigma_b))
+                    w_node = w_node * beam_window_amplitude(kperp, sb)
+            acc += wt * w_node
+        return acc
+
+    def _eval_power_kmu(self, k_mesh, mu_mesh, which="cross", include_mean_amp=True):
+        """Evaluate 3D model ``P(k, mu)`` without mutating ``kmode`` / ``mumode`` state."""
+        if self.power_kmu_func is not None:
+            power = np.asarray(self.power_kmu_func(k_mesh, mu_mesh), dtype=float)
+            if power.shape != k_mesh.shape:
+                raise ValueError(
+                    f"power_kmu_func returned shape {power.shape}, expected {k_mesh.shape}"
+                )
+            return power
+
+        cache_names = (
+            "_kmode",
+            "_mumode",
+            "_auto_power_matter_model_r",
+            "_auto_power_matter_model",
+            "_auto_power_tracer_1_model_noobs",
+            "_auto_power_tracer_2_model_noobs",
+            "_cross_power_tracer_model_noobs",
+        )
+        saved = {name: getattr(self, name, None) for name in cache_names}
+        try:
+            self.kmode = k_mesh
+            self.mumode = mu_mesh
+            return self.power_kmu(which=which, include_mean_amp=include_mean_amp)
+        finally:
+            for name, val in saved.items():
+                setattr(self, name, val)
+
+    def model_1d_power(
+        self,
+        kpar,
+        di=0,
+        dj=0,
+        which="cross",
+        include_mean_amp=True,
+        cross_shot_noise=0.0,
+        **window_kwargs,
+    ):
+        r"""Transverse-projected 1D cross-power :math:`P_{1D}^{(\Delta i,\Delta j)}(k_\parallel)`.
+
+        Evaluates
+
+        .. math::
+            P_{1D}^{(\Delta i, \Delta j)}(k_\parallel)
+            = \frac{1}{2\pi} \int_0^{k_{\perp,\max}} k_\perp\,\mathrm{d}k_\perp\;
+              \left[P_{Lg}(k, \mu) + P_{\rm SN}\right]\,
+              \overline{W}_\times^{(\Delta i, \Delta j)}(k_\perp)
+
+        with :math:`k = \sqrt{k_\perp^2 + k_\parallel^2}` and
+        :math:`\mu = k_\parallel / k`.
+
+        Parameters
+        ----------
+        kpar : array_like
+            Line-of-sight wavenumbers in Mpc^-1.
+        di, dj : int, default 0
+            Integer angular lag offsets in map-pixel units.
+        which : {'cross', 'auto_1', 'auto_2'}, default 'cross'
+            Model power spectrum passed to :meth:`power_kmu`.
+        include_mean_amp : bool, default True
+            Multiply by ``mean_amp_1 * mean_amp_2`` (for ``'cross'``).
+        cross_shot_noise : float or callable, default 0.0
+            Optional cross shot noise added to :math:`P_{Lg}(k, \mu)`.
+        **window_kwargs
+            Forwarded to :meth:`transverse_window`.
+
+        Returns
+        -------
+        p1d : ndarray
+            Projected 1D power spectrum, shape ``(len(kpar),)``.
+        """
+        kpar_arr = np.atleast_1d(np.asarray(kpar, dtype=float)).ravel()
+        if kpar_arr.size == 0:
+            raise ValueError("kpar must be non-empty")
+        kperp = self.kperp
+        k_mesh = np.sqrt(kperp[:, None] ** 2 + kpar_arr[None, :] ** 2)
+        mu_mesh = np.broadcast_to(kpar_arr[None, :], k_mesh.shape) / np.maximum(
+            k_mesh, 1e-12
+        )
+        power = self._eval_power_kmu(
+            k_mesh, mu_mesh, which=which, include_mean_amp=include_mean_amp
+        )
+        if callable(cross_shot_noise):
+            power = power + np.asarray(cross_shot_noise(kpar_arr), dtype=float)[None, :]
+        elif float(cross_shot_noise) != 0.0:
+            power = power + float(cross_shot_noise)
+        w_perp = self.transverse_window(di=di, dj=dj, **window_kwargs)
+        measure = (kperp * self.dk_perp / (2.0 * np.pi))[:, None]
+        return np.sum(measure * power * w_perp[:, None], axis=0)
+
+    def _default_kpar_grids(self, chi_s, dchi_s, kpar_max=None, n_kpar_eval=256):
+        """Build coarse P_1D evaluation grid and Nyquist-safe fine quadrature grid."""
+        l_band = max(float(chi_s[-1] - chi_s[0]), float(np.sum(dchi_s)), 1.0)
+        dchi_min = max(float(np.min(dchi_s)), 0.1)
+        if kpar_max is None:
+            kmax = max(4.0, min(16.0, 2.5 * np.pi / dchi_min))
+        else:
+            kmax = float(kpar_max)
+            if not np.isfinite(kmax) or kmax <= 0.0:
+                raise ValueError(f"kpar_max must be positive, got {kmax!r}")
+        n_eval = max(32, int(n_kpar_eval))
+        k_split = min(0.5, 0.25 * kmax)
+        n_lin = n_eval // 2
+        n_log = n_eval - n_lin
+        k_lin = np.linspace(0.0, k_split, n_lin, endpoint=False)
+        k_log = np.geomspace(k_split, kmax, n_log)
+        kpar_eval = np.concatenate([k_lin, k_log])
+
+        # Oversample pi / L_band by 4x so cos(k_par * Delta chi) has zero aliasing
+        dk_quad = np.pi / (4.0 * l_band)
+        n_quad = max(n_eval, int(np.ceil(kmax / dk_quad)) + 1)
+        kpar_quad = np.linspace(0.0, kmax, n_quad)
+        return kpar_eval, kpar_quad
+
+    def _model_for_lags(
+        self,
+        lags,
+        clean_matrix=None,
+        which="cross",
+        include_mean_amp=True,
+        cross_shot_noise=0.0,
+        separable_weights=False,
+        dchi_gal="channel",
+        kpar_max=None,
+        n_kpar_eval=256,
+        **window_kwargs,
+    ):
+        """Compute exact channel-contracted model profiles for a list of ``(di, dj)`` lags."""
+        use_corr = self.stack_estimator == "correlation"
+        chi_all = self.chi_ch
+        dchi_all = self.dchi_ch
+        if use_corr:
+            order, edges, _centres, bin_which = comoving_bin_indices(
+                chi_all, self.dchi_mpc
+            )
+            chi_work = chi_all[order]
+            dchi_work = dchi_all[order]
+            n_bin = edges.size - 1
+            m_clean = (
+                None
+                if clean_matrix is None
+                else np.asarray(clean_matrix, dtype=float)[np.ix_(order, order)]
+            )
+        else:
+            order = None
+            chi_work = chi_all
+            dchi_work = dchi_all
+            bin_which = None
+            n_bin = None
+            m_clean = (
+                None if clean_matrix is None else np.asarray(clean_matrix, dtype=float)
+            )
+
+        if isinstance(dchi_gal, str):
+            if dchi_gal != "channel":
+                raise ValueError(
+                    f"dchi_gal must be 'channel', None, a scalar, or an array; got {dchi_gal!r}"
+                )
+            dchi_g_work = dchi_work
+        elif dchi_gal is None:
+            dchi_g_work = 0.0
+        elif np.ndim(dchi_gal) == 0:
+            dchi_g_work = float(dchi_gal)
+        else:
+            dchi_g_arr = np.asarray(dchi_gal, dtype=float).ravel()
+            dchi_g_work = dchi_g_arr[order] if order is not None else dchi_g_arr
+
+        w_map, n_cube = self._pair_weight_cubes(sort_chi=use_corr)
+        # Channel pair weights (in ascending chi order) for redshift-node averaging
+        ch_weights = (w_map * n_cube).sum(axis=(0, 1))
+        if not use_corr:
+            ch_weights = ch_weights[np.argsort(chi_all)]
+
+        kpar_eval, kpar_quad = self._default_kpar_grids(
+            np.sort(chi_all),
+            dchi_all[np.argsort(chi_all)],
+            kpar_max=kpar_max,
+            n_kpar_eval=n_kpar_eval,
+        )
+        kperp = self.kperp
+        k_mesh = np.sqrt(kperp[:, None] ** 2 + kpar_eval[None, :] ** 2)
+        mu_mesh = np.broadcast_to(kpar_eval[None, :], k_mesh.shape) / np.maximum(
+            k_mesh, 1e-12
+        )
+        power_3d = self._eval_power_kmu(
+            k_mesh, mu_mesh, which=which, include_mean_amp=include_mean_amp
+        )
+        if callable(cross_shot_noise):
+            power_3d = (
+                power_3d + np.asarray(cross_shot_noise(kpar_eval), dtype=float)[None, :]
+            )
+        elif float(cross_shot_noise) != 0.0:
+            power_3d = power_3d + float(cross_shot_noise)
+        measure = (kperp * self.dk_perp / (2.0 * np.pi))[:, None]
+
+        # Exploit 8-fold square symmetry for transverse window & channel covariance
+        cov_cache = {}
+        results = {}
+        for di, dj in lags:
+            sym_key = tuple(sorted((abs(int(di)), abs(int(dj)))))
+            if sym_key not in cov_cache:
+                w_perp = self.transverse_window(
+                    di=sym_key[0],
+                    dj=sym_key[1],
+                    channel_weights=ch_weights,
+                    **window_kwargs,
+                )
+                p1d_eval = np.sum(measure * power_3d * w_perp[:, None], axis=0)
+                p1d_quad = CubicSpline(kpar_eval, p1d_eval)(kpar_quad)
+                cov_cache[sym_key] = channel_cross_covariance(
+                    chi_work,
+                    dchi_work,
+                    kpar_quad,
+                    p1d_quad,
+                    clean_matrix=m_clean,
+                    dchi_gal=dchi_g_work,
+                )
+            pair_w = self._pair_weight_matrix_for_lag(
+                w_map, n_cube, di, dj, separable=separable_weights
+            )
+            profile, _denom = contract_channel_covariance(
+                cov_cache[sym_key],
+                pair_w,
+                bin_which=bin_which,
+                n_bin=n_bin,
+                weighting=self.stack_weighting,
+                symmetrize=self.symmetrize,
+            )
+            results[(int(di), int(dj))] = profile
+        return results
+
+    def model_3d_stack(
+        self,
+        clean_matrix=None,
+        which="cross",
+        include_mean_amp=True,
+        cross_shot_noise=0.0,
+        separable_weights=False,
+        dchi_gal="channel",
+        kpar_max=None,
+        n_kpar_eval=256,
+        **window_kwargs,
+    ):
+        r"""Forward model of the full 3D stacked cubelet.
+
+        Evaluates the exact channel-space covariance contraction matching
+        :attr:`stack_estimator`, :attr:`stack_weighting`, :attr:`symmetrize`,
+        :attr:`dchi_mpc`, map weights :attr:`w_HI`, galaxy/random selection,
+        square-pixel window (:math:`|W_{\rm pix}|^2`), dish beam
+        (:math:`W_{\rm beam}`), and an optional linear cleaning matrix
+        :math:`\mathbb{M}` (in the map's native channel order).
+
+        Parameters
+        ----------
+        clean_matrix : array_like, optional
+            Linear frequency-axis cleaning operator :math:`\mathbb{M}` of shape
+            ``(n_ch, n_ch)`` in the map's native ``self.nu`` channel order.
+        which : {'cross', 'auto_1', 'auto_2'}, default 'cross'
+            Model power spectrum passed to :meth:`power_kmu`.
+        include_mean_amp : bool, default True
+            Include ``mean_amp`` factors (e.g. :math:`\bar{T}_{\rm HI}`).
+        cross_shot_noise : float or callable, default 0.0
+            Optional cross shot noise added to :math:`P_{Lg}(k, \mu)`.
+        separable_weights : bool, default False
+            If True, approximate the per-lag pair-weight matrix by the outer
+            product of sky-summed map and galaxy weights. ``False`` uses the
+            exact 3D non-separable pair-weight matrix.
+        dchi_gal : {'channel', None} or float or array_like, default 'channel'
+            Radial window width on the galaxy leg.
+        kpar_max : float, optional
+            Upper limit of the :math:`k_\parallel` integral, in Mpc^-1.
+        n_kpar_eval : int, default 256
+            Number of coarse :math:`k_\parallel` nodes at which ``power_kmu``
+            is evaluated before interpolating onto the fine quadrature grid.
+        **window_kwargs
+            Forwarded to :meth:`transverse_window`.
+
+        Returns
+        -------
+        cubelet : ndarray
+            Model 3D cubelet of shape
+            ``(2 * n_nearby + 1, 2 * n_nearby + 1, n_los)`` matching
+            :attr:`stack_3d`.
+        """
+        n_nearby = int(self.stack_angular_num_nearby_pix)
+        lag_vals = np.arange(-n_nearby, n_nearby + 1, dtype=int)
+        lags = [(int(di), int(dj)) for di in lag_vals for dj in lag_vals]
+        profiles = self._model_for_lags(
+            lags,
+            clean_matrix=clean_matrix,
+            which=which,
+            include_mean_amp=include_mean_amp,
+            cross_shot_noise=cross_shot_noise,
+            separable_weights=separable_weights,
+            dchi_gal=dchi_gal,
+            kpar_max=kpar_max,
+            n_kpar_eval=n_kpar_eval,
+            **window_kwargs,
+        )
+        n_los = next(iter(profiles.values())).size
+        side = 2 * n_nearby + 1
+        cube = np.zeros((side, side, n_los), dtype=float)
+        for di, dj in lags:
+            cube[di + n_nearby, dj + n_nearby, :] = profiles[(di, dj)]
+        return cube
+
+    def model_1d_stack(
+        self,
+        aperture="central",
+        radius=None,
+        weights_2d=None,
+        normalize=True,
+        clean_matrix=None,
+        which="cross",
+        include_mean_amp=True,
+        cross_shot_noise=0.0,
+        separable_weights=False,
+        dchi_gal="channel",
+        kpar_max=None,
+        n_kpar_eval=256,
+        **window_kwargs,
+    ):
+        r"""Forward model of a 1D aperture-projected stacked spectrum.
+
+        Evaluates only the angular lags with nonzero aperture weight and
+        projects them identically to :meth:`project_1d`.
+
+        Parameters
+        ----------
+        aperture : {'central', 'tophat', 'gaussian'}, default 'central'
+            Preset 2D angular aperture when ``weights_2d`` is omitted.
+        radius : float, optional
+            Aperture radius / Gaussian :math:`\sigma` in map pixels. For
+            ``aperture='gaussian'`` with ``radius=None``, uses the band-median
+            ``sigma_beam_ch`` in pixel units when available (else ``1.0``).
+        weights_2d : array_like, optional
+            Custom 2D angular weight array overriding ``aperture``.
+        normalize : bool, default True
+            Normalise the 2D aperture weights to unit sum before contraction.
+        clean_matrix, which, include_mean_amp, cross_shot_noise, separable_weights, dchi_gal, kpar_max, n_kpar_eval, **window_kwargs
+            Forwarded to the channel-space model (see :meth:`model_3d_stack`).
+
+        Returns
+        -------
+        spectrum : ndarray
+            Model 1D stacked spectrum of shape ``(n_los,)`` matching
+            ``self.project_1d(self.stack_3d, ...)``.
+        """
+        n_nearby = int(self.stack_angular_num_nearby_pix)
+        if (
+            weights_2d is None
+            and str(aperture).lower() == "gaussian"
+            and radius is None
+        ):
+            radius = self._default_gaussian_aperture_pixels()
+        kernel = aperture_weights_2d(
+            n_nearby,
+            aperture=aperture,
+            radius=radius,
+            weights_2d=weights_2d,
+            normalize=normalize,
+        )
+        active_idx = np.argwhere(kernel != 0.0)
+        active_lags = [
+            (int(ix - n_nearby), int(iy - n_nearby)) for ix, iy in active_idx
+        ]
+        profiles = self._model_for_lags(
+            active_lags,
+            clean_matrix=clean_matrix,
+            which=which,
+            include_mean_amp=include_mean_amp,
+            cross_shot_noise=cross_shot_noise,
+            separable_weights=separable_weights,
+            dchi_gal=dchi_gal,
+            kpar_max=kpar_max,
+            n_kpar_eval=n_kpar_eval,
+            **window_kwargs,
+        )
+        n_los = next(iter(profiles.values())).size
+        spec = np.zeros(n_los, dtype=float)
+        for (di, dj), (ix, iy) in zip(active_lags, active_idx):
+            spec += float(kernel[ix, iy]) * profiles[(di, dj)]
+        return spec

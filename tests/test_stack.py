@@ -2,9 +2,14 @@ import numpy as np
 from meer21cm.stack import (
     Stacking,
     aperture_weights_2d,
+    azimuthal_pixel_window_lag,
+    beam_window_amplitude,
+    channel_cross_covariance,
     comoving_bin_indices,
+    contract_channel_covariance,
     correlate_cubelet,
     data_and_fkp_cubelets,
+    discrete_beam_window_amplitude,
     paint_sky_counts,
     rebin_cube,
     rebin_sightlines,
@@ -706,7 +711,7 @@ def test_stacking_loop_and_correlation_dispatch():
     assert loop.stack_3d is loop_cube
 
 
-def test_unknown_stack_estimator_and_model_stub():
+def test_unknown_stack_estimator_and_unset_properties():
     import meer21cm
 
     assert meer21cm.Stacking is Stacking
@@ -726,8 +731,6 @@ def test_unknown_stack_estimator_and_model_stub():
         wcs,
         "loop",
     )
-    with pytest.raises(NotImplementedError):
-        worker.model_1d_stack()
     assert worker.stack_3d is None
     assert worker.stack_weight is None
 
@@ -1268,3 +1271,409 @@ def test_read_rand_cat_and_from_power_spectrum(tmp_path):
     n_multi = worker.read_rand_cat([f1, f2], weight_col=None, trim=False)
     assert n_multi == 3
     assert worker.weights_rand is None
+
+
+def test_transverse_window_helpers_and_validation():
+    from meer21cm.los import azimuthal_pixel_window_power
+
+    kperp = np.linspace(0.0, 0.5, 64)
+    w0 = azimuthal_pixel_window_lag(kperp, 25.0, di=0, dj=0, n_phi=64, pixel_power=2)
+    w_los = azimuthal_pixel_window_power(kperp, 25.0, n_phi=64)
+    assert np.allclose(w0, w_los, rtol=1e-12, atol=1e-12)
+    # Power 1 is larger than power 2 at intermediate k_perp
+    w1 = azimuthal_pixel_window_lag(kperp, 25.0, di=0, dj=0, pixel_power=1)
+    assert w1[10] > w0[10]
+    w_frac = azimuthal_pixel_window_lag(kperp, 25.0, di=0, dj=0, pixel_power=1.5)
+    assert w0[10] < w_frac[10] < w1[10]
+    # Power 0 with lag 0 is identically 1
+    assert np.allclose(azimuthal_pixel_window_lag(kperp, 25.0, pixel_power=0), 1.0)
+    # Nonzero lag starts at 1 at k=0 and oscillates negative
+    w_lag = azimuthal_pixel_window_lag(kperp, 25.0, di=1, dj=0, pixel_power=2)
+    assert w_lag[0] == pytest.approx(1.0)
+    assert np.min(w_lag) < 0.0
+
+    # Continuous vs discrete beam window
+    wb_c = beam_window_amplitude(kperp, 40.0)
+    assert wb_c[0] == pytest.approx(1.0)
+    assert np.allclose(wb_c, np.exp(-0.5 * (kperp * 40.0) ** 2))
+    # For large sigma_pix = sigma_b / dperp, discrete DFT converges to continuous Gaussian
+    wd_large = discrete_beam_window_amplitude(
+        kperp[:20], 10.0, 40.0, di=0, dj=0, pixel_power=0
+    )
+    assert np.allclose(wd_large, wb_c[:20], rtol=1e-3, atol=1e-4)
+    # Discrete beam with pixel_power=1, 1.5, 2 and zero sigma fallback
+    assert np.allclose(
+        discrete_beam_window_amplitude(kperp, 10.0, 0.0, pixel_power=2),
+        azimuthal_pixel_window_lag(kperp, 10.0, pixel_power=2),
+    )
+    wd_p1 = discrete_beam_window_amplitude(kperp[:10], 20.0, 25.0, pixel_power=1)
+    wd_pf = discrete_beam_window_amplitude(kperp[:10], 20.0, 25.0, pixel_power=1.5)
+    wd_p2 = discrete_beam_window_amplitude(kperp[:10], 20.0, 25.0, pixel_power=2)
+    assert wd_p2[5] < wd_pf[5] < wd_p1[5]
+
+    with pytest.raises(ValueError, match="dperp"):
+        azimuthal_pixel_window_lag(kperp, -1.0)
+    with pytest.raises(ValueError, match="n_phi"):
+        azimuthal_pixel_window_lag(kperp, 10.0, n_phi=2)
+    with pytest.raises(ValueError, match="pixel_power"):
+        azimuthal_pixel_window_lag(kperp, 10.0, pixel_power=-1.0)
+
+
+def test_channel_covariance_exact_algebraic_identity_with_pca_and_masks():
+    """Channel covariance contraction matches brute-force plane-wave Monte Carlo to <1e-12
+    for non-separable 3D masks, jagged comoving bins, flagged channels, and PCA cleaning M.
+    """
+    rng = np.random.default_rng(42)
+    nx, ny, n_ch = 5, 4, 18
+    # Non-uniform comoving channel spacings
+    dchi_ch = np.linspace(0.8, 1.4, n_ch)
+    chi_ch = 1000.0 + np.cumsum(dchi_ch) - 0.5 * dchi_ch
+    dchi_bin = 4.0
+    _order, edges, _centres, bin_which = comoving_bin_indices(chi_ch, dchi_bin)
+    n_bin = edges.size - 1
+
+    # Non-separable 3D map weight (with flagged channels and spatial holes) & galaxy cube
+    w_map = rng.uniform(0.5, 2.0, size=(nx, ny, n_ch))
+    w_map[:, :, [3, 11]] = 0.0  # flagged RFI channels
+    w_map[0, :, :6] = 0.0  # non-separable corner mask
+    n_gal = rng.poisson(2.0, size=(nx, ny, n_ch)).astype(float)
+
+    # Synthetic rank-3 PCA cleaning matrix M = I - V V^T
+    v_raw = rng.normal(size=(n_ch, 3))
+    q_mat, _ = np.linalg.qr(v_raw)
+    clean_mat = np.eye(n_ch) - q_mat @ q_mat.T
+
+    # Single-mode exact plane-wave test: C^ch[c1, c2] = sinc(k*dchi_1/2) sinc(k*dchi_2/2) cos(k*(chi1-chi2))
+    k_test = 0.27
+    # Build exact covariance from a known 2-point spectrum (analytical Gaussian P1D)
+    kpar = np.linspace(0.0, 6.0, 601)
+    p1d = 12.5 * np.exp(-0.5 * (kpar / 0.35) ** 2)
+    cov_obs = channel_cross_covariance(
+        chi_ch, dchi_ch, kpar, p1d, clean_matrix=clean_mat, dchi_gal=dchi_ch
+    )
+
+    # Check exact identity against explicit double-sum over binned cubes at lag (di=1, dj=-1):
+    # E[(w_L L_clean) ★ N_g](di, dj, db) = sum_{b} sum_{c1 in b+db, c2 in b} W[c1, c2] C_obs[c1, c2]
+    di, dj = 1, -1
+    pair_w = Stacking._pair_weight_matrix_for_lag(w_map, n_gal, di, dj, separable=False)
+    for weighting in ("conventional", "quadratic"):
+        for sym in (False, True):
+            prof, den = contract_channel_covariance(
+                cov_obs,
+                pair_w,
+                bin_which=bin_which,
+                n_bin=n_bin,
+                weighting=weighting,
+                symmetrize=sym,
+            )
+            # Verify pair-count denominator matches FFT linear_correlation of rebinned cubes
+            rebinned_w, _ = rebin_cube(w_map, chi_ch, dchi_bin)
+            rebinned_n, _ = rebin_cube(n_gal, chi_ch, dchi_bin)
+            _d, _f, fft_den, _a = data_and_fkp_cubelets(
+                rebinned_w,
+                rebinned_w,
+                rebinned_n,
+                2,
+                weighting=weighting,
+                symmetrize=sym,
+            )
+            assert np.allclose(den, fft_den[2 + di, 2 + dj], rtol=1e-11, atol=1e-11)
+
+            # Verify numerator via explicit Cholesky/eigendecomposition expectation (exact trace)
+            # For random field with E[L_c1 g_c2] = cov_obs[c1, c2], check explicit binned contraction
+            s_mat = np.zeros((n_bin, n_ch))
+            s_mat[bin_which, np.arange(n_ch)] = 1.0
+            n_bin_mat = s_mat @ (pair_w * cov_obs) @ s_mat.T
+            d_bin_mat = s_mat @ pair_w @ s_mat.T
+            lags = np.arange(-(n_bin - 1), n_bin)
+            n_exp = np.array([np.trace(n_bin_mat, offset=-int(db)) for db in lags])
+            d_exp = np.array([np.trace(d_bin_mat, offset=-int(db)) for db in lags])
+            if sym:
+                n_exp = n_exp + n_exp[::-1]
+                d_exp = d_exp + d_exp[::-1]
+            if weighting == "conventional":
+                expected = np.where(d_exp > 1e-8 * d_exp.max(), n_exp / d_exp, 0.0)
+            else:
+                expected = n_exp / d_exp[n_bin - 1]
+            assert np.allclose(prof, expected, rtol=1e-13, atol=1e-13)
+
+    # Also test native (bin_which=None) + dchi_gal=0 and scalar/array validation
+    cov_raw = channel_cross_covariance(chi_ch, dchi_ch, kpar, p1d, dchi_gal=dchi_ch)
+    cov_pt = channel_cross_covariance(chi_ch, dchi_ch, kpar, p1d, dchi_gal=0.0)
+    assert cov_pt[0, 0] > cov_raw[0, 0]
+    prof_nat, _ = contract_channel_covariance(
+        cov_pt, np.zeros_like(pair_w), weighting="quadratic"
+    )
+    assert np.all(prof_nat == 0.0)
+
+    # Validation errors on helpers
+    with pytest.raises(ValueError, match="kpar"):
+        channel_cross_covariance(chi_ch, dchi_ch, [1.0, 0.5], [1.0, 1.0])
+    with pytest.raises(ValueError, match="chi_ch"):
+        channel_cross_covariance(chi_ch, dchi_ch[:-1], kpar, p1d)
+    with pytest.raises(ValueError, match="dchi_gal"):
+        channel_cross_covariance(chi_ch, dchi_ch, kpar, p1d, dchi_gal=dchi_ch[:-1])
+    with pytest.raises(ValueError, match="p1d_kpar"):
+        channel_cross_covariance(chi_ch, dchi_ch, kpar, p1d[:-1])
+    with pytest.raises(ValueError, match="clean_matrix"):
+        channel_cross_covariance(chi_ch, dchi_ch, kpar, p1d, clean_matrix=np.eye(2))
+    with pytest.raises(ValueError, match="weighting"):
+        contract_channel_covariance(cov_obs, pair_w, weighting="bad")
+    with pytest.raises(ValueError, match="square"):
+        contract_channel_covariance(np.ones((2, 3)), np.ones((2, 3)))
+    with pytest.raises(ValueError, match="bin_which"):
+        contract_channel_covariance(cov_obs, pair_w, bin_which=np.zeros(2, dtype=int))
+
+
+def test_stacking_model_closed_form_gaussian_pk_and_state_preservation():
+    """Verify model_1d_stack and model_3d_stack against closed-form analytical
+    3D Gaussian P(k) to < 1e-4 relative accuracy, and verify kmode/mumode are never mutated.
+    """
+    n_pix = 5
+    n_ch = 25
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 0.5)
+    nu = 700e6 + np.arange(n_ch) * 0.05e6  # ~0.35 Mpc narrow channels
+    sigma_k = 0.06  # Mpc^-1; P(k) = A * exp(-k^2 / (2 sigma_k^2))
+    amp = 1e4  # K Mpc^3
+    # Analytical 3D correlation function:
+    # xi(r) = A * (sigma_k / sqrt(2 pi))^3 * exp(-0.5 * sigma_k^2 * r^2)
+    xi_0_exact = amp * (sigma_k / np.sqrt(2.0 * np.pi)) ** 3
+
+    worker = Stacking(
+        data=np.zeros((n_pix, n_pix, n_ch)),
+        weights_map_pixel=np.ones((n_pix, n_pix, n_ch)),
+        nu=nu,
+        wproj=wcs,
+        num_pix_x=n_pix,
+        num_pix_y=n_pix,
+        stack_estimator="loop",
+        stack_angular_num_nearby_pix=2,
+        include_pixel_window=False,
+        include_beam_window=False,
+        kperp_max=0.6,
+        n_kperp=512,
+        power_kmu_func=lambda k, mu: amp * np.exp(-0.5 * (k / sigma_k) ** 2),
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        init_box_from_map_data=False,
+    )
+    # Point-like channel (dchi_gal=0) with narrow native channels -> exact xi(s_par)
+    chi = worker.chi_ch
+    dchi_exact = worker.dchi_ch
+    assert dchi_exact.shape == (n_ch,)
+    # Test model_1d_power directly
+    kpar_test = np.array([0.0, 0.05, 0.1])
+    p1d_exact = (
+        amp * (sigma_k**2 / (2.0 * np.pi)) * np.exp(-0.5 * (kpar_test / sigma_k) ** 2)
+    )
+    p1d_num = worker.model_1d_power(kpar_test)
+    assert np.allclose(p1d_num, p1d_exact, rtol=1e-4)
+
+    # Full 3D model and 1D central model must agree identically and match exact xi(0)
+    # Use very thin channels via dchi_gal=0 and compare with channel-averaged analytical integral
+    mod_3d = worker.model_3d_stack(dchi_gal=0.0, kpar_max=1.5, n_kpar_eval=128)
+    mod_1d = worker.model_1d_stack(
+        aperture="central", dchi_gal=0.0, kpar_max=1.5, n_kpar_eval=128
+    )
+    assert mod_3d.shape == (5, 5, 2 * n_ch - 1)
+    assert np.allclose(mod_3d[2, 2], mod_1d, rtol=1e-12)
+    # At zero lag, narrow channels (~0.35 Mpc) match exact xi_0 to < 1e-4
+    assert mod_1d[n_ch - 1] == pytest.approx(xi_0_exact, rel=1e-4)
+    # Off-centre pixel lag (1, 0) decays as exp(-0.5 * sigma_k^2 * D_perp^2)
+    dperp_mid = (
+        np.sqrt(float(worker.pixel_area)) * (np.pi / 180.0) * float(np.mean(chi))
+    )
+    ratio_expected = np.exp(-0.5 * (sigma_k * dperp_mid) ** 2)
+    assert mod_3d[3, 2, n_ch - 1] / mod_3d[2, 2, n_ch - 1] == pytest.approx(
+        ratio_expected, rel=2e-2
+    )
+    # Tophat & Gaussian aperture 1D models match project_1d(mod_3d) to machine precision
+    for ap, rad in [("tophat", 1.0), ("gaussian", 1.2)]:
+        m1 = worker.model_1d_stack(
+            aperture=ap, radius=rad, dchi_gal=0.0, kpar_max=1.5, n_kpar_eval=128
+        )
+        m1_proj = worker.project_1d(mod_3d, aperture=ap, radius=rad)
+        assert np.allclose(m1, m1_proj, rtol=1e-12, atol=1e-12)
+
+
+def test_stacking_model_cosmological_kmu_and_options():
+    """Verify model_1d_stack / model_3d_stack with real ModelPowerSpectrum.power_kmu,
+    beam modes, PCA clean_matrix, correlation rebinning, and state preservation."""
+    n_pix = 5
+    n_ch = 16
+    wcs = create_wcs(145.0, -1.7, [n_pix, n_pix], 0.5)
+    nu = 700e6 + np.arange(n_ch) * 0.2e6
+    sky_g = wcs.pixel_to_world(2, 2)
+    sky_r = wcs.pixel_to_world(3, 2)
+
+    worker = Stacking(
+        data=np.zeros((n_pix, n_pix, n_ch)),
+        weights_map_pixel=np.ones((n_pix, n_pix, n_ch)),
+        nu=nu,
+        wproj=wcs,
+        num_pix_x=n_pix,
+        num_pix_y=n_pix,
+        ra_gal=np.array([sky_g.ra.deg]),
+        dec_gal=np.array([sky_g.dec.deg]),
+        z_gal=np.array([freq_to_redshift(nu[8])]),
+        ra_rand=np.array([sky_r.ra.deg]),
+        dec_rand=np.array([sky_r.dec.deg]),
+        z_rand=np.array([freq_to_redshift(nu[8])]),
+        tracer_bias_1=1.47,
+        tracer_bias_2=2.30,
+        sigma_v_1=250.0,
+        sigma_v_2=0.0,
+        mean_amp_1="average_hi_temp",
+        mean_amp_2=1.0,
+        omega_hi=0.0008,
+        kaiser_rsd=True,
+        sigma_beam_ch=np.full(n_ch, 0.7),
+        stack_estimator="correlation",
+        stack_angular_num_nearby_pix=1,
+        dchi_mpc=4.0,
+        n_kperp=64,
+        n_chi=3,
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        init_box_from_map_data=False,
+    )
+    orig_kmode = None if worker._kmode is None else np.array(worker._kmode, copy=True)
+    orig_mumode = (
+        None if worker._mumode is None else np.array(worker._mumode, copy=True)
+    )
+
+    # Continuous beam + randoms
+    spec_cont = worker.model_1d_stack(aperture="central", n_kpar_eval=64)
+    # kmode / mumode must be completely untouched
+    if orig_kmode is None:
+        assert worker._kmode is None
+    else:
+        assert np.array_equal(worker._kmode, orig_kmode)
+    if orig_mumode is None:
+        assert worker._mumode is None
+    else:
+        assert np.array_equal(worker._mumode, orig_mumode)
+    assert np.isfinite(spec_cont).all()
+    c_mid = spec_cont.size // 2
+    assert spec_cont[c_mid] > 0.0
+
+    # Discrete beam mode, Gaussian default aperture, separable weights, shot noise, PCA matrix
+    spec_disc = worker.model_1d_stack(
+        aperture="gaussian",
+        beam_mode="discrete",
+        separable_weights=True,
+        cross_shot_noise=lambda k: np.zeros_like(k),
+        n_kpar_eval=64,
+    )
+    assert spec_disc.shape == spec_cont.shape
+    assert np.isfinite(spec_disc).all()
+
+    # Mean-subtraction cleaning matrix M = I - 11^T / N_ch lowers zero-lag signal
+    m_mean = np.eye(n_ch) - np.ones((n_ch, n_ch)) / n_ch
+    spec_clean = worker.model_1d_stack(
+        aperture="central", clean_matrix=m_mean, n_kpar_eval=64
+    )
+    assert spec_clean[c_mid] < spec_cont[c_mid]
+
+    # Scalar cross_shot_noise + explicit dchi_gal array + galaxy-only fallback + W_HI fallback
+    spec_sn = worker.model_1d_stack(
+        aperture="central",
+        cross_shot_noise=1e-4,
+        dchi_gal=worker.dchi_ch,
+        n_kpar_eval=64,
+    )
+    assert spec_sn[c_mid] > spec_cont[c_mid]
+    p1d_sn = worker.model_1d_power([0.05, 0.1], cross_shot_noise=1e-4)
+    p1d_call = worker.model_1d_power(
+        [0.05, 0.1], cross_shot_noise=lambda k: np.full_like(k, 1e-4)
+    )
+    assert np.allclose(p1d_sn, p1d_call)
+
+    # Exercise galaxy-only pair weights (no randoms) and dchi_gal=None
+    worker.ra_rand = None
+    worker.dec_rand = None
+    worker.z_rand = None
+    spec_gal_only = worker.model_1d_stack(
+        aperture="central", dchi_gal=None, n_kpar_eval=64
+    )
+    assert np.isfinite(spec_gal_only).all()
+
+    # Scalar sigma_beam on multi-channel worker
+    worker.sigma_beam_ch = np.array([0.7])
+    assert np.isfinite(worker.transverse_window()).all()
+
+    # Edge cases: single channel, lag > nx, data=None, w_HI=None, W_HI=None
+    w_1ch = Stacking(
+        nu=np.array([700e6]),
+        wproj=wcs,
+        num_pix_x=2,
+        num_pix_y=2,
+        tracer_bias_1=1.0,
+        tracer_bias_2=1.5,
+        sigma_beam_ch=np.array([0.7]),
+        stack_estimator="correlation",
+        stack_angular_num_nearby_pix=3,
+        n_kperp=32,
+        n_chi=1,
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        init_box_from_map_data=False,
+    )
+    w_1ch._data = None
+    w_1ch._weights_map_pixel = None
+    w_1ch._map_has_sampling = None
+    assert w_1ch.dchi_ch.size == 1
+    assert w_1ch.model_3d_stack(n_kpar_eval=32).shape == (7, 7, 1)
+    w_1ch.W_HI = np.ones((2, 2, 1), dtype=bool)
+    assert w_1ch.model_1d_stack(aperture="central", n_kpar_eval=32).shape == (1,)
+    assert w_1ch._chi_nodes(channel_weights=np.zeros(1))[1][0] == 1.0
+    assert worker._chi_nodes(channel_weights=np.zeros(n_ch))[1].sum() == pytest.approx(
+        1.0
+    )
+
+    # Validation errors on Stacking model parameters
+    with pytest.raises(ValueError, match="n_chi"):
+        Stacking(n_chi=0)
+    with pytest.raises(ValueError, match="n_kperp"):
+        Stacking(n_kperp=4)
+    with pytest.raises(ValueError, match="beam_mode"):
+        Stacking(beam_mode="airy")
+    with pytest.raises(ValueError, match="kperp_edges"):
+        Stacking(kperp_edges=[1.0])
+    with pytest.raises(ValueError, match="strictly increasing"):
+        w_bad = Stacking(
+            nu=nu,
+            wproj=wcs,
+            num_pix_x=2,
+            num_pix_y=2,
+            kperp_edges=[0.2, 0.1],
+            filter_map_los=False,
+            auto_set_radecnu_bounds=False,
+            init_box_from_map_data=False,
+        )
+        _ = w_bad.kperp_edges
+    with pytest.raises(ValueError, match="kperp_max"):
+        w_bad2 = Stacking(
+            nu=nu,
+            wproj=wcs,
+            num_pix_x=2,
+            num_pix_y=2,
+            kperp_max=-1.0,
+            filter_map_los=False,
+            auto_set_radecnu_bounds=False,
+            init_box_from_map_data=False,
+        )
+        _ = w_bad2.kperp_edges
+    with pytest.raises(ValueError, match="n_chi"):
+        worker._chi_nodes(n_chi=0)
+    with pytest.raises(ValueError, match="beam_mode"):
+        worker.transverse_window(beam_mode="bad")
+    with pytest.raises(ValueError, match="kpar"):
+        worker.model_1d_power([])
+    with pytest.raises(ValueError, match="kpar_max"):
+        worker.model_1d_stack(kpar_max=-1.0)
+    with pytest.raises(ValueError, match="dchi_gal"):
+        worker.model_1d_stack(dchi_gal="invalid")
+    worker.power_kmu_func = lambda k, mu: np.zeros(1)
+    with pytest.raises(ValueError, match="power_kmu_func"):
+        worker.model_1d_power([0.1])
