@@ -13,6 +13,12 @@ dev
 * add ``periodic_hann`` and ``taper_values``
 * field-level Kaiser RSD uses the local plane-parallel operator
   :math:`f\,\hat n_i\hat n_j\partial_i u_j`
+* replace the power-law negative-density remapping in
+  ``MockSimulation.get_mock_tracer_position_in_box`` with
+  ``positive_density_for_poisson`` (controlled by
+  ``MockSimulation.negative_density_handling="rescale"`` or ``"clip"`` and
+  reported via ``last_negative_density_info``), preventing clustering amplitude
+  blowup under nonlinear high-bias ``rsd_from_field=True`` mocks
 
 Fixes
 +++++
