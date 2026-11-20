@@ -21,6 +21,7 @@ __all__ = [
     "DiscreteShellWindowMatrix",
     "LineOfSightPowerSpectrum",
     "RadialTransferFunction",
+    "Stacking",
 ]
 
 
@@ -37,6 +38,7 @@ _LAZY_ATTRS = {
     ),
     "LineOfSightPowerSpectrum": ("meer21cm.los", "LineOfSightPowerSpectrum"),
     "RadialTransferFunction": ("meer21cm.transfer", "RadialTransferFunction"),
+    "Stacking": ("meer21cm.stack", "Stacking"),
 }
 
 

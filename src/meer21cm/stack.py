@@ -1,5 +1,12 @@
+import logging
+
 import numpy as np
-from .util import radec_to_indx, find_ch_id, redshift_to_freq
+
+from .grid import project_particle_to_regular_grid
+from .power import PowerSpectrum
+from .util import find_ch_id, radec_to_indx, redshift_to_freq
+
+logger = logging.getLogger(__name__)
 
 
 def stack_cubelet(
@@ -338,3 +345,428 @@ def sum_3d_stack(stack_3D_map, vel_ch_avg=5, ang_sum_dist=3.0):
     ].sum(axis=-1)
     spectral_stack_map = stack_3D_map[pix_sel].sum(axis=0)
     return angular_stack_map, spectral_stack_map
+
+
+def sky_mesh_positions(ra, dec, z, wproj, nu, shape, centre_pixels=True):
+    """
+    Mesh coordinates of galaxies that land inside a WCS map cube.
+
+    ``radec_to_indx(..., to_int=False)`` supplies the continuous WCS
+    coordinate. Astropy pixel ``i`` is centred at ``i``. Mesh cell ``i``
+    covers ``[i, i + 1)``, so ``centre_pixels`` adds half a cell and the
+    pixel centre falls on the mesh-cell centre. The channel coordinate is
+    the centre of the channel from :func:`meer21cm.util.find_ch_id`.
+
+    Parameters
+    ----------
+        ra, dec, z: arrays.
+            Galaxy coordinates. ``z`` is the redshift.
+        wproj: :class:`astropy.wcs.WCS`
+            The map WCS.
+        nu: array.
+            Channel frequencies in Hz, monotonically increasing.
+        shape: tuple of int.
+            ``(n_ra, n_dec, n_ch)`` of the map cube.
+        centre_pixels: bool, default True.
+            Add half a cell to the angular WCS coordinate.
+
+    Returns
+    -------
+        positions: array, shape ``(n_inside, 3)``.
+            Mesh coordinates ``(i + shift, j + shift, channel + 0.5)``.
+        inside: bool array.
+            Mask of the input galaxies that were kept.
+    """
+    channel = find_ch_id(redshift_to_freq(np.asarray(z, dtype=float)), nu)
+    ix, iy = radec_to_indx(np.asarray(ra), np.asarray(dec), wproj, to_int=False)
+    shift = 0.5 if centre_pixels else 0.0
+    inside = (
+        (channel >= 0)
+        & (channel < shape[2])
+        & (ix >= 0)
+        & (ix < shape[0])
+        & (iy >= 0)
+        & (iy < shape[1])
+    )
+    positions = np.column_stack(
+        [
+            np.asarray(ix, dtype=float)[inside] + shift,
+            np.asarray(iy, dtype=float)[inside] + shift,
+            np.asarray(channel, dtype=float)[inside] + 0.5,
+        ]
+    )
+    return positions, np.asarray(inside, dtype=bool)
+
+
+def paint_sky_counts(positions, shape, mass=None):
+    """
+    Nearest-grid deposit of galaxy weights onto the map mesh.
+
+    ``average=False``, so two galaxies in one voxel add. Mesh cell ``i``
+    covers ``[i, i + 1)``.
+
+    Parameters
+    ----------
+        positions: array, shape ``(n, 3)``.
+            Mesh coordinates.
+        shape: tuple of int.
+            Mesh shape.
+        mass: array, optional.
+            Per-galaxy weight. Uniform weights if omitted.
+
+    Returns
+    -------
+        counts: array.
+            Painted weights, shape ``shape``.
+    """
+    positions = np.asarray(positions, dtype=float)
+    painted = np.zeros(shape, dtype=float)
+    if positions.size == 0:
+        return painted
+    if mass is None:
+        mass = np.ones(positions.shape[0], dtype=float)
+    mesh, _weights, _counts = project_particle_to_regular_grid(
+        positions,
+        np.asarray(shape, dtype=float),
+        np.asarray(shape, dtype=int),
+        grid_scheme="nnb",
+        particle_mass=np.asarray(mass, dtype=float),
+        average=False,
+        compensate=False,
+    )
+    painted[...] = np.asarray(mesh, dtype=float)
+    return painted
+
+
+def rebin_sightlines(weighted, weight, counts, chi, dchi):
+    """
+    Sum map sightlines into uniform comoving bins.
+
+    ``weighted`` is :math:`w_L L` and ``weight`` is :math:`w_L`. Both are
+    summed over the native channels that fall in each bin. Galaxy counts
+    are summed, so the number of galaxies is unchanged.
+
+    Parameters
+    ----------
+        weighted, weight, counts: arrays.
+            Map cubes, channel axis last. ``chi`` is one comoving distance
+            per channel, in Mpc.
+        chi: array.
+            Comoving distance of each channel, in Mpc.
+        dchi: float.
+            Bin width in Mpc.
+
+    Returns
+    -------
+        weighted, weight, counts: arrays.
+            Rebinned cubes.
+        centres: array.
+            Comoving centre of each bin, in Mpc.
+    """
+    order = np.argsort(np.asarray(chi, dtype=float))
+    chi_s = np.asarray(chi, dtype=float)[order]
+    edges = np.arange(chi_s[0], chi_s[-1] + 0.5 * dchi, dchi)
+    if edges.size == 0 or edges[-1] <= chi_s[-1]:
+        edges = np.append(edges, (chi_s[0] if edges.size == 0 else edges[-1]) + dchi)
+    which = np.clip(np.digitize(chi_s, edges) - 1, 0, edges.size - 2)
+    nbin = edges.size - 1
+    weighted = np.asarray(weighted, dtype=float)[..., order]
+    weight = np.asarray(weight, dtype=float)[..., order]
+    counts = np.asarray(counts, dtype=float)[..., order]
+    out_w = np.zeros(weighted.shape[:2] + (nbin,))
+    out_wt = np.zeros_like(out_w)
+    out_n = np.zeros_like(out_w)
+    for bin_id in range(nbin):
+        sel = np.flatnonzero(which == bin_id)
+        if sel.size == 0:
+            continue
+        out_w[..., bin_id] = weighted[..., sel].sum(axis=-1)
+        out_wt[..., bin_id] = weight[..., sel].sum(axis=-1)
+        out_n[..., bin_id] = counts[..., sel].sum(axis=-1)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    return out_w, out_wt, out_n, centres
+
+
+def linear_correlation(field, weight, n_nearby):
+    """
+    ``sum_x field[x + s] weight[x]`` on the cubelet lags.
+
+    Zero-padding makes the real FFT a linear correlation. Negative lags
+    sit at the wrapped end of the padded axis.
+
+    Parameters
+    ----------
+        field, weight: arrays.
+            Same shape. ``weight`` is the galaxy field for a stack.
+        n_nearby: int.
+            Angular lags kept on each side of zero. The line-of-sight axis
+            is kept in full, from ``-(N-1)`` to ``N-1``.
+
+    Returns
+    -------
+        correlated: array.
+            Shape ``(2 n_nearby + 1, 2 n_nearby + 1, 2 N_los - 1)``.
+    """
+    nx, ny, nz = field.shape
+    padded = (nx + n_nearby, ny + n_nearby, 2 * nz - 1)
+    field_pad = np.zeros(padded, dtype=float)
+    weight_pad = np.zeros(padded, dtype=float)
+    field_pad[:nx, :ny, :nz] = field
+    weight_pad[:nx, :ny, :nz] = weight
+    axes = (0, 1, 2)
+    correlated = np.fft.irfftn(
+        np.fft.rfftn(field_pad, axes=axes)
+        * np.conj(np.fft.rfftn(weight_pad, axes=axes)),
+        s=padded,
+        axes=axes,
+    )
+    di = np.arange(-n_nearby, n_nearby + 1)
+    dj = np.arange(-n_nearby, n_nearby + 1)
+    dc = np.arange(-(nz - 1), nz)
+    return correlated[
+        di[:, None, None] % padded[0],
+        dj[None, :, None] % padded[1],
+        dc[None, None, :] % padded[2],
+    ]
+
+
+def _divide_cubelet(numerator, denominator):
+    """Ratio of two cubelets. Empty lags stay zero."""
+    stacked = np.zeros_like(numerator)
+    scale = np.max(np.abs(denominator))
+    hit = np.abs(denominator) > (0.0 if scale == 0.0 else 1e-8 * scale)
+    stacked[hit] = numerator[hit] / denominator[hit]
+    return stacked
+
+
+def correlate_cubelet(weighted_map, weight, galaxy, n_nearby):
+    """
+    Conventional cubelet from a painted galaxy field.
+
+    The numerator correlates :math:`w_L L` with the galaxy field. The
+    denominator correlates :math:`w_L` with the galaxy field.
+
+    Parameters
+    ----------
+        weighted_map: array.
+            :math:`w_L L` on the map mesh.
+        weight: array.
+            :math:`w_L` on the map mesh.
+        galaxy: array.
+            Painted galaxy weights.
+        n_nearby: int.
+            Angular lags on each side of the centre pixel.
+
+    Returns
+    -------
+        cubelet, cubelet_weight: arrays.
+            Normalised stack and the denominator.
+    """
+    numerator = linear_correlation(weighted_map, galaxy, n_nearby)
+    denominator = linear_correlation(weight, galaxy, n_nearby)
+    return _divide_cubelet(numerator, denominator), denominator
+
+
+class Stacking(PowerSpectrum):
+    r"""
+    Galaxy--intensity stacking on a map cube.
+
+    ``stack_estimator='loop'`` calls :func:`stack`, which samples each
+    galaxy on the native channels. ``stack_estimator='correlation'`` paints
+    the weighted galaxy counts on the map mesh, sums the sightlines into
+    uniform comoving bins, and estimates the same conventional cubelet
+    with a linear real FFT. The galaxy field is the weighted counts.
+
+    The sky stack does not use the survey enclosing box.
+
+    Parameters
+    ----------
+        stack_estimator: ``{'loop', 'correlation'}``, default ``'loop'``.
+            Which measurement to run.
+        stack_angular_num_nearby_pix: int, default 4.
+            Map pixels kept on each side of the centre. ``4`` is a 9×9 cubelet.
+        stack_weighting: ``{'conventional', 'quadratic'}``, default ``'conventional'``.
+            Passed to :func:`stack`. The correlation estimator uses
+            conventional weighting.
+        symmetrize: bool, default False.
+            Mirror the loop cubelet about zero frequency separation.
+        dchi_mpc: float, default 4.
+            Comoving width, in Mpc, of the line-of-sight sum used by the
+            correlation estimator.
+        centre_pixels: bool, default True.
+            Add half a cell before the nearest-grid deposit, matching the
+            lightcone paint of a WCS pixel.
+        ra_gal, dec_gal, z_gal: arrays, optional.
+            Galaxy catalogue. Stored on the worker.
+        weights_gal: array, optional.
+            Per-galaxy weights. ``None`` is unit weight.
+        **params:
+            Passed to :class:`meer21cm.power.PowerSpectrum`. ``data`` and
+            ``weights_map_pixel`` are the intensity map and :math:`w_L`.
+    """
+
+    def __init__(
+        self,
+        stack_estimator="loop",
+        stack_angular_num_nearby_pix=4,
+        stack_weighting="conventional",
+        symmetrize=False,
+        dchi_mpc=4.0,
+        centre_pixels=True,
+        ra_gal=None,
+        dec_gal=None,
+        z_gal=None,
+        weights_gal=None,
+        **params,
+    ):
+        if stack_estimator not in ("loop", "correlation"):
+            raise ValueError(
+                "stack_estimator must be 'loop' or 'correlation', "
+                f"got {stack_estimator!r}"
+            )
+        if stack_weighting not in ("conventional", "quadratic"):
+            raise ValueError(
+                "stack_weighting must be 'conventional' or 'quadratic', "
+                f"got {stack_weighting!r}"
+            )
+        if dchi_mpc <= 0:
+            raise ValueError("dchi_mpc must be positive")
+        super().__init__(**params)
+        self.stack_estimator = stack_estimator
+        self.stack_angular_num_nearby_pix = int(stack_angular_num_nearby_pix)
+        self.stack_weighting = stack_weighting
+        self.symmetrize = bool(symmetrize)
+        self.dchi_mpc = float(dchi_mpc)
+        self.centre_pixels = bool(centre_pixels)
+        self._stack_3d = None
+        self._stack_weight = None
+        self.n_gal_stacked = 0
+        if ra_gal is not None:
+            self._ra_gal = np.asarray(ra_gal)
+            self._dec_gal = np.asarray(dec_gal)
+            self._z_gal = np.asarray(z_gal, dtype=float)
+        if weights_gal is not None:
+            self.weights_gal = weights_gal
+
+    @property
+    def stack_3d(self):
+        """
+        Normalised cubelet from the last :meth:`run_stack`.
+
+        Returns ``None`` if :meth:`run_stack` has not been called.
+        """
+        if self._stack_3d is None:
+            logger.warning("stack_3d is unset; call run_stack() first")
+            return None
+        return self._stack_3d
+
+    @property
+    def stack_weight(self):
+        """
+        Cubelet weight from the last :meth:`run_stack`.
+
+        Conventional weighting stores :math:`\\sum_i w^{\\rm gal}_i w_L`
+        at each lag. Returns ``None`` if :meth:`run_stack` has not been called.
+        """
+        if self._stack_weight is None:
+            logger.warning("stack_weight is unset; call run_stack() first")
+            return None
+        return self._stack_weight
+
+    def channel_chi_mpc(self):
+        """
+        Comoving distance of each frequency channel, in Mpc.
+
+        Uses the fiducial cosmology.
+        """
+        distance = self.astropy_cosmo_fiducial.comoving_distance(self.z_ch)
+        return np.asarray(distance.to("Mpc").value, dtype=float)
+
+    def run_stack(self):
+        """
+        Measure the cubelet with the selected estimator.
+
+        Returns
+        -------
+            stack_3d, stack_weight: arrays.
+                Normalised cubelet and its weight.
+        """
+        if self.stack_estimator == "loop":
+            cube, weight = stack(
+                self,
+                weights_gal=self.weights_gal,
+                weighting=self.stack_weighting,
+                stack_angular_num_nearby_pix=self.stack_angular_num_nearby_pix,
+                symmetrize=self.symmetrize,
+            )
+            self.n_gal_stacked = int(np.size(self.ra_gal))
+        elif self.stack_estimator == "correlation":
+            if self.stack_weighting != "conventional":
+                raise ValueError(
+                    "the correlation estimator uses conventional weighting"
+                )
+            if self.symmetrize:
+                raise ValueError(
+                    "the correlation estimator does not symmetrize the cubelet"
+                )
+            cube, weight = self._correlation_stack()
+        else:
+            raise ValueError(
+                "stack_estimator must be 'loop' or 'correlation', "
+                f"got {self.stack_estimator!r}"
+            )
+        self._stack_3d = cube
+        self._stack_weight = weight
+        return cube, weight
+
+    def _correlation_stack(self):
+        """Paint, rebin, and correlate. The galaxy field is the weighted counts."""
+        try:
+            ra = self.ra_gal
+            dec = self.dec_gal
+            redshift = self.z_gal
+        except AttributeError as err:
+            raise ValueError("ra_gal, dec_gal and z_gal are required") from err
+        positions, inside = sky_mesh_positions(
+            ra,
+            dec,
+            redshift,
+            self.wproj,
+            self.nu,
+            self.data.shape,
+            centre_pixels=self.centre_pixels,
+        )
+        if self.weights_gal is None:
+            mass = np.ones(int(np.size(ra)), dtype=float)[inside]
+        else:
+            mass = np.asarray(self.weights_gal, dtype=float)[inside]
+        self.n_gal_stacked = int(inside.sum())
+        counts = paint_sky_counts(positions, self.data.shape, mass=mass)
+        weighted, weight, counts_b, _centres = rebin_sightlines(
+            np.asarray(self.w_HI, dtype=float) * np.asarray(self.data, dtype=float),
+            np.asarray(self.w_HI, dtype=float),
+            counts,
+            self.channel_chi_mpc(),
+            self.dchi_mpc,
+        )
+        return correlate_cubelet(
+            weighted,
+            weight,
+            counts_b,
+            self.stack_angular_num_nearby_pix,
+        )
+
+    def model_1d_stack(self):
+        """
+        One-dimensional stacked spectrum.
+
+        The spectrum is the inverse Fourier transform, along the line of
+        sight, of the transverse integral of the galaxy--intensity
+        cross-power, including the pixel, beam, and radial windows.
+
+        Raises
+        ------
+        NotImplementedError
+            The integral is not available.
+        """
+        raise NotImplementedError("model_1d_stack is not implemented")
