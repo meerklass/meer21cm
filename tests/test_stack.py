@@ -1,9 +1,12 @@
 import numpy as np
 from meer21cm.stack import (
     Stacking,
+    aperture_weights_2d,
+    comoving_bin_indices,
     correlate_cubelet,
     data_and_fkp_cubelets,
     paint_sky_counts,
+    rebin_cube,
     rebin_sightlines,
     sky_mesh_positions,
     stack,
@@ -777,6 +780,20 @@ def test_stacking_rejects_inconsistent_settings():
         Stacking(stack_weighting="nope")
     with pytest.raises(ValueError):
         Stacking(dchi_mpc=0.0)
+    with pytest.raises(ValueError):
+        Stacking(stack_angular_num_nearby_pix=-1)
+    with pytest.raises(ValueError, match="provided together"):
+        Stacking(ra_gal=[1.0], dec_gal=[0.0])
+    with pytest.raises(ValueError, match="without"):
+        Stacking(weights_gal=[1.0])
+    with pytest.raises(ValueError, match="equal length"):
+        Stacking(ra_gal=[1.0, 2.0], dec_gal=[0.0], z_gal=[0.5, 0.6])
+    with pytest.raises(ValueError, match="same length"):
+        Stacking(ra_gal=[1.0], dec_gal=[0.0], z_gal=[0.5], weights_gal=[1.0, 2.0])
+    with pytest.raises(ValueError, match="provided together"):
+        Stacking(ra_rand=[1.0])
+    with pytest.raises(ValueError, match="without"):
+        Stacking(weights_rand=[1.0])
     n_pix = 4
     wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
     nu = np.linspace(700e6, 704e6, 2)
@@ -794,14 +811,17 @@ def test_stacking_rejects_inconsistent_settings():
         wcs,
         "correlation",
     )
-    worker.stack_weighting = "quadratic"
-    with pytest.raises(ValueError):
+    worker.stack_weighting = "bad"
+    with pytest.raises(ValueError, match="stack_weighting"):
         worker.run_stack()
     worker.stack_weighting = "conventional"
-    worker.symmetrize = True
-    with pytest.raises(ValueError):
+    worker._ra_gal = None
+    with pytest.raises(ValueError, match="provided together"):
         worker.run_stack()
-    worker.symmetrize = False
+    worker._dec_gal = None
+    worker._z_gal = None
+    with pytest.raises(ValueError, match="ra_gal"):
+        worker.run_stack()
     del worker._ra_gal
     with pytest.raises(ValueError, match="ra_gal"):
         worker.run_stack()
@@ -929,3 +949,322 @@ def test_stacking_fkp_matches_the_data_stack_on_a_spike():
     worker.stack_estimator = "loop"
     with pytest.raises(ValueError, match="randoms"):
         worker.run_stack()
+
+
+def test_stack_cubelet_zero_nearby_and_negative_channel():
+    """stack_cubelet supports n_nearby=0 and rejects negative channel/pad."""
+    cube = np.arange(2 * 2 * 3, dtype=float).reshape(2, 2, 3)
+    weight = np.ones_like(cube)
+    out, wt = stack_cubelet(
+        cube,
+        weight,
+        [1],
+        [0],
+        [1],
+        stack_angular_num_nearby_pix=0,
+    )
+    assert out.shape == (1, 1, 5)
+    assert np.allclose(out[0, 0, 1:4], cube[1, 0, :])
+    assert np.allclose(wt[0, 0, 1:4], 1.0)
+    with pytest.raises(ValueError, match="non-negative"):
+        stack_cubelet(cube, weight, [0], [0], [0], stack_angular_num_nearby_pix=-1)
+    with pytest.raises(ValueError, match="outside"):
+        stack_cubelet(cube, weight, [0], [0], [-1], stack_angular_num_nearby_pix=0)
+
+
+def test_comoving_bin_indices_and_rebin_cube():
+    with pytest.raises(ValueError, match="dchi"):
+        comoving_bin_indices([1.0, 2.0], 0.0)
+    with pytest.raises(ValueError, match="non-empty"):
+        comoving_bin_indices([], 1.0)
+    chi_desc = np.array([12.0, 8.0, 4.0, 0.0])
+    cube = np.arange(4, dtype=float).reshape(1, 1, 4)
+    rebinned, centres = rebin_cube(cube, chi_desc, 4.0)
+    # Sorted ascending in chi -> reverses native channel order
+    assert np.allclose(rebinned[0, 0], [3.0, 2.0, 1.0, 0.0])
+    assert np.allclose(centres, [2.0, 6.0, 10.0, 14.0])
+
+
+def test_loop_vs_correlation_los_sign_on_descending_chi():
+    """Physical ascending nu -> descending chi flips the LOS lag axis between loop and correlation."""
+    n_pix = 5
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 712e6, 4)
+    sky = wcs.pixel_to_world(2, 2)
+    ra = np.array([sky.ra.deg])
+    dec = np.array([sky.dec.deg])
+    # Galaxy at channel 1 (higher chi), signal spike at channel 2 (higher nu, lower chi)
+    z = np.array([freq_to_redshift(nu[1])])
+    temp = np.zeros((n_pix, n_pix, 4))
+    temp[2, 2, 2] = 5.0
+    wt = np.ones_like(temp)
+
+    w_loop = _tiny_worker(temp, wt, ra, dec, z, nu, wcs, "loop")
+    loop_cube, _ = w_loop.run_stack()
+    assert w_loop.s_parallel_mpc is None
+    assert w_loop.bin_chi_centres is None
+
+    # Use native channel spacing so each channel stays in its own bin in ascending chi
+    w_corr = _tiny_worker(temp, wt, ra, dec, z, nu, wcs, "correlation")
+    chi = w_corr.channel_chi_mpc()
+    assert np.all(np.diff(chi) < 0)
+    w_corr.dchi_mpc = float(np.min(np.abs(np.diff(chi))) * 0.99)
+    corr_cube, _ = w_corr.run_stack()
+
+    mid = 1
+    loop_c = loop_cube.shape[-1] // 2
+    corr_c = corr_cube.shape[-1] // 2
+    # In loop (+delta_nu), spike at ch=2 vs gal ch=1 sits at +1 lag
+    assert loop_cube[mid, mid, loop_c + 1] == pytest.approx(5.0)
+    # In correlation (+delta_chi), ch=2 has smaller chi than ch=1 -> negative s_parallel
+    assert corr_cube[mid, mid, corr_c - 1] == pytest.approx(5.0)
+    assert w_corr.s_parallel_mpc[corr_c - 1] < 0.0
+    assert np.array_equal(w_corr.delta_i, [-1, 0, 1])
+    assert np.array_equal(w_corr.delta_j, [-1, 0, 1])
+    assert w_corr.bin_chi_edges.size == w_corr.bin_chi_centres.size + 1
+    assert w_corr.bin_channel_which.size == nu.size
+
+
+@pytest.mark.parametrize("weighting", ["conventional", "quadratic"])
+@pytest.mark.parametrize("symmetrize", [False, True])
+def test_correlation_weighting_and_symmetrize_match_loop(weighting, symmetrize):
+    """Correlation matches loop for both conventional/quadratic and symmetrize=False/True."""
+    n_pix = 5
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 712e6, 4)
+    rng = np.random.default_rng(12)
+    temp = rng.normal(0.0, 1.0, size=(n_pix, n_pix, 4))
+    wt = rng.uniform(0.5, 2.0, size=(n_pix, n_pix, 4))
+    pixels = [(2, 2, 1), (3, 1, 2), (2, 2, 1)]
+    sky = [wcs.pixel_to_world(i, j) for i, j, _ in pixels]
+    ra = np.array([s.ra.deg for s in sky])
+    dec = np.array([s.dec.deg for s in sky])
+    z = np.array([freq_to_redshift(nu[c]) for _, _, c in pixels])
+    w_gal = np.array([1.0, 2.5, 0.5])
+
+    w_loop = _tiny_worker(temp, wt, ra, dec, z, nu, wcs, "loop")
+    w_loop.weights_gal = w_gal
+    w_loop.stack_weighting = weighting
+    w_loop.symmetrize = symmetrize
+    c_loop, wt_loop = w_loop.run_stack()
+
+    w_corr = _tiny_worker(temp, wt, ra, dec, z, nu, wcs, "correlation")
+    w_corr.weights_gal = w_gal
+    w_corr.stack_weighting = weighting
+    w_corr.symmetrize = symmetrize
+    _uniform_chi(w_corr)
+    c_corr, wt_corr = w_corr.run_stack()
+
+    assert np.allclose(c_corr, c_loop, rtol=1e-8, atol=1e-8)
+    assert np.allclose(wt_corr, wt_loop, rtol=1e-8, atol=1e-8)
+
+
+def test_quadratic_fkp_and_details_and_stale_reset():
+    """Verify quadratic FKP estimator, exposed random attributes, and stale reset."""
+    with pytest.raises(ValueError, match="weighting"):
+        data_and_fkp_cubelets(
+            np.ones((2, 2, 2)),
+            np.ones((2, 2, 2)),
+            np.ones((2, 2, 2)),
+            0,
+            weighting="bad",
+        )
+    shape = (4, 4, 3)
+    temp = np.full(shape, 3.0)
+    wt = np.ones(shape)
+    d = np.zeros(shape)
+    d[2, 2, 1] = 2.0
+    r = np.zeros(shape)
+    r[2, 2, 1] = 4.0
+    data, fkp, den, alpha, r_stk, r_wt, valid = data_and_fkp_cubelets(
+        wt * temp,
+        wt,
+        d,
+        1,
+        random_counts=r,
+        weighting="quadratic",
+        symmetrize=True,
+        return_details=True,
+    )
+    assert alpha == pytest.approx(0.5)
+    assert data[1, 1, 2] == pytest.approx(3.0)
+    assert r_stk[1, 1, 2] == pytest.approx(3.0)
+    assert np.allclose(fkp, 0.0)
+    assert valid.all()
+    assert r_wt[1, 1, 2] == pytest.approx(8.0)
+
+    # Zero denominator quadratic path
+    data0, fkp0, _d0, _a0, r0, _rw0, v0 = data_and_fkp_cubelets(
+        np.zeros(shape),
+        np.zeros(shape),
+        d,
+        1,
+        random_counts=r,
+        weighting="quadratic",
+        return_details=True,
+    )
+    assert np.all(data0 == 0.0)
+    assert np.all(fkp0 == 0.0)
+    assert np.all(r0 == 0.0)
+    assert not v0.any()
+
+    # Worker exposes stack_rand, stack_rand_weight, stack_valid_mask and resets cleanly
+    n_pix = 5
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 708e6, 3)
+    sky_g = wcs.pixel_to_world(2, 2)
+    sky_r = wcs.pixel_to_world(1, 1)
+    w = _tiny_worker(
+        np.ones((n_pix, n_pix, 3)),
+        np.ones((n_pix, n_pix, 3)),
+        np.array([sky_g.ra.deg]),
+        np.array([sky_g.dec.deg]),
+        np.array([freq_to_redshift(nu[1])]),
+        nu,
+        wcs,
+        "correlation",
+    )
+    _uniform_chi(w)
+    w.ra_rand = np.array([sky_r.ra.deg])
+    w.dec_rand = np.array([sky_r.dec.deg])
+    w.z_rand = np.array([freq_to_redshift(nu[1])])
+    w.run_stack()
+    assert w.stack_rand is not None
+    assert w.stack_rand_weight is not None
+    assert w.stack_valid_mask is not None
+    # Clearing randoms and rerunning clears all random outputs
+    w.ra_rand = None
+    w.dec_rand = None
+    w.z_rand = None
+    w.run_stack()
+    assert w.stack_rand is None
+    assert w.stack_rand_weight is None
+    assert w.stack_valid_mask is None
+    assert w.stack_fkp is None
+    assert w.n_ran_stacked == 0
+
+
+def test_aperture_weights_and_project_1d():
+    with pytest.raises(ValueError, match="non-negative"):
+        aperture_weights_2d(-1)
+    with pytest.raises(ValueError, match="shape"):
+        aperture_weights_2d(1, weights_2d=np.ones((2, 2)))
+    with pytest.raises(ValueError, match="tophat"):
+        aperture_weights_2d(1, aperture="tophat", radius=-1.0)
+    with pytest.raises(ValueError, match="gaussian"):
+        aperture_weights_2d(1, aperture="gaussian", radius=0.0)
+    with pytest.raises(ValueError, match="aperture"):
+        aperture_weights_2d(1, aperture="hexagon")
+    with pytest.raises(ValueError, match="sum to zero"):
+        aperture_weights_2d(1, weights_2d=np.zeros((3, 3)))
+
+    w_c = aperture_weights_2d(2, aperture="central")
+    assert w_c[2, 2] == 1.0 and w_c.sum() == 1.0
+    w_t = aperture_weights_2d(2, aperture="tophat", radius=1.0, normalize=False)
+    assert w_t.sum() == 5.0  # centre + 4 cardinal neighbours
+    w_g = aperture_weights_2d(2, aperture="gaussian", radius=1.5)
+    assert w_g.sum() == pytest.approx(1.0)
+    assert w_g[2, 2] > w_g[2, 3] > w_g[3, 3]
+
+    # Worker project_1d + default beam-matched Gaussian radius
+    n_pix = 5
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 708e6, 3)
+    sky = wcs.pixel_to_world(2, 2)
+    w = _tiny_worker(
+        np.ones((n_pix, n_pix, 3)),
+        np.ones((n_pix, n_pix, 3)),
+        np.array([sky.ra.deg]),
+        np.array([sky.dec.deg]),
+        np.array([freq_to_redshift(nu[1])]),
+        nu,
+        wcs,
+        "correlation",
+    )
+    with pytest.raises(ValueError, match="run_stack"):
+        w.project_1d()
+    with pytest.raises(ValueError, match="shape"):
+        w.project_1d(cubelet=np.ones((2, 2, 3)))
+    _uniform_chi(w)
+    w.run_stack()
+    spec_c = w.project_1d(aperture="central")
+    assert np.allclose(spec_c, w.stack_3d[1, 1])
+    w.sigma_beam_ch = np.full(3, 1.2)  # 1.2 deg on 1 deg pixels -> radius 1.2 pix
+    spec_g = w.project_1d(aperture="gaussian")
+    assert spec_g.shape == (w.stack_3d.shape[-1],)
+    assert w._default_gaussian_aperture_pixels() == pytest.approx(1.2, rel=1e-2)
+    w.sigma_beam_ch = np.zeros(3)
+    assert w._default_gaussian_aperture_pixels() == 1.0
+    w.sigma_beam_ch = None
+    assert w._default_gaussian_aperture_pixels() == 1.0
+
+
+def test_read_rand_cat_and_from_power_spectrum(tmp_path):
+    from astropy.table import Table
+    from meer21cm import PowerSpectrum
+
+    n_pix = 6
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 1.0)
+    nu = np.linspace(700e6, 712e6, 4)
+    sky_in = wcs.pixel_to_world(3, 3)
+    sky_out = wcs.pixel_to_world(3, 3)
+
+    f1 = tmp_path / "ran_0.fits"
+    f2 = tmp_path / "ran_1.fits"
+    Table(
+        {
+            "RA": [sky_in.ra.deg, 10.0],
+            "DEC": [sky_in.dec.deg, -40.0],
+            "Z": [freq_to_redshift(nu[1]), freq_to_redshift(nu[1])],
+            "WEIGHT": [1.5, 2.0],
+        }
+    ).write(f1)
+    Table(
+        {
+            "RA": [sky_out.ra.deg],
+            "DEC": [sky_out.dec.deg],
+            "Z": [freq_to_redshift(nu[2])],
+            "WEIGHT": [3.0],
+        }
+    ).write(f2)
+
+    ps = PowerSpectrum(
+        data=np.ones((n_pix, n_pix, 4)),
+        weights_map_pixel=np.ones((n_pix, n_pix, 4)),
+        nu=nu,
+        wproj=wcs,
+        num_pix_x=n_pix,
+        num_pix_y=n_pix,
+        ra_range=(175.0, 185.0),
+        dec_range=(-5.0, 5.0),
+        tracer_bias_1=1.4,
+        tracer_bias_2=2.2,
+        sigma_v_1=250.0,
+        sigma_v_2=100.0,
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        init_box_from_map_data=False,
+    )
+    ps._ra_gal = np.array([sky_in.ra.deg])
+    ps._dec_gal = np.array([sky_in.dec.deg])
+    ps._z_gal = np.array([freq_to_redshift(nu[1])])
+    ps.weights_gal = np.array([1.0])
+    ps.ra_rand = np.array([sky_in.ra.deg])
+    ps.dec_rand = np.array([sky_in.dec.deg])
+    ps.z_rand = np.array([freq_to_redshift(nu[1])])
+    ps.weights_rand = np.array([1.0])
+
+    worker = Stacking.from_power_spectrum(ps, stack_estimator="correlation")
+    assert worker.tracer_bias_1 == pytest.approx(1.4)
+    assert worker.tracer_bias_2 == pytest.approx(2.2)
+    assert worker.ra_gal.size == 1
+    assert worker.ra_rand.size == 1
+
+    with pytest.raises(ValueError, match="at least one"):
+        worker.read_rand_cat([])
+    n_single = worker.read_rand_cat(f1, weight_col="WEIGHT", trim=True)
+    assert n_single == 1
+    assert worker.weights_rand[0] == pytest.approx(1.5)
+    n_multi = worker.read_rand_cat([f1, f2], weight_col=None, trim=False)
+    assert n_multi == 3
+    assert worker.weights_rand is None

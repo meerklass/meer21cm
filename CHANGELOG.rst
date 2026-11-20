@@ -19,6 +19,13 @@ dev
   ``MockSimulation.negative_density_handling="rescale"`` or ``"clip"`` and
   reported via ``last_negative_density_info``), preventing clustering amplitude
   blowup under nonlinear high-bias ``rsd_from_field=True`` mocks
+* harden ``Stacking`` (``meer21cm.stack``): fix ``stack_cubelet`` edge cases
+  (``n_nearby=0`` and negative channel indices), add single-pass
+  ``comoving_bin_indices`` / ``rebin_cube``, expose ``stack_rand``,
+  ``stack_rand_weight``, ``stack_valid_mask``, ``s_parallel_mpc``, and bin
+  metadata, support ``symmetrize=True`` and ``stack_weighting="quadratic"`` in
+  correlation mode, and add ``read_rand_cat``, ``from_power_spectrum``, and
+  ``project_1d`` / ``aperture_weights_2d``
 
 Fixes
 +++++
