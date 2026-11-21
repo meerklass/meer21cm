@@ -22,6 +22,10 @@ def test_window_helpers_exponents_and_validation():
         beam_window(kperp, 20.0, power=2.0),
         beam_window(kperp, 20.0, power=1.0) ** 2,
     )
+    assert np.allclose(
+        beam_window(kperp, 20.0, power=1.5),
+        beam_window(kperp, 20.0, power=1.0) ** 1.5,
+    )
     with pytest.raises(ValueError, match="power must be non-negative"):
         beam_window(kperp, 20.0, power=-1.0)
 

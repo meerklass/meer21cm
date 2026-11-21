@@ -589,7 +589,7 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
     @property
     def dchi_ch(self) -> NDArray[np.floating]:
         """Comoving width of each channel, in Mpc."""
-        return channel_comoving_widths(self, use_freq_resol=True)
+        return channel_comoving_widths(self)
 
     @property
     def chi_u(self) -> NDArray[np.floating]:

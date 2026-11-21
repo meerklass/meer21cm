@@ -17,7 +17,6 @@ from .grid import project_particle_to_regular_grid
 from .io import read_catalogue_fits
 from .los_model import (
     OneDimPowerModel,
-    _sinc,
     azimuthal_pixel_window,
     beam_window,
     channel_comoving_distances,
@@ -26,6 +25,7 @@ from .los_model import (
     discrete_beam_window,
 )
 from .power import PowerSpectrum
+from .power_ops import step_window_attenuation
 from .util import find_ch_id, radec_to_indx, redshift_to_freq
 
 logger = logging.getLogger(__name__)
@@ -228,11 +228,11 @@ def channel_cross_covariance(
     # Shift chi by its midpoint to keep complex phases well-conditioned.
     chi_rel = chi - 0.5 * (chi.min() + chi.max())
     phase = np.exp(1j * chi_rel[:, None] * kpar_arr[None, :])
-    a_l = _sinc(0.5 * dchi_l[:, None] * kpar_arr[None, :]) * phase
+    a_l = step_window_attenuation(kpar_arr[None, :], dchi_l[:, None], p=1) * phase
     if np.array_equal(dchi_g, dchi_l):
         a_g = a_l
     else:
-        a_g = _sinc(0.5 * dchi_g[:, None] * kpar_arr[None, :]) * phase
+        a_g = step_window_attenuation(kpar_arr[None, :], dchi_g[:, None], p=1) * phase
 
     cov = np.real((a_l * (weights * p1d_arr)[None, :]) @ a_g.conj().T)
     if clean_matrix is not None:
@@ -1620,8 +1620,7 @@ class Stacking(PowerSpectrum):
 
         Uses the fiducial cosmology.
         """
-        distance = self.astropy_cosmo_fiducial.comoving_distance(self.z_ch)
-        return np.asarray(distance.to("Mpc").value, dtype=float)
+        return channel_comoving_distances(self)
 
     def _clear_random_outputs(self):
         """Reset random-catalogue outputs so stale values never leak across runs."""
@@ -1639,7 +1638,7 @@ class Stacking(PowerSpectrum):
             return 1.0
         sigma_arr = np.atleast_1d(np.asarray(sigma_ch, dtype=float))
         sigma_deg = float(np.nanmedian(np.abs(sigma_arr)))
-        pix_deg = float(np.sqrt(self.pixel_area))
+        pix_deg = float(self.pix_resol)
         if not np.isfinite(sigma_deg) or sigma_deg <= 0.0 or pix_deg <= 0.0:
             return 1.0
         return sigma_deg / pix_deg

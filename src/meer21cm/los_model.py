@@ -41,7 +41,8 @@ from typing import Callable
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from .util import center_to_edges, f_21
+from .power_ops import gaussian_beam_attenuation, step_window_attenuation
+from .util import center_to_edges, freq_to_redshift
 
 __all__ = [
     "OneDimPowerModel",
@@ -54,8 +55,6 @@ __all__ = [
     "pixel_window_power",
 ]
 
-_DEG2RAD = np.pi / 180.0
-
 _MODEL_CACHE_ATTRS = (
     "_kmode",
     "_mumode",
@@ -65,11 +64,6 @@ _MODEL_CACHE_ATTRS = (
     "_auto_power_tracer_2_model_noobs",
     "_cross_power_tracer_model_noobs",
 )
-
-
-def _sinc(x: ArrayLike) -> NDArray[np.floating]:
-    r"""Unnormalised cardinal sine :math:`\sin(x)/x` with the ``x -> 0`` limit."""
-    return np.sinc(np.asarray(x, dtype=float) / np.pi)
 
 
 def pixel_window_power(
@@ -96,10 +90,10 @@ def pixel_window_power(
     NDArray[np.floating]
         Squared pixel window with the broadcast shape of ``kx`` and ``ky``.
     """
-    return (
-        _sinc(np.asarray(kx, dtype=float) * float(dperp) / 2.0) ** 2
-        * _sinc(np.asarray(ky, dtype=float) * float(dperp) / 2.0) ** 2
-    )
+    dperp_f = float(dperp)
+    return step_window_attenuation(
+        np.asarray(kx, dtype=float), dperp_f, p=2
+    ) * step_window_attenuation(np.asarray(ky, dtype=float), dperp_f, p=2)
 
 
 def azimuthal_pixel_window(
@@ -157,14 +151,15 @@ def azimuthal_pixel_window(
     if p_val < 0.0:
         raise ValueError(f"pixel_power must be non-negative, got {pixel_power!r}")
     kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
-    u = kperp_arr * dperp_f
     phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
-    ux = u[:, None] * np.cos(phi)[None, :]
-    uy = u[:, None] * np.sin(phi)[None, :]
-    phase = np.cos(int(di) * ux + int(dj) * uy)
+    kx = kperp_arr[:, None] * np.cos(phi)[None, :]
+    ky = kperp_arr[:, None] * np.sin(phi)[None, :]
+    phase = np.cos(dperp_f * (int(di) * kx + int(dj) * ky))
     if p_val == 0.0:
         return phase.mean(axis=1)
-    wpix = _sinc(0.5 * ux) * _sinc(0.5 * uy)
+    wpix = step_window_attenuation(kx, dperp_f, p=1) * step_window_attenuation(
+        ky, dperp_f, p=1
+    )
     if p_val == 2.0:
         wpix = wpix * wpix
     elif p_val != 1.0:
@@ -177,6 +172,8 @@ def beam_window(
 ) -> NDArray[np.floating]:
     r"""
     Continuous isotropic Gaussian dish-beam window :math:`\exp(-\tfrac{p}{2} k_\perp^2 \sigma_B^2)`.
+
+    Built directly on :func:`meer21cm.power_ops.gaussian_beam_attenuation`.
 
     Parameters
     ----------
@@ -202,7 +199,12 @@ def beam_window(
     k_arr = np.asarray(kperp, dtype=float)
     if p_val == 0.0:
         return np.ones_like(k_arr)
-    return np.exp(-0.5 * p_val * (k_arr**2) * float(sigma_b) ** 2)
+    g = gaussian_beam_attenuation(k_arr, float(sigma_b))
+    if p_val == 1.0:
+        return g
+    if p_val == 2.0:
+        return g * g
+    return g**p_val
 
 
 def discrete_beam_window(
@@ -281,10 +283,11 @@ def discrete_beam_window(
     b_pos = b1d[half + 1 :]
 
     kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
-    u = kperp_arr * dperp_f
     phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
-    ux = u[:, None] * np.cos(phi)[None, :]
-    uy = u[:, None] * np.sin(phi)[None, :]
+    kx = kperp_arr[:, None] * np.cos(phi)[None, :]
+    ky = kperp_arr[:, None] * np.sin(phi)[None, :]
+    ux = kx * dperp_f
+    uy = ky * dperp_f
     bx = b0 + 2.0 * np.sum(
         b_pos[None, None, :] * np.cos(ux[:, :, None] * m_pos[None, None, :]),
         axis=-1,
@@ -304,7 +307,9 @@ def discrete_beam_window(
     if pp == 0.0:
         wpix: float | NDArray[np.floating] = 1.0
     else:
-        wpix = _sinc(0.5 * ux) * _sinc(0.5 * uy)
+        wpix = step_window_attenuation(kx, dperp_f, p=1) * step_window_attenuation(
+            ky, dperp_f, p=1
+        )
         if pp == 2.0:
             wpix = wpix * wpix
         elif pp != 1.0:
@@ -321,36 +326,18 @@ def channel_comoving_distances(spec) -> NDArray[np.floating]:
     )
 
 
-def channel_comoving_widths(spec, use_freq_resol: bool = False) -> NDArray[np.floating]:
+def channel_comoving_widths(spec) -> NDArray[np.floating]:
     """Comoving width of each frequency channel, in Mpc (fiducial cosmology).
 
-    Parameters
-    ----------
-    spec : object
-        Specification-like object providing ``nu``, ``astropy_cosmo_fiducial``,
-        and (when ``use_freq_resol=True``) ``freq_resol``.
-    use_freq_resol : bool, default False
-        When True, evaluate channel edges as ``nu +/- 0.5 * freq_resol``
-        (immune to float32 rounding jitter in uniformly spaced channel
-        centres). When False, infer edges from adjacent midpoints via
-        :func:`meer21cm.util.center_to_edges`.
+    Channel frequency edges are derived consistently via
+    :func:`meer21cm.util.center_to_edges` and converted to redshift via
+    :func:`meer21cm.util.freq_to_redshift`.
     """
     nu = np.asarray(spec.nu, dtype=float)
     if nu.size == 1:
         return np.zeros(1, dtype=float)
-    if use_freq_resol:
-        dnu = float(spec.freq_resol)
-        z_hi = f_21 / (nu - 0.5 * dnu) - 1.0
-        z_lo = f_21 / (nu + 0.5 * dnu) - 1.0
-        chi = np.asarray(
-            spec.astropy_cosmo_fiducial.comoving_distance(np.concatenate([z_hi, z_lo]))
-            .to("Mpc")
-            .value,
-            dtype=float,
-        )
-        return np.abs(chi[: nu.size] - chi[nu.size :])
     nu_edges = np.asarray(center_to_edges(nu), dtype=float)
-    z_edges = f_21 / nu_edges - 1.0
+    z_edges = freq_to_redshift(nu_edges)
     chi_edges = np.asarray(
         spec.astropy_cosmo_fiducial.comoving_distance(z_edges).to("Mpc").value,
         dtype=float,
@@ -524,7 +511,7 @@ class OneDimPowerModel:
         edges = self._kperp_edges
         if edges is None:
             chi_ref = float(np.min(self.chi_ch)) if chi_min is None else float(chi_min)
-            dperp_min = np.sqrt(float(self.spec.pixel_area)) * _DEG2RAD * chi_ref
+            dperp_min = np.deg2rad(float(self.spec.pix_resol)) * chi_ref
             kmax = self.kperp_max
             if kmax is None:
                 kmax = 4.0 * np.pi / dperp_min
@@ -662,7 +649,7 @@ class OneDimPowerModel:
         nodes, weights = self.chi_nodes(
             chi_grid=chi_grid, weights=node_weights, n_chi=n_chi
         )
-        theta_pix = np.sqrt(float(self.spec.pixel_area)) * _DEG2RAD
+        theta_pix = np.deg2rad(float(self.spec.pix_resol))
 
         beam_info = self._sorted_beam_mpc() if (use_beam and b_pow > 0.0) else None
 
