@@ -8,6 +8,7 @@ import pickle
 
 import numpy as np
 from scipy.interpolate import interp1d
+from scipy.optimize import brentq
 from astropy.cosmology import Planck18
 from astropy.table import Table
 from numpy.random import default_rng
@@ -32,7 +33,7 @@ from .util import (
     get_nd_slicer,
     real_dtype_from_array,
 )
-from .power import PowerSpectrum, Specification, power_weights_renorm
+from .power import PowerSpectrum, Specification
 from .telescope import weighted_convolution
 from halomod import TracerHaloModel as THM
 import warnings
@@ -70,8 +71,214 @@ def selection_sampling_weight(density_mpc3, box_resol):
     return weight, total
 
 
-class MockSimulation(PowerSpectrum):
+def positive_density_for_poisson(
+    delta,
+    mode="rescale",
+    max_scale=10.0,
+    max_sample=2_000_000,
+):
+    r"""Convert an overdensity contrast :math:`\delta` to a non-negative Poisson rate.
+
+    Additive field-level redshift-space distortions (``rsd_from_field=True``)
+    or Gaussian density fields can produce voxels with :math:`1 + \delta < 0`,
+    which cannot be passed directly to a Poisson sampler. This helper maps
+    :math:`\delta` to a non-negative, unit-mean rate field
+    :math:`\lambda = 1 + \delta_{\rm pos} \ge 0`:
+
+    - ``mode="clip"``: plain truncation
+      :math:`y = \max(1 + \delta, 0)`, :math:`\lambda = y / \langle y \rangle`.
+      Always bounded, but suppresses the clustering amplitude by
+      :math:`\approx (1 + \epsilon)^{-1}` when a significant fraction of voxels
+      are clipped.
+    - ``mode="rescale"``: piecewise-linear pre-clip rescaling
+      :math:`y_a = \max(1 + a\,\delta, 0)`,
+      :math:`\lambda = y_a / \langle y_a \rangle`, with scalar :math:`a \ge 1`
+      chosen so that
+      :math:`\mathrm{Cov}(\delta_{\rm pos}, \delta) = \mathrm{Var}(\delta)`.
+      This preserves the linear clustering amplitude (unbiased cross-correlation
+      and nearly unbiased auto-power) without the nonlinear peak blowup of a
+      power-law remap. Whenever :math:`1 + \delta \ge 0` everywhere, it reduces
+      identically to :math:`a = 1`.
+
+    Parameters
+    ----------
+    delta : array_like
+        Overdensity contrast field (typically zero-mean).
+    mode : {'rescale', 'clip'}, default 'rescale'
+        Strategy for mapping negative :math:`1 + \delta` values.
+    max_scale : float, default 10.0
+        Upper bound on the scalar rescaling factor ``a`` when
+        ``mode='rescale'``.
+    max_sample : int or None, default 2_000_000
+        Maximum number of voxels used in the 1D root-finder for ``a``
+        (selected by deterministic striding when ``delta.size > max_sample``).
+        ``None`` evaluates the root-finder on every voxel.
+
+    Returns
+    -------
+    rate : ndarray
+        Non-negative rate field with the same shape and real floating dtype as
+        ``delta``, normalised to mean 1 (or all zeros if no voxel has
+        :math:`1 + \delta > 0`).
+    info : dict
+        Diagnostic summary with keys ``frac_negative`` (fraction of voxels with
+        :math:`1 + \delta < 0`), ``scale`` (scalar :math:`a` applied), and
+        ``clamped`` (True if ``a`` hit ``max_scale``).
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not ``'rescale'`` or ``'clip'``, or if ``max_scale`` is
+        not a finite float ``>= 1.0``.
+
+    Notes
+    -----
+    The two modes map the overdensity field :math:`\delta` to a unit-mean
+    non-negative Poisson rate :math:`\lambda = 1 + \delta_{\rm pos}` as follows:
+
+    1. **Fast paths:** If ``delta`` is empty or every voxel satisfies
+       :math:`1 + \delta \le 0`, an all-zero array is returned with
+       ``scale = 1.0``. If :math:`1 + \delta \ge 0` everywhere, no clipping is
+       needed and :math:`(1 + \delta) / \langle 1 + \delta \rangle` is returned
+       directly with ``scale = 1.0``.
+    2. **Clipping (``mode="clip"``):** Sets :math:`y = \max(1 + \delta, 0)` and
+       normalises :math:`\lambda = y / \langle y \rangle`. Because negative
+       cells are lifted to zero, :math:`\langle y \rangle = 1 + \epsilon > 1`,
+       which damps the fluctuations :math:`\delta_{\rm pos} = \lambda - 1` by
+       roughly :math:`(1 + \epsilon)^{-1}` and suppresses both auto- and
+       cross-power.
+    3. **Pre-clip rescaling (``mode="rescale"``):** Introduces a scalar factor
+       :math:`a \ge 1` before clipping,
+
+       .. math::
+           y_a = \max(1 + a\,\delta, 0), \qquad
+           \lambda = \frac{y_a}{\langle y_a \rangle}, \qquad
+           \delta_{\rm pos}(a) = \lambda - 1,
+
+       and solves the 1D root equation
+
+       .. math::
+           \frac{\mathrm{Cov}\!\left(\delta_{\rm pos}(a), \delta\right)}
+                {\mathrm{Var}(\delta)} - 1 = 0
+
+       for :math:`a \in [1, \texttt{max\_scale}]` via Brent's method
+       (:func:`scipy.optimize.brentq`) evaluated in ``float64`` on a
+       deterministic strided subsample of at most ``max_sample`` voxels.
+       Matching :math:`\mathrm{Cov}(\delta_{\rm pos}, \delta) = \mathrm{Var}(\delta)`
+       preserves the linear clustering amplitude (unbiased cross-correlation
+       with any correlated tracer such as an HI map, and closely matched
+       auto-power) while remaining strictly linear in overdense peaks
+       (:math:`\delta \gg 1`), avoiding the nonlinear peak blowup of a
+       power-law remapping :math:`(1 + \delta)^\gamma`. If the covariance
+       target is not reached at ``max_scale``, ``a`` is clamped (setting
+       ``info["clamped"] = True`` and emitting a warning); if ``max_scale``
+       would not improve on ``a = 1`` (for example when every voxel has
+       :math:`\delta < 0`), ``scale = 1.0`` is retained so positive cells are
+       not zeroed out.
+    4. **Precision and memory:** The final rescaling, clipping, and
+       normalisation execute in place on a single copy of ``delta`` in its
+       real floating dtype (``float32`` or ``float64``).
     """
+    if mode not in ("rescale", "clip"):
+        raise ValueError(f"mode must be 'rescale' or 'clip', got {mode!r}")
+    max_scale = float(max_scale)
+    if not np.isfinite(max_scale) or max_scale < 1.0:
+        raise ValueError(f"max_scale must be a finite number >= 1.0, got {max_scale!r}")
+
+    delta_arr = np.asarray(delta)
+    real_dtype = real_dtype_from_array(delta_arr)
+    if delta_arr.size == 0:
+        return np.zeros(delta_arr.shape, dtype=real_dtype), {
+            "frac_negative": 0.0,
+            "scale": 1.0,
+            "clamped": False,
+        }
+
+    one = np.asarray(1.0, dtype=real_dtype)
+    zero = np.asarray(0.0, dtype=real_dtype)
+    dmax = float(np.max(delta_arr))
+    dmin = float(np.min(delta_arr))
+
+    # All cells non-positive (e.g. delta == -1 everywhere).
+    if 1.0 + dmax <= 0.0:
+        frac_neg = float(np.mean(delta_arr < -1.0))
+        return np.zeros(delta_arr.shape, dtype=real_dtype), {
+            "frac_negative": frac_neg,
+            "scale": 1.0,
+            "clamped": False,
+        }
+
+    # Fast path: strictly non-negative 1 + delta everywhere (and max > 0).
+    if dmin >= -1.0:
+        rate = np.array(delta_arr, dtype=real_dtype, copy=True)
+        rate += one
+        mean_rate = float(np.mean(rate, dtype=np.float64))
+        rate /= np.asarray(mean_rate, dtype=real_dtype)
+        return rate, {
+            "frac_negative": 0.0,
+            "scale": 1.0,
+            "clamped": False,
+        }
+
+    frac_neg = float(np.mean(delta_arr < -1.0))
+    scale = 1.0
+    clamped = False
+
+    if mode == "rescale":
+        flat = delta_arr.ravel()
+        if max_sample is not None and flat.size > int(max_sample):
+            step = max(1, flat.size // int(max_sample))
+            sample = np.asarray(flat[::step], dtype=np.float64)
+        else:
+            sample = np.asarray(flat, dtype=np.float64)
+        mean_d = float(np.mean(sample))
+        centered = sample - mean_d
+        var_d = float(np.mean(centered * centered))
+
+        if var_d > 0.0:
+
+            def _cov_ratio_err(a):
+                y = np.maximum(1.0 + a * sample, 0.0)
+                mean_y = float(np.mean(y))
+                if mean_y <= 0.0:
+                    return -1.0
+                cov_yd = float(np.mean(y * centered)) / mean_y
+                return cov_yd / var_d - 1.0
+
+            f_lo = _cov_ratio_err(1.0)
+            if f_lo < 0.0:
+                f_hi = _cov_ratio_err(max_scale)
+                if f_hi >= 0.0:
+                    scale = float(
+                        brentq(_cov_ratio_err, 1.0, max_scale, xtol=1e-5, rtol=1e-5)
+                    )
+                else:
+                    scale = max_scale if f_hi > f_lo else 1.0
+                    clamped = True
+                    logger.warning(
+                        "positive_density_for_poisson: rescaling factor hit "
+                        "max_scale=%.2f (frac_negative=%.3f, residual cov ratio=%.3f)",
+                        max_scale,
+                        frac_neg,
+                        max(f_hi, f_lo) + 1.0,
+                    )
+
+    rate = np.array(delta_arr, dtype=real_dtype, copy=True)
+    if scale != 1.0:
+        rate *= np.asarray(scale, dtype=real_dtype)
+    rate += one
+    np.maximum(rate, zero, out=rate)
+    mean_rate = float(np.mean(rate, dtype=np.float64))
+    rate /= np.asarray(mean_rate, dtype=real_dtype)
+    return rate, {
+        "frac_negative": frac_neg,
+        "scale": float(scale),
+        "clamped": clamped,
+    }
+
+
+class MockSimulation(PowerSpectrum):
+    r"""
     The class for generating mock intensity mapping data cube and galaxy catalogues for cross-correlation.
 
     Parameters
@@ -97,6 +304,16 @@ class MockSimulation(PowerSpectrum):
         Must be a function of redshift.
         Note that the overall number of discrete sources is given by ``self.num_discrete_source``, so
         only the shape of the dndz is used, not the normalization.
+    negative_density_handling: {'rescale', 'clip'}, default 'rescale'
+        Strategy used by :meth:`get_mock_tracer_position_in_box` when the
+        overdensity field has voxels with :math:`1 + \delta < 0` (for example
+        under ``rsd_from_field=True`` or ``density='gaussian'``).
+        ``'rescale'`` solves for a scalar pre-clip factor :math:`a \ge 1` in
+        :math:`\max(1 + a\,\delta, 0)` normalised to unit mean so that
+        :math:`\mathrm{Cov}(\delta_{\rm pos}, \delta) = \mathrm{Var}(\delta)`;
+        ``'clip'`` applies plain truncation :math:`\max(1 + \delta, 0)`
+        normalised to unit mean. See :func:`positive_density_for_poisson` and
+        :attr:`last_negative_density_info`.
     **params: dict
         Additional parameters to be passed to the base class :class:`meer21cm.power.PowerSpectrum`.
     """
@@ -112,6 +329,7 @@ class MockSimulation(PowerSpectrum):
         discrete_source_dndz=np.ones_like,
         mock_amp_1=None,
         mock_amp_2=None,
+        negative_density_handling="rescale",
         **params,
     ):
         super().__init__(**params)
@@ -161,6 +379,8 @@ class MockSimulation(PowerSpectrum):
         self.discrete_source_dndz = discrete_source_dndz
         self.mock_amp_1 = mock_amp_1
         self.mock_amp_2 = mock_amp_2
+        self._last_negative_density_info = None
+        self.negative_density_handling = negative_density_handling
         if self.true_cosmology != self.fiducial_cosmology:
             warnings.warn(
                 "true_cosmology != fiducial_cosmology, "
@@ -1144,8 +1364,62 @@ class MockSimulation(PowerSpectrum):
             self.get_mock_tracer_position_in_box(self.discrete_base_field)
         return self._mock_tracer_position_in_box
 
-    def get_mock_tracer_position_in_box(self, tracer_i, density_field=None):
+    @property
+    def negative_density_handling(self):
+        r"""
+        Strategy used by :meth:`get_mock_tracer_position_in_box` when the
+        overdensity contrast has voxels with :math:`1 + \delta < 0`.
+
+        - ``'rescale'`` (default): pre-clip linear rescaling
+          :math:`y_a = \max(1 + a\,\delta, 0)`,
+          :math:`\lambda = y_a / \langle y_a \rangle`, choosing :math:`a \ge 1`
+          so that :math:`\mathrm{Cov}(\lambda - 1, \delta) = \mathrm{Var}(\delta)`.
+          Compensates the clustering suppression caused by clipping without
+          amplifying high-density peaks nonlinearly.
+        - ``'clip'``: plain truncation :math:`y = \max(1 + \delta, 0)`,
+          :math:`\lambda = y / \langle y \rangle`.
+
+        Setting this attribute invalidates cached discrete-tracer properties
+        (``discrete_dep_attr``). See :func:`positive_density_for_poisson`.
         """
+        return self._negative_density_handling
+
+    @negative_density_handling.setter
+    def negative_density_handling(self, value):
+        if value not in ("rescale", "clip"):
+            raise ValueError(
+                "negative_density_handling must be 'rescale' or 'clip', "
+                f"got {value!r}"
+            )
+        self._negative_density_handling = value
+        if "discrete_dep_attr" in dir(self):
+            logger.debug(
+                f"cleaning cache of {self.discrete_dep_attr} due to resetting "
+                "negative_density_handling"
+            )
+            self.clean_cache(self.discrete_dep_attr)
+
+    @property
+    def last_negative_density_info(self):
+        r"""
+        Diagnostic dictionary recorded by the most recent
+        :meth:`get_mock_tracer_position_in_box` call, or ``None`` before any
+        discrete catalogue has been sampled.
+
+        Keys (from :func:`positive_density_for_poisson`):
+
+        - ``'frac_negative'`` (*float*): fraction of voxels with
+          :math:`1 + \delta < 0`.
+        - ``'scale'`` (*float*): pre-clip scalar factor :math:`a \ge 1` applied
+          (always ``1.0`` when ``negative_density_handling='clip'`` or when no
+          voxel is negative).
+        - ``'clamped'`` (*bool*): ``True`` if the root-finder reached its upper
+          bound ``max_scale``.
+        """
+        return self._last_negative_density_info
+
+    def get_mock_tracer_position_in_box(self, tracer_i, density_field=None):
+        r"""
         Function to retrieve the tracer positions in redshift space.
         Modified from ``powerbox``.
 
@@ -1154,12 +1428,35 @@ class MockSimulation(PowerSpectrum):
         tracer_i: int
             The index of the tracer. Can be 1 or 2.
         density_field: np.ndarray, default None
-            The density field of the tracer. If None, the simulated mock tracer field will be used.
+            The unitless overdensity contrast :math:`\delta` of the tracer. If
+            None, the simulated mock tracer field will be used.
 
         Returns
         -------
         tracer_positions: np.ndarray
             The tracer positions in the rectangular box.
+
+        Notes
+        -----
+        Before Poisson sampling, the overdensity contrast :math:`\delta` is
+        mapped to a non-negative, unit-mean rate field :math:`\lambda \ge 0` by
+        :func:`positive_density_for_poisson` using
+        :attr:`negative_density_handling`:
+
+        - ``'rescale'`` (default) applies :math:`y_a = \max(1 + a\,\delta, 0)`
+          normalised by :math:`\langle y_a \rangle`, solving for :math:`a \ge 1`
+          such that :math:`\mathrm{Cov}(\lambda - 1, \delta) = \mathrm{Var}(\delta)`.
+          When :math:`1 + \delta \ge 0` everywhere, this reduces identically to
+          :math:`a = 1`.
+        - ``'clip'`` truncates :math:`y = \max(1 + \delta, 0)` and normalises
+          by :math:`\langle y \rangle` (which damps clustering when many voxels
+          are negative).
+
+        The diagnostic summary (``frac_negative``, ``scale``, ``clamped``) is
+        saved to :attr:`last_negative_density_info`. The rate field is then
+        scaled to :attr:`tot_num_source_in_box` and weighted by
+        :attr:`dndz_renorm` (or :attr:`galaxy_selection`) before drawing
+        per-cell Poisson counts.
         """
         rng = default_rng(self.seed)
         # `_mock_tracer_field` is the unitless contrast. Touching the public
@@ -1167,19 +1464,23 @@ class MockSimulation(PowerSpectrum):
         if density_field is None:
             getattr(self, "mock_tracer_field_" + str(tracer_i))
             density_field = getattr(self, "_mock_tracer_field_" + str(tracer_i))
-        density_field = np.array(density_field, copy=True)
-        density_field += np.asarray(1.0, dtype=density_field.dtype)
         num_g = self.tot_num_source_in_box
-        norm_before = density_field.sum()
-        mask = (density_field > 0).astype(density_field.dtype)
-        mask_renorm = np.sqrt(power_weights_renorm(mask, mask))
-        density_field[density_field < 0] = 0
-        # some cheats to renorm the density field
-        density_field_new = density_field ** (mask_renorm)
-        norm = density_field_new.sum()
-        density_field = density_field ** (norm / norm_before)
-        norm = density_field.sum()
-        if norm > 0:
+        density_field, neg_info = positive_density_for_poisson(
+            density_field,
+            mode=self.negative_density_handling,
+        )
+        self._last_negative_density_info = neg_info
+        if neg_info["frac_negative"] > 0.0:
+            logger.info(
+                "get_mock_tracer_position_in_box: mode=%s frac_negative=%.4f "
+                "scale=%.4f clamped=%s",
+                self.negative_density_handling,
+                neg_info["frac_negative"],
+                neg_info["scale"],
+                neg_info["clamped"],
+            )
+        norm = float(np.sum(density_field, dtype=np.float64))
+        if norm > 0.0:
             density_field *= np.asarray(num_g / norm, dtype=density_field.dtype)
         else:
             density_field[:] = 0

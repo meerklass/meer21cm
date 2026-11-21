@@ -931,3 +931,192 @@ def test_kaiser_source_density_rejects_unknown_field():
     mock = _small_kaiser_mock()
     with pytest.raises(ValueError, match="field must be"):
         mock.get_mock_kaiser_field_k("galaxy")
+
+
+def test_positive_density_for_poisson_modes_and_edges():
+    from meer21cm.mock import positive_density_for_poisson
+
+    with pytest.raises(ValueError, match="mode"):
+        positive_density_for_poisson(np.zeros(4), mode="power")
+    with pytest.raises(ValueError, match="max_scale"):
+        positive_density_for_poisson(np.zeros(4), max_scale=0.5)
+    with pytest.raises(ValueError, match="max_scale"):
+        positive_density_for_poisson(np.zeros(4), max_scale=np.inf)
+
+    # Empty array
+    empty_rate, empty_info = positive_density_for_poisson(np.zeros(0))
+    assert empty_rate.size == 0
+    assert empty_info == {"frac_negative": 0.0, "scale": 1.0, "clamped": False}
+
+    # Strictly non-negative 1 + delta -> exact no-op fast path
+    rng = np.random.default_rng(7)
+    delta_pos = np.exp(rng.normal(0.0, 0.5, size=(16, 16, 16))) - 1.0
+    delta_pos -= delta_pos.mean()
+    rate_noop, info_noop = positive_density_for_poisson(delta_pos, mode="rescale")
+    assert info_noop["frac_negative"] == 0.0
+    assert info_noop["scale"] == 1.0
+    assert not info_noop["clamped"]
+    assert np.allclose(rate_noop, 1.0 + delta_pos, rtol=1e-6, atol=1e-6)
+
+    # All non-positive -> all zeros
+    rate_zero, info_zero = positive_density_for_poisson(-np.ones((4, 4, 4)))
+    assert np.all(rate_zero == 0.0)
+    assert info_zero["frac_negative"] == 0.0
+    assert info_zero["scale"] == 1.0
+    rate_neg, info_neg = positive_density_for_poisson(-2.0 * np.ones((4, 4, 4)))
+    assert np.all(rate_neg == 0.0)
+    assert info_neg["frac_negative"] == 1.0
+
+    # Constant strided subsample (var_d == 0) skips root-finding cleanly
+    d_const_stride = np.array([-2.0, 0.5, -2.0, 0.5, -2.0, 0.5])
+    rate_cs, info_cs = positive_density_for_poisson(
+        d_const_stride, mode="rescale", max_sample=3
+    )
+    assert info_cs["scale"] == 1.0
+    assert not info_cs["clamped"]
+    assert rate_cs.mean() == pytest.approx(1.0)
+
+    # Already cov_ratio >= 1 at a = 1 (f_lo >= 0) keeps scale == 1 without clamping
+    d_already = np.array([-1.2, -1.2, -1.2, -0.5])
+    rate_al, info_al = positive_density_for_poisson(
+        d_already, mode="rescale", max_sample=None
+    )
+    assert info_al["scale"] == 1.0
+    assert not info_al["clamped"]
+    assert rate_al.mean() == pytest.approx(1.0)
+
+    # All-negative delta with -1 < dmax < 0: a=max_scale drives mean_y -> 0,
+    # triggering the mean_y <= 0 guard and retaining scale=1 so rate stays nonzero
+    d_all_neg = np.array([-2.0, -0.5, -0.5, -0.5])
+    rate_an, info_an = positive_density_for_poisson(
+        d_all_neg, mode="rescale", max_scale=5.0, max_sample=None
+    )
+    assert info_an["clamped"]
+    assert info_an["scale"] == 1.0
+    assert rate_an.mean() == pytest.approx(1.0)
+    assert np.all(rate_an >= 0.0)
+
+    # Skewed field with significant negative tail (mimicking lognormal + linear Kaiser)
+    g = rng.normal(0.0, 1.4, size=200_000)
+    d_ln = np.exp(g - 0.5 * g.var()) - 1.0
+    d_rsd = d_ln + rng.normal(0.0, 1.2, size=d_ln.size)
+    d_rsd -= d_rsd.mean()
+    assert np.mean(d_rsd < -1.0) > 0.25
+
+    rate_r, info_r = positive_density_for_poisson(
+        d_rsd, mode="rescale", max_sample=50_000
+    )
+    assert np.all(rate_r >= 0.0)
+    assert rate_r.mean() == pytest.approx(1.0, rel=1e-6)
+    assert info_r["frac_negative"] > 0.25
+    assert info_r["scale"] > 1.0
+    assert not info_r["clamped"]
+    cov_ratio = np.mean((rate_r - 1.0) * d_rsd) / np.var(d_rsd)
+    assert abs(cov_ratio - 1.0) < 0.02
+    assert abs(np.std(rate_r - 1.0) / np.std(d_rsd) - 1.0) < 0.15
+
+    # float32 input preserves dtype
+    rate_f32, info_f32 = positive_density_for_poisson(
+        d_rsd.astype(np.float32), mode="rescale", max_sample=50_000
+    )
+    assert rate_f32.dtype == np.float32
+    assert rate_f32.mean() == pytest.approx(1.0, rel=1e-4)
+    assert info_f32["scale"] == pytest.approx(info_r["scale"], rel=1e-3)
+
+    rate_c, info_c = positive_density_for_poisson(d_rsd, mode="clip")
+    assert np.all(rate_c >= 0.0)
+    assert rate_c.mean() == pytest.approx(1.0, rel=1e-6)
+    assert info_c["scale"] == 1.0
+    assert np.std(rate_c - 1.0) < np.std(d_rsd)
+
+    # Pathological large-variance Gaussian hits max_scale cleanly without blowup
+    d_gauss = rng.normal(0.0, 5.0, size=50_000)
+    d_gauss -= d_gauss.mean()
+    rate_clamped, info_clamped = positive_density_for_poisson(
+        d_gauss, mode="rescale", max_scale=5.0
+    )
+    assert np.all(rate_clamped >= 0.0)
+    assert info_clamped["clamped"]
+    assert info_clamped["scale"] == pytest.approx(5.0)
+    assert np.isfinite(rate_clamped).all()
+
+
+def test_rsd_from_field_nonlinear_high_bias_no_amplitude_blowup():
+    """Regression test: high-bias nonlinear lognormal + field-level Kaiser
+    must not blow up sampled galaxy auto/cross power (formerly 30x-600x)."""
+    from meer21cm.util import create_wcs
+
+    nu = 700e6 + np.arange(80) * 0.1328125e6
+    wcs = create_wcs(145.0, -1.7, [12, 12], [0.5, 0.5])
+    mock = MockSimulation(
+        wproj=wcs,
+        num_pix_x=12,
+        num_pix_y=12,
+        nu=nu,
+        ra_range=(142.0, 148.0),
+        dec_range=(-4.7, 1.3),
+        seed=0,
+        tracer_bias_1=1.47,
+        tracer_bias_2=2.30,
+        sigma_v_1=250.0,
+        sigma_v_2=0.0,
+        mean_amp_1=1.0,
+        mean_amp_2=1.0,
+        ps_type="nonlinear",
+        density="lognormal",
+        kaiser_rsd=True,
+        rsd_from_field=True,
+        parallel_plane=False,
+        downres_factor_transverse=1.0 / 3.0,
+        downres_factor_radial=1.0 / 3.0,
+        num_discrete_source=5e6,
+        filter_map_los=False,
+        auto_set_radecnu_bounds=False,
+        k1dbins=np.array([0.05, 0.15, 0.35, 0.70]),
+    )
+    mock.W_HI = np.ones((12, 12, nu.size), dtype=bool)
+    mock.w_HI = np.ones((12, 12, nu.size), dtype=float)
+    mock.get_enclosing_box()
+
+    assert mock.last_negative_density_info is None
+    assert mock.negative_density_handling == "rescale"
+    with pytest.raises(ValueError, match="negative_density_handling"):
+        mock.negative_density_handling = "invalid"
+
+    # Trigger galaxy sampling with default 'rescale'
+    pos = mock.mock_tracer_position_in_box
+    info = mock.last_negative_density_info
+    assert info is not None
+    assert info["frac_negative"] > 0.25
+    assert 1.05 < info["scale"] < 1.5
+    assert not info["clamped"]
+
+    grid_bins = [center_to_edges(mock.x_vec[i]) for i in range(3)]
+    count, _ = np.histogramdd(pos, bins=grid_bins)
+    mock.field_1 = mock.mock_tracer_field_1
+    mock.field_2 = count.astype(np.float64) / count.mean() - 1.0
+    shot_noise = float(np.prod(mock.box_len) / count.sum())
+    pgg_samp, _, _ = mock.get_1d_power(mock.auto_power_3d_2)
+    pxg_samp, _, _ = mock.get_1d_power(mock.cross_power_3d)
+
+    # Compare against the raw Eulerian redshift-space field
+    mock.field_2 = mock.mock_tracer_field_2
+    pgg_raw, _, _ = mock.get_1d_power(mock.auto_power_3d_2)
+    pxg_raw, _, _ = mock.get_1d_power(mock.cross_power_3d)
+
+    assert np.allclose((pgg_samp - shot_noise) / pgg_raw, 1.0, atol=0.15)
+    assert np.allclose(pxg_samp / pxg_raw, 1.0, atol=0.10)
+
+    # Switching to 'clip' clears cache and runs cleanly with scale == 1
+    mock.negative_density_handling = "clip"
+    assert mock.negative_density_handling == "clip"
+    assert mock._mock_tracer_position_in_box is None
+    _ = mock.mock_tracer_position_in_box
+    assert mock.last_negative_density_info["scale"] == 1.0
+
+    # All-zero rate field (density_field == -1) hits the norm == 0 path cleanly
+    mock.get_mock_tracer_position_in_box(
+        2, density_field=-np.ones(mock.box_ndim, dtype=mock.real_dtype)
+    )
+    assert mock._mock_tracer_position_in_box.shape == (0, 3)
+    assert mock.last_negative_density_info["scale"] == 1.0
