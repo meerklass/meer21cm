@@ -14,6 +14,7 @@ The Alcock–Paczynski effect is then always included in the model power spectru
 the field k-modes to model k-modes (see :py:class:`meer21cm.power.PowerSpectrum`).
 
 """
+
 import numpy as np
 import camb
 import astropy
@@ -34,6 +35,63 @@ from typing import Callable
 import warnings
 
 logger = logging.getLogger(__name__)
+
+
+class _LogLogPowerInterpolator:
+    r"""Interpolator for :math:`P(k)` with high-:math:`k` log-log power-law extrapolation.
+
+    Uses linear interpolation over ``k <= x[-1]`` (matching the historical
+    ``scipy.interpolate.interp1d`` behaviour at low and intermediate :math:`k`,
+    including :math:`k = 0`) and switches to log-log power-law extrapolation
+
+    .. math::
+
+        P(k) = P(k_{\max}) \left(\frac{k}{k_{\max}}\right)^{\alpha_{\rm hi}},
+        \qquad
+        \alpha_{\rm hi} = \frac{\ln(P_{-1} / P_{-2})}{\ln(k_{-1} / k_{-2})},
+
+    for :math:`k > k_{\max}`. This guarantees strictly positive decaying power
+    at high :math:`k` (preventing negative linear extrapolation and ``NaN``
+    lognormal fields on high-resolution lightcone boxes) while preserving exact
+    backward compatibility for :math:`k \le k_{\max}`.
+    """
+
+    def __init__(self, x, y, dtype=None):
+        self.x = np.asarray(x, dtype=np.float64)
+        self.y = np.asarray(y, dtype=np.float64)
+        self.dtype = self.y.dtype if dtype is None else np.dtype(dtype)
+        self._low_interp = interp1d(
+            self.x,
+            self.y,
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+        self._kmax = float(self.x[-1])
+        self._pmax = float(self.y[-1])
+        self._high_slope = float(
+            np.log(self.y[-1] / self.y[-2]) / np.log(self.x[-1] / self.x[-2])
+        )
+
+    def __call__(self, k):
+        k_arr = np.asarray(k, dtype=np.float64)
+        if k_arr.ndim == 0:
+            k_val = float(k_arr)
+            if k_val > self._kmax:
+                val = self._pmax * (k_val / self._kmax) ** self._high_slope
+            else:
+                val = float(self._low_interp(k_val))
+            return np.asarray(val, dtype=self.dtype)
+        out = np.empty(k_arr.shape, dtype=self.dtype)
+        high = k_arr > self._kmax
+        if np.any(high):
+            out[high] = (
+                self._pmax * (k_arr[high] / self._kmax) ** self._high_slope
+            ).astype(self.dtype, copy=False)
+        low = ~high
+        if np.any(low):
+            out[low] = self._low_interp(k_arr[low]).astype(self.dtype, copy=False)
+        return out
+
 
 As_set = {
     "Planck18": np.exp(3.047) / 1e10,
@@ -813,21 +871,24 @@ class CosmologyCalculator(Specification):
         """
         Calculate the matter power spectrum, interpolate it, and save it into the class attribute `matter_power_spectrum_fnc`.
 
+        Uses linear interpolation for :math:`k \\le k_{\\max}` and log-log
+        power-law extrapolation for :math:`k > k_{\\max}` so high-:math:`k`
+        modes stay strictly positive and decaying.
+
         Note that, Alcock–Paczynski effect is included here in the power spectrum,
         and therefore for all model power spectra that depends on the matter power spectrum.
         """
         cosmo = self.astropy_cosmo_true
         kh = self.cospar_true.karr_in_h
         pk = getattr(self.cospar_true, f"get_matter_power_spectrum_{self.backend}")()
-        karr = np.asarray(kh * cosmo.h, dtype=self.real_dtype)
-        pkarr = np.asarray(pk / cosmo.h**3, dtype=self.real_dtype)
-        AP_amp = np.asarray(1 / (self.alpha_iso**3), dtype=self.real_dtype)
-        pk_scaled = np.asarray(pkarr * AP_amp, dtype=self.real_dtype)
-        matter_power_func = interp1d(
+        karr = np.asarray(kh * cosmo.h, dtype=np.float64)
+        pkarr = np.asarray(pk / cosmo.h**3, dtype=np.float64)
+        AP_amp = float(1 / (self.alpha_iso**3))
+        pk_scaled = pkarr * AP_amp
+        matter_power_func = _LogLogPowerInterpolator(
             karr,
             pk_scaled,
-            bounds_error=False,
-            fill_value="extrapolate",
+            dtype=self.real_dtype,
         )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}_{self.backend}: "
