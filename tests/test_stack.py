@@ -1677,3 +1677,86 @@ def test_stacking_model_cosmological_kmu_and_options():
     worker.power_kmu_func = lambda k, mu: np.zeros(1)
     with pytest.raises(ValueError, match="power_kmu_func"):
         worker.model_1d_power([0.1])
+
+
+def test_quadratic_model_uses_global_zero_lag_q0():
+    """Quadratic forward model divides off-centre lags by global Q0 = D(0,0,0),
+    matching data_and_fkp_cubelets and stack_cubelet on asymmetric masks.
+    """
+    n_pix = 5
+    n_ch = 8
+    wcs = create_wcs(180.0, 0.0, [n_pix, n_pix], 0.5)
+    nu = np.linspace(700e6, 714e6, n_ch)
+    # Strongly non-uniform mask so D(di, dj, 0) != D(0, 0, 0) at off-centre lags
+    w_map = np.zeros((n_pix, n_pix, n_ch), dtype=float)
+    w_map[1:4, 1:4, :] = 2.0
+    w_map[2, 2, :] = 5.0
+    data = np.ones((n_pix, n_pix, n_ch), dtype=float)
+
+    # Constant P(k, mu) via custom power_kmu_func for fast deterministic evaluation
+    p_const = lambda k, mu: np.exp(-0.5 * (k / 0.15) ** 2)
+
+    for estimator in ("correlation", "loop"):
+        for sym in (False, True):
+            w_conv = Stacking(
+                data=data,
+                weights_map_pixel=w_map,
+                nu=nu,
+                wproj=wcs,
+                num_pix_x=n_pix,
+                num_pix_y=n_pix,
+                stack_estimator=estimator,
+                stack_weighting="conventional",
+                symmetrize=sym,
+                stack_angular_num_nearby_pix=2,
+                dchi_mpc=8.0,
+                n_kperp=48,
+                n_chi=2,
+                power_kmu_func=p_const,
+                filter_map_los=False,
+                auto_set_radecnu_bounds=False,
+                init_box_from_map_data=False,
+            )
+            w_quad = Stacking(
+                data=data,
+                weights_map_pixel=w_map,
+                nu=nu,
+                wproj=wcs,
+                num_pix_x=n_pix,
+                num_pix_y=n_pix,
+                stack_estimator=estimator,
+                stack_weighting="quadratic",
+                symmetrize=sym,
+                stack_angular_num_nearby_pix=2,
+                dchi_mpc=8.0,
+                n_kperp=48,
+                n_chi=2,
+                power_kmu_func=p_const,
+                filter_map_los=False,
+                auto_set_radecnu_bounds=False,
+                init_box_from_map_data=False,
+            )
+            m_conv = w_conv.model_3d_stack(n_kpar_eval=48)
+            m_quad = w_quad.model_3d_stack(n_kpar_eval=48)
+
+            # Compute exact pair-count cubelet for the same weights & selection mask
+            use_corr = estimator == "correlation"
+            w_native, n_native = w_quad._pair_weight_cubes(sort_chi=False)
+            if use_corr:
+                chi = w_quad.channel_chi_mpc()
+                w_b, _ = rebin_cube(w_native, chi, w_quad.dchi_mpc)
+                n_b, _ = rebin_cube(n_native, chi, w_quad.dchi_mpc)
+            else:
+                w_b, n_b = w_native, n_native
+            _d, _f, den_cube, _a = data_and_fkp_cubelets(
+                w_b, w_b, n_b, 2, weighting="quadratic", symmetrize=sym
+            )
+            mid = 2
+            c0 = den_cube.shape[-1] // 2
+            q0_global = float(den_cube[mid, mid, c0])
+            # Exact algebraic relation at every (di, dj, db):
+            # I_quad(s) = I_conv(s) * D(s) / Q0_global
+            expected_quad = m_conv * (den_cube / q0_global)
+            assert np.allclose(m_quad, expected_quad, rtol=1e-12, atol=1e-15)
+            # Confirm off-centre lag denominator actually differed from Q0_global
+            assert den_cube[mid + 2, mid + 2, c0] < 0.5 * q0_global

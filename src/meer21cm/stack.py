@@ -314,6 +314,7 @@ def contract_channel_covariance(
     n_bin=None,
     weighting="conventional",
     symmetrize=False,
+    q0=None,
 ):
     r"""Contract a channel covariance matrix with pair weights and LOS binning.
 
@@ -349,6 +350,14 @@ def contract_channel_covariance(
         Normalisation scheme matching the estimator.
     symmetrize : bool, default False
         Fold :math:`\pm \Delta b` before normalising, matching the estimator.
+    q0 : float, optional
+        Unsymmetrised global zero-lag scalar normalisation
+        :math:`Q_0 = \sum_b D^{\rm bin,(0,0)}_{b,b}` used when
+        ``weighting='quadratic'`` at off-centre angular lags
+        :math:`(\Delta i, \Delta j) \neq (0, 0)`. When ``symmetrize=True``,
+        ``q0`` is doubled automatically to match :func:`stack_cubelet` and
+        :func:`data_and_fkp_cubelets`. Defaults to the zero-LOS-lag element of
+        ``pair_weight``.
 
     Returns
     -------
@@ -398,8 +407,11 @@ def contract_channel_covariance(
         hit = _pair_hit(den_diag)
         out[hit] = num_diag[hit] / den_diag[hit]
     else:
-        q0 = float(den_diag[nb - 1])
-        out = num_diag / q0 if q0 != 0.0 else np.zeros_like(num_diag)
+        if q0 is None:
+            q0_eff = float(den_diag[nb - 1])
+        else:
+            q0_eff = float(q0) * (2.0 if symmetrize else 1.0)
+        out = num_diag / q0_eff if q0_eff != 0.0 else np.zeros_like(num_diag)
     return out, den_diag
 
 
@@ -2367,6 +2379,18 @@ class Stacking(PowerSpectrum):
             power_3d = power_3d + float(cross_shot_noise)
         measure = (kperp * self.dk_perp / (2.0 * np.pi))[:, None]
 
+        q0_global = None
+        if self.stack_weighting == "quadratic":
+            pair_w0 = self._pair_weight_matrix_for_lag(
+                w_map, n_cube, 0, 0, separable=separable_weights
+            )
+            if bin_which is not None:
+                s_mat = np.zeros((n_bin, pair_w0.shape[0]), dtype=float)
+                s_mat[bin_which, np.arange(pair_w0.shape[0])] = 1.0
+                q0_global = float(np.trace(s_mat @ pair_w0 @ s_mat.T))
+            else:
+                q0_global = float(np.trace(pair_w0))
+
         # Exploit 8-fold square symmetry for transverse window & channel covariance
         cov_cache = {}
         results = {}
@@ -2399,6 +2423,7 @@ class Stacking(PowerSpectrum):
                 n_bin=n_bin,
                 weighting=self.stack_weighting,
                 symmetrize=self.symmetrize,
+                q0=q0_global,
             )
             results[(int(di), int(dj))] = profile
         return results
