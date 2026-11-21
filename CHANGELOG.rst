@@ -16,6 +16,11 @@ dev
 
 Fixes
 +++++
+* use log-log interpolation and power-law extrapolation in
+  ``CosmologyCalculator.get_matter_power_spectrum`` so
+  ``matter_power_spectrum_fnc(k)`` stays strictly positive above ``kmax`` and
+  returns ``0.0`` at ``k <= 0`` (preventing negative high-``k`` power and
+  ``NaN`` lognormal fields on high-resolution lightcone boxes)
 * paint lightcone voxels onto WCS pixel and channel centres in
   ``grid_field_to_sky_map`` (half-pixel sky offset and a half-channel
   stretch at the band edges)
