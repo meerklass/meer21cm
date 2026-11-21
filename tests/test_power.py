@@ -5,7 +5,14 @@ from meer21cm.power import *
 import pytest
 from scipy.signal import windows
 from meer21cm import PowerSpectrum
-from meer21cm.util import center_to_edges, f_21
+from meer21cm.util import (
+    center_to_edges,
+    create_wcs,
+    f_21,
+    find_ch_id,
+    radec_to_indx,
+    redshift_to_freq,
+)
 from meer21cm.mock import generate_gaussian_field
 
 
@@ -1256,6 +1263,105 @@ def test_grid_field_to_sky_map_healpix(average):
             ValueError, match="field shape .* does not match expected shape"
         ):
             mock.grid_field_to_sky_map(bad_field)
+
+
+def test_grid_field_to_sky_map_wcs_pixel_and_channel_centres():
+    """A voxel must land on round(world_to_pixel) and find_ch_id.
+
+    The lower half of a pixel, and the parts of a channel the old
+    ``nu.max - nu.min`` axis stretched into the neighbouring channel, are
+    included. ``radec_to_indx(..., to_int=True)`` and ``find_ch_id`` are the
+    reference, not the painter's index arithmetic.
+    """
+    n_pix = 6
+    n_ch = 8
+    nu = np.linspace(900.0e6, 980.0e6, n_ch)
+    wproj = create_wcs(
+        150.0,
+        -30.0,
+        [n_pix, n_pix],
+        0.3,
+        crpix=[3.0, 2.0],
+    )
+    ps = PowerSpectrum(
+        nu=nu,
+        wproj=wproj,
+        num_pix_x=n_pix,
+        num_pix_y=n_pix,
+        map_has_sampling=np.ones((n_pix, n_pix, n_ch), dtype=bool),
+        downres_factor_transverse=0.4,
+        downres_factor_radial=0.25,
+        box_buffkick=5,
+        num_particle_per_pixel=1,
+        model_k_from_field=False,
+        include_beam=[False, False],
+        include_sky_sampling=[False, False],
+    )
+    ps.get_enclosing_box()
+    x_vec, y_vec, z_vec = ps.x_vec
+    nx, ny, nz = x_vec.size, y_vec.size, z_vec.size
+    pos = np.empty((nx * ny * nz, 3), dtype=float)
+    pos[:, 0] = np.repeat(x_vec, ny * nz)
+    pos[:, 1] = np.tile(np.repeat(y_vec, nz), nx)
+    pos[:, 2] = np.tile(z_vec, nx * ny)
+    ra, dec, z, _ = ps.ra_dec_z_for_coord_in_box(pos)
+    freq = redshift_to_freq(z)
+    ix_f, iy_f = radec_to_indx(ra, dec, ps.wproj, to_int=False)
+    ix_i, iy_i = radec_to_indx(ra, dec, ps.wproj, to_int=True)
+    ch = find_ch_id(freq, ps.nu)
+    ch_coord = (freq - ps.nu[0]) / ps.freq_resol
+    frac_x = ix_f - np.floor(ix_f)
+    frac_y = iy_f - np.floor(iy_f)
+    usable = (
+        (ix_i >= 0)
+        & (ix_i < n_pix)
+        & (iy_i >= 0)
+        & (iy_i < n_pix)
+        & (ch >= 0)
+        & (ch < n_ch)
+        & (np.abs(frac_x - 0.5) > 0.08)
+        & (np.abs(frac_y - 0.5) > 0.08)
+        & (ix_f > ix_i - 0.5 + 0.05)
+        & (ix_f < ix_i + 0.5 - 0.05)
+        & (iy_f > iy_i - 0.5 + 0.05)
+        & (iy_f < iy_i + 0.5 - 0.05)
+        & (ch_coord > ch - 0.5 + 0.05)
+        & (ch_coord < ch + 0.5 - 0.05)
+    )
+    # Lower half of the rounded pixel: fractional part above 0.5. The old
+    # floor into mesh cells [i, i+1) sent these to the previous pixel.
+    # Ignore the map edge, where that previous pixel is clamped back.
+    old_ix = np.floor(ix_f).astype(int)
+    old_iy = np.floor(iy_f).astype(int)
+    lower_half = usable & (
+        ((frac_x > 0.5) & (old_ix >= 0) & (old_ix != ix_i))
+        | ((frac_y > 0.5) & (old_iy >= 0) & (old_iy != iy_i))
+    )
+    length = float(ps.nu.max() - ps.nu.min())
+    old_coord = (freq - ps.nu.min()) / (length / n_ch)
+    old_ch = np.clip(np.floor(old_coord), 0, n_ch - 1).astype(int)
+    freq_mismatch = (
+        usable & (old_ch != ch) & (np.abs(old_coord - np.round(old_coord)) > 1e-6)
+    )
+    assert lower_half.any()
+    assert freq_mismatch.any()
+    assert np.any(usable & (ch == 0))
+    assert np.any(usable & (ch == n_ch - 1))
+    chosen = (
+        int(np.flatnonzero(lower_half)[0]),
+        int(np.flatnonzero(usable & (ch == 0))[0]),
+        int(np.flatnonzero(usable & (ch == n_ch - 1))[0]),
+        int(np.flatnonzero(freq_mismatch)[0]),
+    )
+    for flat_index in chosen:
+        field = np.zeros(ps.box_ndim, dtype=float)
+        field.flat[flat_index] = 1.0
+        sky, _counts = ps.grid_field_to_sky_map(field, average=False, mask=False)
+        assert np.allclose(sky.sum(), 1.0)
+        assert np.allclose(
+            sky[int(ix_i[flat_index]), int(iy_i[flat_index]), int(ch[flat_index])],
+            1.0,
+        )
 
 
 def test_sync_k_skip():
