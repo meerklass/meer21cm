@@ -14,6 +14,7 @@ The Alcock–Paczynski effect is then always included in the model power spectru
 the field k-modes to model k-modes (see :py:class:`meer21cm.power.PowerSpectrum`).
 
 """
+
 import numpy as np
 import camb
 import astropy
@@ -34,6 +35,44 @@ from typing import Callable
 import warnings
 
 logger = logging.getLogger(__name__)
+
+
+class _LogLogPowerInterpolator:
+    r"""Log-log linear interpolator and power-law extrapolator for :math:`P(k)`.
+
+    Interpolates :math:`\ln P(k)` linearly in :math:`\ln k` over the tabulated
+    positive samples ``(x, y)`` and extrapolates as a power law outside
+    ``[x[0], x[-1]]``. This guarantees strictly positive values for all
+    :math:`k > 0` (preventing negative high-:math:`k` power from linear
+    extrapolation) and returns ``0.0`` cleanly for :math:`k \le 0`.
+    """
+
+    def __init__(self, x, y, dtype=None):
+        self.x = np.asarray(x, dtype=np.float64)
+        self.y = np.asarray(y, dtype=np.float64)
+        self.dtype = self.y.dtype if dtype is None else np.dtype(dtype)
+        self._log_interp = interp1d(
+            np.log(self.x),
+            np.log(self.y),
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+
+    def __call__(self, k):
+        k_arr = np.asarray(k, dtype=np.float64)
+        if k_arr.ndim == 0:
+            k_val = float(k_arr)
+            if k_val <= 0.0:
+                return np.asarray(0.0, dtype=self.dtype)
+            return np.asarray(np.exp(self._log_interp(np.log(k_val))), dtype=self.dtype)
+        out = np.zeros(k_arr.shape, dtype=self.dtype)
+        pos = k_arr > 0.0
+        if np.any(pos):
+            out[pos] = np.exp(self._log_interp(np.log(k_arr[pos]))).astype(
+                self.dtype, copy=False
+            )
+        return out
+
 
 As_set = {
     "Planck18": np.exp(3.047) / 1e10,
@@ -811,7 +850,11 @@ class CosmologyCalculator(Specification):
 
     def get_matter_power_spectrum(self):
         """
-        Calculate the matter power spectrum, interpolate it, and save it into the class attribute `matter_power_spectrum_fnc`.
+        Calculate the matter power spectrum, interpolate it in log-log space, and save it into the class attribute `matter_power_spectrum_fnc`.
+
+        Log-log interpolation with power-law extrapolation keeps :math:`P_m(k) > 0`
+        for all :math:`k > 0` (including high-:math:`k` modes above ``kmax``) and
+        returns ``0.0`` at :math:`k \\le 0`.
 
         Note that, Alcock–Paczynski effect is included here in the power spectrum,
         and therefore for all model power spectra that depends on the matter power spectrum.
@@ -819,15 +862,14 @@ class CosmologyCalculator(Specification):
         cosmo = self.astropy_cosmo_true
         kh = self.cospar_true.karr_in_h
         pk = getattr(self.cospar_true, f"get_matter_power_spectrum_{self.backend}")()
-        karr = np.asarray(kh * cosmo.h, dtype=self.real_dtype)
-        pkarr = np.asarray(pk / cosmo.h**3, dtype=self.real_dtype)
-        AP_amp = np.asarray(1 / (self.alpha_iso**3), dtype=self.real_dtype)
-        pk_scaled = np.asarray(pkarr * AP_amp, dtype=self.real_dtype)
-        matter_power_func = interp1d(
+        karr = np.asarray(kh * cosmo.h, dtype=np.float64)
+        pkarr = np.asarray(pk / cosmo.h**3, dtype=np.float64)
+        AP_amp = float(1 / (self.alpha_iso**3))
+        pk_scaled = pkarr * AP_amp
+        matter_power_func = _LogLogPowerInterpolator(
             karr,
             pk_scaled,
-            bounds_error=False,
-            fill_value="extrapolate",
+            dtype=self.real_dtype,
         )
         logger.info(
             f"{inspect.currentframe().f_code.co_name}_{self.backend}: "

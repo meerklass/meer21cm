@@ -339,3 +339,46 @@ def test_omega_hi_initialization():
     coscal = CosmologyCalculator()
     assert coscal._omega_hi == 5e-4
     assert np.allclose(coscal.omega_hi, 5e-4 * np.ones_like(coscal.z_ch))
+
+
+@pytest.mark.parametrize("ps_type", ["linear", "nonlinear"])
+def test_matter_power_loglog_extrapolation_positive_at_high_k(ps_type):
+    """Log-log extrapolation stays strictly positive past kmax and zero at k <= 0."""
+    import pickle
+
+    coscal = CosmologyCalculator(ps_type=ps_type, kmax=3.0)
+    fnc = coscal.matter_power_spectrum_fnc
+
+    # Scalar edge cases: k <= 0 returns 0 cleanly, k > kmax is strictly positive
+    assert float(fnc(0.0)) == 0.0
+    assert float(fnc(-1.0)) == 0.0
+    assert float(fnc(15.0)) > 0.0
+
+    # Array with k = 0, below kmin, interior, and high-k above kmax (e.g. z1 Nyquist)
+    k_test = np.array([0.0, 1e-4, 0.1, 3.0, 5.0, 15.0, 50.0])
+    pk_test = fnc(k_test)
+    assert pk_test.shape == k_test.shape
+    assert pk_test.dtype == coscal.real_dtype
+    assert pk_test[0] == 0.0
+    assert np.all(np.isfinite(pk_test))
+    assert np.all(pk_test[1:] > 0.0)
+    # Monotonic power-law decay above kmax
+    assert pk_test[3] > pk_test[4] > pk_test[5] > pk_test[6] > 0.0
+    # Exact power-law slope above kmax matches the last tabulated segment
+    slope_expected = np.log(fnc.y[-1] / fnc.y[-2]) / np.log(fnc.x[-1] / fnc.x[-2])
+    slope_extrap = np.log(pk_test[5] / pk_test[4]) / np.log(k_test[5] / k_test[4])
+    assert np.isclose(slope_extrap, slope_expected, rtol=1e-12)
+
+    # All-zero array branch and 3D float32 precision preservation
+    assert np.all(fnc(np.zeros((2, 2))) == 0.0)
+    coscal_f32 = CosmologyCalculator(
+        nu=np.linspace(700e6, 750e6, 4), ps_type=ps_type, kmax=3.0, precision=False
+    )
+    pk_3d = coscal_f32.matter_power_spectrum_fnc(np.full((2, 3, 4), 14.0))
+    assert pk_3d.shape == (2, 3, 4)
+    assert pk_3d.dtype == np.float32
+    assert np.all(pk_3d > 0.0)
+
+    # Pickle roundtrip
+    restored = pickle.loads(pickle.dumps(fnc))
+    assert np.allclose(restored(k_test), pk_test, rtol=1e-12, atol=0.0)
