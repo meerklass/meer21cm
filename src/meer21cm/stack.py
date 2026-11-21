@@ -15,31 +15,26 @@ from scipy.interpolate import CubicSpline
 
 from .grid import project_particle_to_regular_grid
 from .io import read_catalogue_fits
+from .los_model import (
+    OneDimPowerModel,
+    _sinc,
+    azimuthal_pixel_window,
+    beam_window,
+    channel_comoving_distances,
+    channel_comoving_widths,
+    chi_nodes_and_weights,
+    discrete_beam_window,
+)
 from .power import PowerSpectrum
-from .util import center_to_edges, f_21, find_ch_id, radec_to_indx, redshift_to_freq
+from .util import find_ch_id, radec_to_indx, redshift_to_freq
 
 logger = logging.getLogger(__name__)
-_DEG2RAD = np.pi / 180.0
-
-
-def _sinc(x):
-    r"""Unnormalised ``sin(x) / x`` with the ``x -> 0`` limit."""
-    return np.sinc(np.asarray(x, dtype=float) / np.pi)
 
 
 def azimuthal_pixel_window_lag(kperp, dperp, di=0, dj=0, n_phi=64, pixel_power=2):
     r"""Azimuthally averaged square-pixel window at angular lag :math:`(\Delta i, \Delta j)`.
 
-    Evaluates
-
-    .. math::
-        \overline{W}_{\rm pix}^{(\Delta i, \Delta j)}(k_\perp; D_\perp)
-        = \left\langle
-            \cos\!\big(k_\perp D_\perp(\Delta i\cos\phi + \Delta j\sin\phi)\big)\,
-            \left[\operatorname{sinc}\!\left(\frac{k_\perp D_\perp\cos\phi}{2}\right)
-                  \operatorname{sinc}\!\left(\frac{k_\perp D_\perp\sin\phi}{2}\right)\right]^p
-          \right\rangle_\phi .
-
+    Thin alias of :func:`meer21cm.los_model.azimuthal_pixel_window`.
     For sky-cube stacking where the intensity map is averaged over square
     pixels and galaxies are snapped to the same pixel grid, both legs
     contribute one factor of the pixel top-hat so ``pixel_power=2``
@@ -65,32 +60,15 @@ def azimuthal_pixel_window_lag(kperp, dperp, di=0, dj=0, n_phi=64, pixel_power=2
     window : ndarray
         Azimuthally averaged pixel window, shape ``(len(kperp),)``.
     """
-    dperp_f = float(dperp)
-    if dperp_f < 0.0:
-        raise ValueError(f"dperp must be non-negative, got {dperp!r}")
-    if int(n_phi) < 4:
-        raise ValueError(f"n_phi must be >= 4, got {n_phi!r}")
-    if float(pixel_power) < 0.0:
-        raise ValueError(f"pixel_power must be non-negative, got {pixel_power!r}")
-    kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
-    u = kperp_arr * dperp_f
-    phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
-    ux = u[:, None] * np.cos(phi)[None, :]
-    uy = u[:, None] * np.sin(phi)[None, :]
-    phase = np.cos(int(di) * ux + int(dj) * uy)
-    if float(pixel_power) == 0.0:
-        return phase.mean(axis=1)
-    wpix = _sinc(0.5 * ux) * _sinc(0.5 * uy)
-    if float(pixel_power) == 2.0:
-        wpix = wpix * wpix
-    elif float(pixel_power) != 1.0:
-        wpix = np.abs(wpix) ** float(pixel_power)
-    return (phase * wpix).mean(axis=1)
+    return azimuthal_pixel_window(
+        kperp, dperp, di=di, dj=dj, n_phi=n_phi, pixel_power=pixel_power
+    )
 
 
 def beam_window_amplitude(kperp, sigma_b):
     r"""Field-level Gaussian dish-beam amplitude window :math:`\exp(-\tfrac12 k_\perp^2 \sigma_B^2)`.
 
+    Thin alias of :func:`meer21cm.los_model.beam_window` with ``power=1``.
     Unlike the HI auto-power spectrum (which uses :math:`W_{\rm beam}^2`),
     galaxy--HI stacking carries only one factor of the beam because only the
     intensity map is convolved with the primary beam.
@@ -107,8 +85,7 @@ def beam_window_amplitude(kperp, sigma_b):
     window : ndarray
         Beam amplitude window with the same shape as ``kperp``.
     """
-    k_arr = np.asarray(kperp, dtype=float)
-    return np.exp(-0.5 * (k_arr**2) * float(sigma_b) ** 2)
+    return beam_window(kperp, sigma_b, power=1.0)
 
 
 def discrete_beam_window_amplitude(
@@ -123,20 +100,8 @@ def discrete_beam_window_amplitude(
 ):
     r"""Azimuthally averaged pixel + discrete pixel-grid Gaussian beam window.
 
-    When a Gaussian beam is applied *after* pixelisation via a sum-normalised
-    discrete kernel :math:`B[\delta i, \delta j] = b[\delta i]\,b[\delta j]`
-    with :math:`b[m] \propto \exp(-m^2 / (2\sigma_{\rm pix}^2))` and
-    :math:`\sigma_{\rm pix} = \sigma_B / D_\perp`, its Fourier response is the
-    periodic DFT
-
-    .. math::
-        \tilde{B}_{\rm disc}(k_x, k_y)
-        = \tilde{b}(k_x D_\perp)\,\tilde{b}(k_y D_\perp),
-        \qquad
-        \tilde{b}(u) = b[0] + 2\sum_{m=1}^{M} b[m]\cos(m u).
-
-    This differs from the continuous-sky :func:`beam_window_amplitude` when
-    :math:`\sigma_B \lesssim 2 D_\perp`.
+    Thin alias of :func:`meer21cm.los_model.discrete_beam_window` with
+    ``beam_power=1`` for galaxy--HI stacking.
 
     Parameters
     ----------
@@ -161,44 +126,17 @@ def discrete_beam_window_amplitude(
         Azimuthally averaged product of lag phase, pixel window, and discrete
         beam DFT, shape ``(len(kperp),)``.
     """
-    dperp_f = float(dperp)
-    sigma_f = abs(float(sigma_b))
-    if dperp_f <= 0.0 or sigma_f == 0.0:
-        return azimuthal_pixel_window_lag(
-            kperp, dperp_f, di=di, dj=dj, n_phi=n_phi, pixel_power=pixel_power
-        )
-    sigma_pix = sigma_f / dperp_f
-    half = max(1, int(np.ceil(float(truncate_sigma) * sigma_pix)))
-    m_vals = np.arange(-half, half + 1, dtype=float)
-    b1d = np.exp(-0.5 * (m_vals / sigma_pix) ** 2)
-    b1d /= b1d.sum()
-    m_pos = np.arange(1, half + 1, dtype=float)
-    b0 = float(b1d[half])
-    b_pos = b1d[half + 1 :]
-
-    kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
-    u = kperp_arr * dperp_f
-    phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
-    ux = u[:, None] * np.cos(phi)[None, :]
-    uy = u[:, None] * np.sin(phi)[None, :]
-    bx = b0 + 2.0 * np.sum(
-        b_pos[None, None, :] * np.cos(ux[:, :, None] * m_pos[None, None, :]),
-        axis=-1,
+    return discrete_beam_window(
+        kperp,
+        dperp,
+        sigma_b,
+        di=di,
+        dj=dj,
+        n_phi=n_phi,
+        pixel_power=pixel_power,
+        beam_power=1.0,
+        truncate_sigma=truncate_sigma,
     )
-    by = b0 + 2.0 * np.sum(
-        b_pos[None, None, :] * np.cos(uy[:, :, None] * m_pos[None, None, :]),
-        axis=-1,
-    )
-    phase = np.cos(int(di) * ux + int(dj) * uy)
-    if float(pixel_power) == 0.0:
-        wpix = 1.0
-    else:
-        wpix = _sinc(0.5 * ux) * _sinc(0.5 * uy)
-        if float(pixel_power) == 2.0:
-            wpix = wpix * wpix
-        elif float(pixel_power) != 1.0:
-            wpix = np.abs(wpix) ** float(pixel_power)
-    return (phase * wpix * bx * by).mean(axis=1)
 
 
 def _trapezoid_weights(x):
@@ -1912,54 +1850,47 @@ class Stacking(PowerSpectrum):
 
     # -- forward model -------------------------------------------------
     @property
+    def _one_dim_model(self):
+        """Live :class:`~meer21cm.los_model.OneDimPowerModel` bound to ``self``."""
+        return OneDimPowerModel(
+            self,
+            n_chi=self.n_chi,
+            kperp_edges=self._kperp_edges,
+            n_kperp=self.n_kperp,
+            kperp_max=self.kperp_max,
+            include_pixel_window=self.include_pixel_window,
+            include_beam_window=self.include_beam_window,
+            pixel_power=self.pixel_power,
+            beam_power=1.0,
+            beam_mode=self.beam_mode,
+            power_kmu_func=self.power_kmu_func,
+            enforce_first_zero=False,
+        )
+
+    @property
     def chi_ch(self):
         """Comoving distance to each frequency channel centre, in Mpc."""
-        return self.channel_chi_mpc()
+        return channel_comoving_distances(self)
 
     @property
     def dchi_ch(self):
         """Comoving width of each frequency channel, in Mpc."""
-        nu = np.asarray(self.nu, dtype=float)
-        if nu.size == 1:
-            return np.zeros(1, dtype=float)
-        nu_edges = np.asarray(center_to_edges(nu), dtype=float)
-        z_edges = f_21 / nu_edges - 1.0
-        chi_edges = np.asarray(
-            self.astropy_cosmo_fiducial.comoving_distance(z_edges).to("Mpc").value,
-            dtype=float,
-        )
-        return np.abs(np.diff(chi_edges))
+        return channel_comoving_widths(self)
 
     @property
     def kperp_edges(self):
         """Edges of the :math:`k_\\perp` integration bins, in Mpc^-1."""
-        edges = self._kperp_edges
-        if edges is None:
-            dperp_min = (
-                np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(np.min(self.chi_ch))
-            )
-            kmax = self.kperp_max
-            if kmax is None:
-                kmax = 4.0 * np.pi / dperp_min
-            else:
-                kmax = float(kmax)
-                if not np.isfinite(kmax) or kmax <= 0.0:
-                    raise ValueError(f"kperp_max must be positive, got {kmax!r}")
-            edges = np.linspace(0.0, kmax, self.n_kperp + 1)
-        if np.any(np.diff(edges) <= 0.0):
-            raise ValueError("kperp_edges must be strictly increasing")
-        return np.asarray(edges, dtype=float)
+        return self._one_dim_model.kperp_edges
 
     @property
     def kperp(self):
         """Centres of the :math:`k_\\perp` integration bins, in Mpc^-1."""
-        edges = self.kperp_edges
-        return 0.5 * (edges[:-1] + edges[1:])
+        return self._one_dim_model.kperp
 
     @property
     def dk_perp(self):
         """Widths of the :math:`k_\\perp` integration bins, in Mpc^-1."""
-        return np.diff(self.kperp_edges)
+        return self._one_dim_model.dk_perp
 
     def _pair_weight_cubes(self, sort_chi=True):
         """Return ``(w_map, n_cube)`` cubes ordered by ascending chi or native channels."""
@@ -2047,28 +1978,11 @@ class Stacking(PowerSpectrum):
 
     def _chi_nodes(self, n_chi=None, channel_weights=None):
         """Comoving distance nodes across the band and their pair weights."""
-        chi_all = self.chi_ch
-        order = np.argsort(chi_all)
-        chi_s = chi_all[order]
-        n = self.n_chi if n_chi is None else int(n_chi)
-        if n < 1:
-            raise ValueError("n_chi must be >= 1")
-        if chi_s.size == 1 or n == 1:
-            return np.array([float(np.mean(chi_s))]), np.array([1.0])
-        edges = np.linspace(chi_s[0], chi_s[-1], n + 1)
-        nodes = 0.5 * (edges[:-1] + edges[1:])
-        if channel_weights is None:
-            cw = np.ones(chi_s.size, dtype=float)
-        else:
-            cw = np.asarray(channel_weights, dtype=float).ravel()
-        idx = np.clip(np.digitize(chi_s, edges) - 1, 0, n - 1)
-        weights = np.bincount(idx, weights=cw, minlength=n)[:n].astype(float)
-        total = float(weights.sum())
-        if total <= 0.0:
-            weights = np.ones(n, dtype=float) / float(n)
-        else:
-            weights = weights / total
-        return nodes, weights
+        return chi_nodes_and_weights(
+            np.sort(self.chi_ch),
+            n_chi=self.n_chi if n_chi is None else int(n_chi),
+            weights=channel_weights,
+        )
 
     def transverse_window(
         self,
@@ -2084,10 +1998,9 @@ class Stacking(PowerSpectrum):
     ):
         r"""Band-averaged transverse stacking window at angular lag :math:`(\Delta i, \Delta j)`.
 
-        Averages the product of the square-pixel window (default
-        :math:`|W_{\rm pix}|^2`, ``pixel_power=2``) and the linear map-leg dish
-        beam :math:`W_{\rm beam}` over comoving distance nodes weighted by the
-        survey's channel pair weights.
+        Delegates to :meth:`meer21cm.los_model.OneDimPowerModel.transverse_window`
+        with ``beam_power=1`` (linear map-leg dish beam) and default
+        ``pixel_power=2`` (:math:`|W_{\rm pix}|^2`).
 
         Parameters
         ----------
@@ -2120,97 +2033,18 @@ class Stacking(PowerSpectrum):
             Band-averaged transverse window on :attr:`kperp`, shape
             ``(len(kperp),)``.
         """
-        use_pix = (
-            self.include_pixel_window
-            if include_pixel_window is None
-            else bool(include_pixel_window)
+        return self._one_dim_model.transverse_window(
+            di=di,
+            dj=dj,
+            chi_grid=np.sort(self.chi_ch),
+            node_weights=channel_weights,
+            n_chi=n_chi,
+            n_phi=n_phi,
+            include_pixel_window=include_pixel_window,
+            include_beam_window=include_beam_window,
+            pixel_power=pixel_power,
+            beam_mode=beam_mode,
         )
-        use_beam = (
-            self.include_beam_window
-            if include_beam_window is None
-            else bool(include_beam_window)
-        )
-        pix_pow = self.pixel_power if pixel_power is None else float(pixel_power)
-        b_mode = self.beam_mode if beam_mode is None else str(beam_mode)
-        if b_mode not in ("continuous", "discrete"):
-            raise ValueError(
-                f"beam_mode must be 'continuous' or 'discrete', got {b_mode!r}"
-            )
-        effective_pix_pow = pix_pow if use_pix else 0.0
-
-        kperp = self.kperp
-        nodes, weights = self._chi_nodes(n_chi=n_chi, channel_weights=channel_weights)
-        theta_pix = np.sqrt(float(self.pixel_area)) * _DEG2RAD
-
-        sigma_b = None
-        if use_beam and getattr(self, "sigma_beam_ch", None) is not None:
-            chi_all = self.chi_ch
-            sigma_arr = np.atleast_1d(
-                np.asarray(self.sigma_beam_ch_in_mpc, dtype=float)
-            )
-            order = np.argsort(chi_all)
-            chi_for_beam = chi_all[order]
-            sigma_b = np.abs(sigma_arr[order])
-
-        acc = np.zeros_like(kperp)
-        for node, wt in zip(nodes, weights):
-            dperp = theta_pix * float(node)
-            if sigma_b is not None and b_mode == "discrete":
-                sb = float(np.interp(node, chi_for_beam, sigma_b))
-                w_node = discrete_beam_window_amplitude(
-                    kperp,
-                    dperp,
-                    sb,
-                    di=di,
-                    dj=dj,
-                    n_phi=n_phi,
-                    pixel_power=effective_pix_pow,
-                )
-            else:
-                if use_pix or int(di) != 0 or int(dj) != 0:
-                    w_node = azimuthal_pixel_window_lag(
-                        kperp,
-                        dperp,
-                        di=di,
-                        dj=dj,
-                        n_phi=n_phi,
-                        pixel_power=effective_pix_pow,
-                    )
-                else:
-                    w_node = np.ones_like(kperp)
-                if sigma_b is not None:
-                    sb = float(np.interp(node, chi_for_beam, sigma_b))
-                    w_node = w_node * beam_window_amplitude(kperp, sb)
-            acc += wt * w_node
-        return acc
-
-    def _eval_power_kmu(self, k_mesh, mu_mesh, which="cross", include_mean_amp=True):
-        """Evaluate 3D model ``P(k, mu)`` without mutating ``kmode`` / ``mumode`` state."""
-        if self.power_kmu_func is not None:
-            power = np.asarray(self.power_kmu_func(k_mesh, mu_mesh), dtype=float)
-            if power.shape != k_mesh.shape:
-                raise ValueError(
-                    f"power_kmu_func returned shape {power.shape}, expected {k_mesh.shape}"
-                )
-            return power
-
-        cache_names = (
-            "_kmode",
-            "_mumode",
-            "_auto_power_matter_model_r",
-            "_auto_power_matter_model",
-            "_auto_power_tracer_1_model_noobs",
-            "_auto_power_tracer_2_model_noobs",
-            "_cross_power_tracer_model_noobs",
-        )
-        saved = {name: getattr(self, name, None) for name in cache_names}
-        try:
-            self.kmode = k_mesh
-            self.mumode = mu_mesh
-            return self.power_kmu(which=which, include_mean_amp=include_mean_amp)
-        finally:
-            for name, val in saved.items():
-                setattr(self, name, val)
 
     def model_1d_power(
         self,
@@ -2233,7 +2067,8 @@ class Stacking(PowerSpectrum):
               \overline{W}_\times^{(\Delta i, \Delta j)}(k_\perp)
 
         with :math:`k = \sqrt{k_\perp^2 + k_\parallel^2}` and
-        :math:`\mu = k_\parallel / k`.
+        :math:`\mu = k_\parallel / k`, delegating to
+        :meth:`meer21cm.los_model.OneDimPowerModel.model_1d_power`.
 
         Parameters
         ----------
@@ -2255,24 +2090,20 @@ class Stacking(PowerSpectrum):
         p1d : ndarray
             Projected 1D power spectrum, shape ``(len(kpar),)``.
         """
-        kpar_arr = np.atleast_1d(np.asarray(kpar, dtype=float)).ravel()
-        if kpar_arr.size == 0:
-            raise ValueError("kpar must be non-empty")
-        kperp = self.kperp
-        k_mesh = np.sqrt(kperp[:, None] ** 2 + kpar_arr[None, :] ** 2)
-        mu_mesh = np.broadcast_to(kpar_arr[None, :], k_mesh.shape) / np.maximum(
-            k_mesh, 1e-12
+        kw = dict(window_kwargs)
+        ch_weights = kw.pop("channel_weights", None)
+        return self._one_dim_model.model_1d_power(
+            kpar,
+            di=di,
+            dj=dj,
+            which=which,
+            include_mean_amp=include_mean_amp,
+            cross_shot_noise=cross_shot_noise,
+            preserve_cache=True,
+            chi_grid=np.sort(self.chi_ch),
+            node_weights=ch_weights,
+            **kw,
         )
-        power = self._eval_power_kmu(
-            k_mesh, mu_mesh, which=which, include_mean_amp=include_mean_amp
-        )
-        if callable(cross_shot_noise):
-            power = power + np.asarray(cross_shot_noise(kpar_arr), dtype=float)[None, :]
-        elif float(cross_shot_noise) != 0.0:
-            power = power + float(cross_shot_noise)
-        w_perp = self.transverse_window(di=di, dj=dj, **window_kwargs)
-        measure = (kperp * self.dk_perp / (2.0 * np.pi))[:, None]
-        return np.sum(measure * power * w_perp[:, None], axis=0)
 
     def _default_kpar_grids(self, chi_s, dchi_s, kpar_max=None, n_kpar_eval=256):
         """Build coarse P_1D evaluation grid and Nyquist-safe fine quadrature grid."""
@@ -2363,21 +2194,22 @@ class Stacking(PowerSpectrum):
             kpar_max=kpar_max,
             n_kpar_eval=n_kpar_eval,
         )
-        kperp = self.kperp
-        k_mesh = np.sqrt(kperp[:, None] ** 2 + kpar_eval[None, :] ** 2)
-        mu_mesh = np.broadcast_to(kpar_eval[None, :], k_mesh.shape) / np.maximum(
-            k_mesh, 1e-12
+        model_1d = self._one_dim_model
+        edges_kp = model_1d.kperp_edges
+        kperp = 0.5 * (edges_kp[:-1] + edges_kp[1:])
+        dk_perp = np.diff(edges_kp)
+        _km, _mm, power_3d = model_1d.eval_power_kmu(
+            kpar_eval,
+            which=which,
+            include_mean_amp=include_mean_amp,
+            cross_shot_noise=cross_shot_noise,
+            preserve_cache=True,
+            kperp=kperp,
         )
-        power_3d = self._eval_power_kmu(
-            k_mesh, mu_mesh, which=which, include_mean_amp=include_mean_amp
-        )
-        if callable(cross_shot_noise):
-            power_3d = (
-                power_3d + np.asarray(cross_shot_noise(kpar_eval), dtype=float)[None, :]
-            )
-        elif float(cross_shot_noise) != 0.0:
-            power_3d = power_3d + float(cross_shot_noise)
-        measure = (kperp * self.dk_perp / (2.0 * np.pi))[:, None]
+        measure = (kperp * dk_perp / (2.0 * np.pi))[:, None]
+        chi_sorted = np.sort(chi_all)
+        win_kw = dict(window_kwargs)
+        win_kw.pop("channel_weights", None)
 
         q0_global = None
         if self.stack_weighting == "quadratic":
@@ -2397,11 +2229,13 @@ class Stacking(PowerSpectrum):
         for di, dj in lags:
             sym_key = tuple(sorted((abs(int(di)), abs(int(dj)))))
             if sym_key not in cov_cache:
-                w_perp = self.transverse_window(
+                w_perp = model_1d.transverse_window(
                     di=sym_key[0],
                     dj=sym_key[1],
-                    channel_weights=ch_weights,
-                    **window_kwargs,
+                    chi_grid=chi_sorted,
+                    node_weights=ch_weights,
+                    kperp=kperp,
+                    **win_kw,
                 )
                 p1d_eval = np.sum(measure * power_3d * w_perp[:, None], axis=0)
                 p1d_quad = CubicSpline(kpar_eval, p1d_eval)(kpar_quad)

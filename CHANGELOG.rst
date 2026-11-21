@@ -34,6 +34,12 @@ dev
   :math:`|W_{\rm pix}|^2`, continuous or discrete-grid dish beams, non-separable
   3D map/galaxy weights, jagged comoving bins, and optional linear cleaning
   matrices :math:`\mathbb{M}`
+* unify shared 1D transverse-projection modelling in ``meer21cm.los_model``
+  (``OneDimPowerModel``, ``azimuthal_pixel_window``, ``beam_window``,
+  ``discrete_beam_window``, ``pixel_window_power``,
+  ``channel_comoving_distances``, ``channel_comoving_widths``, and
+  ``chi_nodes_and_weights``) shared via composition by both
+  ``LineOfSightPowerSpectrum`` and ``Stacking``
 
 Fixes
 +++++

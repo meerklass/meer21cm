@@ -65,13 +65,23 @@ from typing import Callable
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from .los_model import (
+    OneDimPowerModel,
+    azimuthal_pixel_window,
+    beam_window,
+    channel_comoving_distances,
+    channel_comoving_widths,
+    chi_nodes_and_weights,
+    pixel_window_power,
+)
 from .model import ModelPowerSpectrum
 from .transfer import RadialTransferFunction
-from .util import f_21, periodic_hann, taper_values
+from .util import periodic_hann, taper_values
 
 __all__ = [
     "LineOfSightMeasurement",
     "LineOfSightPowerSpectrum",
+    "OneDimPowerModel",
     "azimuthal_pixel_window_power",
     "beam_window_power",
     "estimate_1d_power",
@@ -80,8 +90,6 @@ __all__ = [
     "resample_sightlines",
     "uniform_comoving_grid",
 ]
-
-_DEG2RAD = np.pi / 180.0
 
 LOSWhich = str
 """Tracer combination: ``"auto_1"``, ``"auto_2"`` or ``"cross"``."""
@@ -187,43 +195,11 @@ def resample_sightlines(
     return out.reshape(data.shape[:-1] + (chi_u_arr.size,))
 
 
-def _sinc(x: ArrayLike) -> NDArray[np.floating]:
-    r"""``sin(x)/x`` with the ``x -> 0`` limit (``np.sinc(x / pi)``)."""
-    return np.sinc(np.asarray(x, dtype=float) / np.pi)
-
-
-def pixel_window_power(
-    kx: ArrayLike, ky: ArrayLike, dperp: float
-) -> NDArray[np.floating]:
-    r"""
-    Power window of a square pixel top-hat on the box Fourier grid.
-
-    .. math::
-
-        |W_\perp|^2 = \mathrm{sinc}^2(k_x D_\perp / 2)\,
-                      \mathrm{sinc}^2(k_y D_\perp / 2)
-
-    Parameters
-    ----------
-    kx, ky : ArrayLike
-        Transverse wavenumbers, in Mpc^-1.
-    dperp : float
-        Comoving side of the pixel, in Mpc.
-
-    Returns
-    -------
-    NDArray[np.floating]
-        The power window, with the broadcast shape of ``kx`` and ``ky``.
-    """
-    return (
-        _sinc(np.asarray(kx, dtype=float) * dperp / 2.0) ** 2
-        * _sinc(np.asarray(ky, dtype=float) * dperp / 2.0) ** 2
-    )
-
-
 def beam_window_power(kperp: ArrayLike, sigma_b: float) -> NDArray[np.floating]:
     r"""
     Power window of an achromatic Gaussian beam.
+
+    Thin alias of :func:`meer21cm.los_model.beam_window` with ``power=2``.
 
     Parameters
     ----------
@@ -237,7 +213,7 @@ def beam_window_power(kperp: ArrayLike, sigma_b: float) -> NDArray[np.floating]:
     NDArray[np.floating]
         ``exp(-k_perp^2 sigma_b^2)``.
     """
-    return np.exp(-(np.asarray(kperp, dtype=float) ** 2) * float(sigma_b) ** 2)
+    return beam_window(kperp, sigma_b, power=2.0)
 
 
 def azimuthal_pixel_window_power(
@@ -246,16 +222,14 @@ def azimuthal_pixel_window_power(
     r"""
     Azimuthally averaged power window of a square pixel top-hat.
 
+    Thin alias of :func:`meer21cm.los_model.azimuthal_pixel_window` at zero
+    angular lag with ``pixel_power=2``:
+
     .. math::
 
         \langle \mathrm{sinc}^2(k_x D_\perp / 2)\,
         \mathrm{sinc}^2(k_y D_\perp / 2) \rangle_\phi ,
         \qquad k_x = k_\perp\cos\phi,\; k_y = k_\perp\sin\phi .
-
-    This is the correct transverse window for the one-dimensional
-    :math:`k_\perp` integral: for an isotropic :math:`P_{3D}` the cosine
-    depends on :math:`k_\perp` only, so the azimuthal integral acts on the
-    window alone.
 
     Parameters
     ----------
@@ -271,13 +245,7 @@ def azimuthal_pixel_window_power(
     NDArray[np.floating]
         The averaged power window, shape ``(len(kperp),)``.
     """
-    kperp_arr = np.atleast_1d(np.asarray(kperp, dtype=float))
-    u = kperp_arr * float(dperp)
-    phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
-    ux = u[:, None] * np.cos(phi)[None, :]
-    uy = u[:, None] * np.sin(phi)[None, :]
-    w = _sinc(0.5 * ux) ** 2 * _sinc(0.5 * uy) ** 2
-    return w.mean(axis=1)
+    return azimuthal_pixel_window(kperp, dperp, di=0, dj=0, n_phi=n_phi, pixel_power=2)
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +512,8 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
         kperp_max: float | None = None,
         include_pixel_window: bool = True,
         include_beam_window: bool = True,
+        beam_power: float = 2.0,
+        beam_mode: str = "continuous",
         radial_transfer: RadialTransferFunction | str | None = None,
         power_kmu_func: Callable[[NDArray, NDArray], NDArray] | None = None,
         **params,
@@ -567,6 +537,12 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
             raise ValueError("kperp_edges must be a 1-D array with at least two edges")
         self.include_pixel_window = bool(include_pixel_window)
         self.include_beam_window = bool(include_beam_window)
+        self.beam_power = float(beam_power)
+        if str(beam_mode) not in ("continuous", "discrete"):
+            raise ValueError(
+                f"beam_mode must be 'continuous' or 'discrete', got {beam_mode!r}"
+            )
+        self.beam_mode = str(beam_mode)
         if isinstance(radial_transfer, str) and radial_transfer != "auto":
             raise ValueError(
                 "radial_transfer must be a RadialTransferFunction, None or 'auto'"
@@ -575,6 +551,24 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
         self.power_kmu_func = power_kmu_func
 
         self.data_2 = None if data_2 is None else np.asarray(data_2, dtype=float)
+
+    @property
+    def _one_dim_model(self) -> OneDimPowerModel:
+        """Live :class:`~meer21cm.los_model.OneDimPowerModel` bound to ``self``."""
+        return OneDimPowerModel(
+            self,
+            n_chi=self.n_chi,
+            kperp_edges=self._kperp_edges,
+            n_kperp=self.n_kperp,
+            kperp_max=self.kperp_max,
+            include_pixel_window=self.include_pixel_window,
+            include_beam_window=self.include_beam_window,
+            pixel_power=2.0,
+            beam_power=self.beam_power,
+            beam_mode=self.beam_mode,
+            power_kmu_func=self.power_kmu_func,
+            enforce_first_zero=True,
+        )
 
     # -- data aliases --------------------------------------------------
     @property
@@ -590,20 +584,12 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
     @property
     def chi_ch(self) -> NDArray[np.floating]:
         """Comoving distance to each channel centre, in Mpc (fiducial cosmology)."""
-        z = np.asarray(self.z_ch, dtype=float)
-        return self.astropy_cosmo_fiducial.comoving_distance(z).to("Mpc").value
+        return channel_comoving_distances(self)
 
     @property
     def dchi_ch(self) -> NDArray[np.floating]:
         """Comoving width of each channel, in Mpc."""
-        nu = np.asarray(self.nu, dtype=float)
-        dnu = float(self.freq_resol)
-        z_hi = f_21 / (nu - 0.5 * dnu) - 1.0
-        z_lo = f_21 / (nu + 0.5 * dnu) - 1.0
-        chi = self.astropy_cosmo_fiducial.comoving_distance(
-            np.concatenate([z_hi, z_lo])
-        ).value
-        return np.abs(chi[: nu.size] - chi[nu.size :])
+        return channel_comoving_widths(self, use_freq_resol=True)
 
     @property
     def chi_u(self) -> NDArray[np.floating]:
@@ -754,41 +740,15 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
     @property
     def kperp_edges(self) -> NDArray[np.floating]:
         """Edges of the :math:`k_\\perp` integration bins, in Mpc^-1."""
-        edges = self._kperp_edges
-        if edges is None:
-            dperp_min = (
-                np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(self.chi_u.min())
-            )
-            kmax = self.kperp_max
-            if kmax is None:
-                kmax = 4.0 * np.pi / dperp_min
-            else:
-                kmax = float(kmax)
-                if kmax <= 2.0 * np.pi / dperp_min:
-                    raise ValueError(
-                        "kperp_max is below the first zero of the pixel "
-                        f"window ({2 * np.pi / dperp_min:.4f} Mpc^-1); the "
-                        "k_perp integral would be truncated."
-                    )
-            edges = np.linspace(0.0, kmax, self.n_kperp + 1)
-        if np.any(np.diff(edges) <= 0):
-            raise ValueError("kperp_edges must be strictly increasing")
-        return np.asarray(edges, dtype=float)
+        return self._one_dim_model.kperp_edges_for(chi_min=float(self.chi_u.min()))
 
     def _chi_nodes(self) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """Comoving radii across the band and their taper weights."""
         chi_u = self.chi_u
-        n = self.n_chi
-        edges = np.linspace(chi_u.min(), chi_u.max(), n + 1)
-        nodes = 0.5 * (edges[:-1] + edges[1:])
         w2 = _taper_values(self.taper, chi_u.size) ** 2
-        idx = np.clip(np.digitize(chi_u, edges) - 1, 0, n - 1)
-        weights = np.bincount(idx, weights=w2, minlength=n)[:n].astype(float)
-        if weights.sum() <= 0:
-            weights = np.ones(n)
-        return nodes, weights / weights.sum()
+        return chi_nodes_and_weights(chi_u, n_chi=self.n_chi, weights=w2)
 
-    def transverse_window(self) -> NDArray[np.floating]:
+    def transverse_window(self, **kwargs) -> NDArray[np.floating]:
         r"""
         Band-averaged transverse power window on the :math:`k_\\perp` grid.
 
@@ -798,36 +758,14 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
             :math:`\langle \overline{W_\perp^2}\, W_{\\rm beam}^2 \rangle_\chi`,
             shape ``(n_kperp,)``.
         """
-        kperp = self.kperp
-        nodes, weights = self._chi_nodes()
-
-        sigma_b = None
-        if (
-            self.include_beam_window
-            and getattr(self, "sigma_beam_ch", None) is not None
-        ):
-            sigma_b = np.atleast_1d(np.asarray(self.sigma_beam_ch_in_mpc, dtype=float))
-            if sigma_b.size != np.size(self.chi_ch):
-                sigma_b = np.full(np.size(self.chi_ch), float(sigma_b.flat[0]))
-            sigma_b = np.abs(sigma_b)
-            # chi_ch follows the frequency axis and is descending for an
-            # ascending band. np.interp requires an ascending coordinate.
-            order = np.argsort(np.asarray(self.chi_ch, dtype=float))
-            chi_for_beam = np.asarray(self.chi_ch, dtype=float)[order]
-            sigma_b = sigma_b[order]
-
-        acc = np.zeros_like(kperp)
-        for node, wt in zip(nodes, weights):
-            w_node = np.ones_like(kperp)
-            if self.include_pixel_window:
-                dperp = np.sqrt(float(self.pixel_area)) * _DEG2RAD * float(node)
-                w_node = w_node * azimuthal_pixel_window_power(kperp, dperp)
-            if sigma_b is not None:
-                sb = float(np.interp(node, chi_for_beam, sigma_b))
-                w_node = w_node * beam_window_power(kperp, sb)
-            acc += wt * w_node
-
-        return acc
+        chi_u = self.chi_u
+        w2 = _taper_values(self.taper, chi_u.size) ** 2
+        return self._one_dim_model.transverse_window(
+            chi_grid=chi_u,
+            node_weights=w2,
+            kperp=self.kperp,
+            **kwargs,
+        )
 
     def build_model_mesh(
         self, kpar: ArrayLike
@@ -851,11 +789,7 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
         k_mesh, mu_mesh : NDArray[np.floating]
             Arrays of shape ``(n_kperp, len(kpar))``.
         """
-        kpar_arr = np.atleast_1d(np.asarray(kpar, dtype=float)).ravel()
-        k_mesh = np.sqrt(self.kperp[:, None] ** 2 + kpar_arr[None, :] ** 2)
-        mu_mesh = np.broadcast_to(kpar_arr[None, :], k_mesh.shape) / np.maximum(
-            k_mesh, 1e-12
-        )
+        k_mesh, mu_mesh = self._one_dim_model.build_mesh(kpar, kperp=self.kperp)
         self.kmode = k_mesh
         self.mumode = mu_mesh
         return self.kmode, self.mumode
@@ -908,18 +842,17 @@ class LineOfSightPowerSpectrum(ModelPowerSpectrum):
         if kpar_arr.size == 0:
             raise ValueError("kpar must be non-empty")
 
-        k_mesh, mu_mesh = self.build_model_mesh(kpar_arr)
-        if self.power_kmu_func is not None:
-            power = np.asarray(self.power_kmu_func(k_mesh, mu_mesh), dtype=float)
-        else:
-            power = self.power_kmu(which=which, include_mean_amp=True)
-        if power.shape != k_mesh.shape:
-            raise ValueError(
-                f"power_kmu returned shape {power.shape}, expected {k_mesh.shape}"
-            )
-
-        weight = (self.kperp * self.dk_perp / (2.0 * np.pi))[:, None]
-        p1d = np.sum(weight * power * self.transverse_window()[:, None], axis=0)
+        chi_u = self.chi_u
+        w2 = _taper_values(self.taper, chi_u.size) ** 2
+        p1d = self._one_dim_model.model_1d_power(
+            kpar_arr,
+            which=which,
+            include_mean_amp=True,
+            preserve_cache=False,
+            chi_min=float(chi_u.min()),
+            chi_grid=chi_u,
+            node_weights=w2,
+        )
 
         radial = self._radial_window()
         if radial is not None:

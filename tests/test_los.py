@@ -535,8 +535,14 @@ def test_los_constructor_validation():
         _small_los(kperp_edges=np.ones((2, 2)))
     with pytest.raises(ValueError, match="kperp_edges must be a 1-D array"):
         _small_los(kperp_edges=np.array([0.1]))
+    with pytest.raises(ValueError, match="beam_mode"):
+        _small_los(beam_mode="airy")
     with pytest.raises(ValueError, match="radial_transfer must be"):
         _small_los(radial_transfer="none")
+    los = _small_los(kperp_edges=np.linspace(0.0, 0.3, 17))
+    km, mm = los.build_model_mesh(np.array([0.02, 0.05]))
+    assert km.shape == (16, 2) and mm.shape == (16, 2)
+    assert np.array_equal(los.kmode, km) and np.array_equal(los.mumode, mm)
 
 
 def test_los_geometry():

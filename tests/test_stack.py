@@ -1598,9 +1598,11 @@ def test_stacking_model_cosmological_kmu_and_options():
     )
     assert np.isfinite(spec_gal_only).all()
 
-    # Scalar sigma_beam on multi-channel worker
+    # Scalar sigma_beam on multi-channel worker + kperp / dk_perp properties
     worker.sigma_beam_ch = np.array([0.7])
     assert np.isfinite(worker.transverse_window()).all()
+    assert worker.kperp.shape == (64,)
+    assert worker.dk_perp.shape == (64,)
 
     # Edge cases: single channel, lag > nx, data=None, w_HI=None, W_HI=None
     w_1ch = Stacking(

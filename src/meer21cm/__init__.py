@@ -20,6 +20,7 @@ __all__ = [
     "WindowedMultipoleModel",
     "DiscreteShellWindowMatrix",
     "LineOfSightPowerSpectrum",
+    "OneDimPowerModel",
     "RadialTransferFunction",
     "Stacking",
 ]
@@ -37,6 +38,7 @@ _LAZY_ATTRS = {
         "DiscreteShellWindowMatrix",
     ),
     "LineOfSightPowerSpectrum": ("meer21cm.los", "LineOfSightPowerSpectrum"),
+    "OneDimPowerModel": ("meer21cm.los_model", "OneDimPowerModel"),
     "RadialTransferFunction": ("meer21cm.transfer", "RadialTransferFunction"),
     "Stacking": ("meer21cm.stack", "Stacking"),
 }
