@@ -6,6 +6,10 @@ dev
 
 * transfer function can load precomputed HI and galaxy mocks, return several
   multipoles, and apply the cleaning matrix to the combined map
+* add ``subtract_cleaned_data`` to ``TransferFunction`` (default ``True``): subtract the
+  cleaned data map from each cleaned data + mock map, reducing the mock-to-mock scatter
+  without changing the mean transfer function
+* ``project_combined`` now defaults to ``True`` in ``TransferFunction``
 
 v0.10.0
 -------

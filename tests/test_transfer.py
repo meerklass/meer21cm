@@ -517,18 +517,20 @@ def test_subtract_cleaned_data(tmp_path):
         assert mock_only.size >= 1
         assert not np.allclose(combined, mock_only)
         assert np.allclose(subtracted, mock_only)
-        # the dilution is divided out of the difference
-        dilution = np.linspace(0.4, 1.3, n_freq)
-        diluted = cleaned_power("cross", mock_dilution=dilution, **fixed)
-        diluted_mock_only = cleaned_power(
-            "cross", project_combined=False, mock_dilution=dilution, **fixed
-        )
-        assert np.allclose(diluted, diluted_mock_only)
         # matrix found from data + mock: the data cleaned with its own matrix is removed
         plain = cleaned_power(kind, mean_center_map=True, subtract_cleaned_data=False)
         with_sub = cleaned_power(kind, mean_center_map=True)
         assert np.all(np.isfinite(with_sub))
         assert not np.allclose(plain, with_sub)
+
+    # the dilution is divided out of the difference (cross path only)
+    fixed = dict(R_mat=mix, mean_center_map=False)
+    dilution = np.linspace(0.4, 1.3, n_freq)
+    diluted = cleaned_power("cross", mock_dilution=dilution, **fixed)
+    diluted_mock_only = cleaned_power(
+        "cross", project_combined=False, mock_dilution=dilution, **fixed
+    )
+    assert np.allclose(diluted, diluted_mock_only)
 
     tf = TransferFunction(ps, N_fg=1, uncleaned_data=data)
     assert tf.project_combined is True
