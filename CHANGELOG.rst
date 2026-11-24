@@ -6,10 +6,36 @@ dev
 
 * transfer function can load precomputed HI and galaxy mocks, return several
   multipoles, and apply the cleaning matrix to the combined map
+* add ``LineOfSightPowerSpectrum`` (``meer21cm.los``): the one-dimensional
+  line-of-sight estimator and its transverse-integral model
+* add ``RadialTransferFunction`` and ``radial_transfer`` for the radial window
+  of channel averaging and regridding
+* add ``periodic_hann`` and ``taper_values``
+* field-level Kaiser RSD uses the local plane-parallel operator
+  :math:`f\,\hat n_i\hat n_j\partial_i u_j`
+* replace the power-law negative-density remapping in
+  ``MockSimulation.get_mock_tracer_position_in_box`` with
+  ``positive_density_for_poisson`` (controlled by
+  ``MockSimulation.negative_density_handling="rescale"`` or ``"clip"`` and
+  reported via ``last_negative_density_info``), preventing clustering amplitude
+  blowup under nonlinear high-bias ``rsd_from_field=True`` mocks
 * add ``subtract_cleaned_data`` to ``TransferFunction`` (default ``True``): subtract the
   cleaned data map from each cleaned data + mock map, reducing the mock-to-mock scatter
   without changing the mean transfer function
 * ``project_combined`` now defaults to ``True`` in ``TransferFunction``
+
+Fixes
++++++
+* use log-log power-law extrapolation above ``kmax`` in
+  ``CosmologyCalculator.get_matter_power_spectrum`` so
+  ``matter_power_spectrum_fnc(k)`` stays strictly positive at high ``k``
+  (preventing negative high-``k`` power and ``NaN`` lognormal fields on
+  high-resolution lightcone boxes) while preserving ``k <= kmax`` behaviour
+* paint lightcone voxels onto WCS pixel and channel centres in
+  ``grid_field_to_sky_map`` (half-pixel sky offset and a half-channel
+  stretch at the band edges)
+* scale ``CRPIX`` from the pixel edge in ``create_udres_wproj`` so a
+  resolution change keeps the same footprint
 
 v0.10.0
 -------

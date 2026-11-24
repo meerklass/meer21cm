@@ -418,6 +418,12 @@ def create_udres_wproj(
     The ratio between the output resolution and input is determined by
     ``udres_scale``.
 
+    ``CDELT`` is divided by ``udres_scale``. ``CRPIX`` is scaled about the
+    pixel edge, ``(crpix - 0.5) * udres_scale + 0.5``, so the footprint
+    edges stay on the same sky. For an odd integer scale, the centre of
+    input pixel ``(i, j)`` is the centre of output pixel
+    ``(i * scale + (scale - 1) / 2, j * scale + (scale - 1) / 2)``.
+
     Parameters
     ----------
     wproj: :class:`astropy.wcs.WCS` object.
@@ -431,7 +437,7 @@ def create_udres_wproj(
         The output wcs.
     """
     w = WCS(naxis=2)
-    w.wcs.crpix = wproj.wcs.crpix
+    w.wcs.crpix = (wproj.wcs.crpix - 0.5) * udres_scale + 0.5
     w.wcs.cdelt = wproj.wcs.cdelt / udres_scale
     w.wcs.crval = wproj.wcs.crval
     w.wcs.ctype = wproj.wcs.ctype
@@ -641,6 +647,53 @@ def omega_hi_to_average_temp(omega_hi, z=0, cosmo=Planck18):
     c_hi = coeff_hi_density_to_temp(z=z, cosmo=cosmo)
     t_bar = (c_hi * cosmo.critical_density0 * omega_hi).to("K").value
     return t_bar
+
+
+def periodic_hann(n):
+    """
+    Periodic Hann window.
+
+    Parameters
+    ----------
+    n: int
+        Number of samples.
+
+    Returns
+    -------
+    np.ndarray
+        ``w_j = 0.5 * (1 - cos(2 pi j / n))``, whose mean square is ``3/8``.
+    """
+    j = np.arange(int(n))
+    return 0.5 * (1.0 - np.cos(2.0 * np.pi * j / float(n)))
+
+
+def taper_values(taper, n):
+    """
+    Resolve a taper specification into ``n`` samples.
+
+    Parameters
+    ----------
+    taper: bool or callable
+        ``True`` gives a periodic Hann window, ``False`` a rectangular one,
+        and a callable ``f(n) -> (n,) array`` is used directly.
+    n: int
+        Number of samples.
+
+    Returns
+    -------
+    np.ndarray
+        The taper, shape ``(n,)``.
+    """
+    import numpy as np
+
+    if isinstance(taper, (bool, np.bool_)):
+        return periodic_hann(n) if taper else np.ones(int(n), dtype=float)
+    out = np.asarray(taper(int(n)), dtype=float)
+    if out.shape != (int(n),):
+        raise ValueError(
+            f"taper callable must return shape ({int(n)},), got {out.shape}"
+        )
+    return out
 
 
 def freq_to_redshift(freq):
