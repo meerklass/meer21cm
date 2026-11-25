@@ -642,6 +642,40 @@ def test_subtract_cleaned_data(tmp_path):
         arg[names.index("cleaned_data")] = np.zeros_like(data)
         with pytest.raises(ValueError, match="project_combined"):
             worker(*arg)
+        arg[names.index("cleaned_data")] = "invalid"
+        with pytest.raises(ValueError, match="auto"):
+            worker(*arg)
+
+    # Direct worker default (cleaned_data="auto") matches TransferFunction defaults
+    tf_direct = TransferFunction(
+        ps,
+        N_fg=1,
+        highres_sim=1,
+        upres_transverse=1,
+        upres_radial=1,
+        num_process=1,
+        mock_directory=prefix,
+        uncleaned_data=data,
+    )
+    for kind, arg_func, worker in (
+        ("cross", tf_direct.get_arg_list_for_parallel_cross, run_tf_calculation_cross),
+        ("auto", tf_direct.get_arg_list_for_parallel_auto, run_tf_calculation_auto),
+    ):
+        full_arg = arg_func([0], return_power_1d=True)[0]
+        from_tf = np.asarray(worker(*full_arg)[-1])
+        # Omitting cleaned_data uses worker default "auto"
+        from_worker_default = np.asarray(worker(*full_arg[:-1])[-1])
+        occ = np.isfinite(from_tf)
+        assert np.allclose(from_worker_default[occ], from_tf[occ])
+        # project_combined=False with default cleaned_data="auto" does not subtract or raise
+        no_proj_arg = list(full_arg[:-1])
+        names = list(inspect.signature(worker).parameters)
+        no_proj_arg[names.index("project_combined")] = False
+        from_auto_false = np.asarray(worker(*no_proj_arg)[-1])
+        expected_mock_only = cleaned_power(kind, project_combined=False)
+        assert np.allclose(
+            from_auto_false[np.isfinite(from_auto_false)], expected_mock_only
+        )
 
 
 def test_zero_weight_gap_and_nan_channels(tmp_path):

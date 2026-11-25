@@ -21,11 +21,21 @@ dev
   blowup under nonlinear high-bias ``rsd_from_field=True`` mocks
 * add ``subtract_cleaned_data`` to ``TransferFunction`` (default ``True``): subtract the
   cleaned data map from each cleaned data + mock map, reducing the mock-to-mock scatter
-  without changing the mean transfer function
-* ``project_combined`` now defaults to ``True`` in ``TransferFunction``
+  without changing the mean transfer function; ``run_tf_calculation_cross`` and
+  ``run_tf_calculation_auto`` default to ``cleaned_data="auto"`` to match this behaviour
+* ``project_combined`` now defaults to ``True`` in ``TransferFunction`` and its worker
+  functions (breaking default change relative to prior mock-only projection; the 2019
+  and 2021 L-band cookbooks explicitly pass ``project_combined=False`` to retain their
+  legacy settings)
 
 Fixes
 +++++
+* handle zero-weight and ``NaN`` frequency channels safely in
+  ``apply_cleaning_matrix``, ``run_tf_calculation_auto``, and ``mock_dilution``
+  rescaling so flagged channels do not propagate ``NaN`` across the cube
+* promote data and mock cubes to ``float64`` before summing in transfer-function
+  cleaning, and raise ``ValueError`` if an explicit ``cleaned_data`` array is passed
+  to a transfer worker with ``project_combined=False``
 * use log-log power-law extrapolation above ``kmax`` in
   ``CosmologyCalculator.get_matter_power_spectrum`` so
   ``matter_power_spectrum_fnc(k)`` stays strictly positive at high ``k``
