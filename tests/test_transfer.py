@@ -10,6 +10,8 @@ from meer21cm import MockSimulation
 from meer21cm.power import PowerSpectrum
 from meer21cm.transfer import (
     TransferFunction,
+    _init_tf_worker,
+    _run_tf_worker_for_seed,
     apply_cleaning_matrix,
     _multipole_ells,
     load_precomputed_mock,
@@ -676,6 +678,11 @@ def test_subtract_cleaned_data(tmp_path):
         assert np.allclose(
             from_auto_false[np.isfinite(from_auto_false)], expected_mock_only
         )
+        # Shared worker initializer runs per seed without mutating shared_args
+        _init_tf_worker(worker, full_arg)
+        from_init = np.asarray(_run_tf_worker_for_seed(0)[-1])
+        assert np.allclose(from_init[occ], from_tf[occ])
+    assert tf_direct.run([], type="cross") == []
 
 
 def test_zero_weight_gap_and_nan_channels(tmp_path):

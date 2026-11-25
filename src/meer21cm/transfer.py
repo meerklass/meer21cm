@@ -786,8 +786,6 @@ class TransferFunction:
             run_func = run_null_test
         else:
             raise ValueError(f"Invalid type: {type}")
-        arg_func = getattr(self, f"get_arg_list_for_parallel_{type}")
-        arg_list = arg_func(seed_list, return_power_3d, return_power_1d, multipole_ells)
         if self.pool == "multiprocessing":
             pool_func = Pool
         elif self.pool == "mpi":
@@ -796,11 +794,37 @@ class TransferFunction:
             pool_func = MPIPoolExecutor
         else:
             raise ValueError(f"Invalid pool: {self.pool}")
-        results_arr = []
-        with pool_func(self.num_process) as pool:
-            for result_i in pool.starmap(run_func, arg_list):
-                results_arr.append(result_i)
-        return results_arr
+        seed_list = list(seed_list)
+        if len(seed_list) == 0:
+            return []
+        arg_func = getattr(self, f"get_arg_list_for_parallel_{type}")
+        shared_args = arg_func(
+            [seed_list[0]], return_power_3d, return_power_1d, multipole_ells
+        )[0]
+        with pool_func(
+            self.num_process,
+            initializer=_init_tf_worker,
+            initargs=(run_func, shared_args),
+        ) as pool:
+            return list(pool.map(_run_tf_worker_for_seed, seed_list))
+
+
+_WORKER_STATE = {}
+
+
+def _init_tf_worker(run_func, shared_args):
+    """Store seed-independent worker arguments once per worker process."""
+    _WORKER_STATE["run_func"] = run_func
+    _WORKER_STATE["shared_args"] = shared_args
+
+
+def _run_tf_worker_for_seed(seed):
+    """Run the initialized transfer worker for a single seed."""
+    run_func = _WORKER_STATE["run_func"]
+    shared_args = _WORKER_STATE["shared_args"]
+    mock_attr_dict = dict(shared_args[0])
+    mock_attr_dict["seed"] = seed
+    return run_func(mock_attr_dict, *shared_args[1:])
 
 
 def _multipole_ells(multipole_ells):
@@ -838,15 +862,18 @@ def _compute_cleaned_data(
     """Clean ``uncleaned_data`` with ``R_mat`` or its own PCA matrix."""
     if not np.any(uncleaned_data):
         return None
-    cleaning_matrix = R_mat
-    if cleaning_matrix is None:
-        cleaning_matrix = get_pca_matrix(
-            uncleaned_data, N_fg, pca_map_weights, mean_center_map
+    if R_mat is None:
+        return pca_clean(
+            np.asarray(uncleaned_data, dtype=float),
+            N_fg,
+            weights=pca_map_weights,
+            mean_center=mean_center_map,
+            ignore_nan=True,
         )
     return apply_cleaning_matrix(
         0.0,
         uncleaned_data,
-        cleaning_matrix,
+        R_mat,
         pca_map_weights,
         mean_center_map,
         True,
@@ -938,7 +965,7 @@ def apply_cleaning_matrix(
     if mean_center_map:
         data_mean = _weighted_channel_mean(array_to_clean, map_weights)
         array_to_clean = array_to_clean - data_mean[None, None, :]
-    return np.einsum("ij,abj->abi", cleaning_matrix, array_to_clean)
+    return array_to_clean @ np.asarray(cleaning_matrix).T
 
 
 def _align_loaded_cube_masks(mock):
@@ -1290,22 +1317,34 @@ def run_tf_calculation_cross(
         dilution = np.asarray(mock_dilution, dtype=float)
         valid_dilution = np.isfinite(dilution) & (dilution != 0)
         mock.data = mock.data * np.where(valid_dilution, dilution, 0.0)
-    map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
-        mock.data, dtype=float
-    )
-    cleaning_matrix = R_mat
-    if cleaning_matrix is None:
-        cleaning_matrix = get_pca_matrix(
-            map_to_clean, N_fg, pca_map_weights, mean_center_map
+    if R_mat is None and project_combined:
+        map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
+            mock.data, dtype=float
         )
-    mock.data = apply_cleaning_matrix(
-        mock.data,
-        uncleaned_data,
-        cleaning_matrix,
-        pca_map_weights,
-        mean_center_map,
-        project_combined,
-    )
+        mock.data = pca_clean(
+            map_to_clean,
+            N_fg,
+            weights=pca_map_weights,
+            mean_center=mean_center_map,
+            ignore_nan=True,
+        )
+    else:
+        cleaning_matrix = R_mat
+        if cleaning_matrix is None:
+            map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
+                mock.data, dtype=float
+            )
+            cleaning_matrix = get_pca_matrix(
+                map_to_clean, N_fg, pca_map_weights, mean_center_map
+            )
+        mock.data = apply_cleaning_matrix(
+            mock.data,
+            uncleaned_data,
+            cleaning_matrix,
+            pca_map_weights,
+            mean_center_map,
+            project_combined,
+        )
     if cleaned_data is not None:
         mock.data = mock.data - cleaned_data
     if mock_dilution is not None:
@@ -1480,31 +1519,45 @@ def run_tf_calculation_auto(
     )
     if return_power_3d:
         power_3d_uncleaned = mock.auto_power_3d_1
-    map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
-        mock.data, dtype=float
-    )
-    cleaning_matrix = R_mat
-    if cleaning_matrix is None:
-        cleaning_matrix = get_pca_matrix(
-            map_to_clean, N_fg, pca_map_weights, mean_center_map
+    if R_mat is None and project_combined:
+        map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
+            mock.data, dtype=float
         )
-    if mean_center_map and not project_combined:
-        # Flat-sky gridding aliases field_1 with this map. Subtract in place so
-        # the cross against the cleaned cube uses the mean-centered mock.
-        data_mean = _weighted_channel_mean(mock.data, pca_map_weights)
-        mock.data -= data_mean[None, None, :]
-        cleaned = np.einsum("ij,abj->abi", cleaning_matrix, mock.data)
-    else:
-        cleaned = apply_cleaning_matrix(
-            mock.data,
-            uncleaned_data,
-            cleaning_matrix,
-            pca_map_weights,
-            mean_center_map,
-            project_combined,
+        cleaned = pca_clean(
+            map_to_clean,
+            N_fg,
+            weights=pca_map_weights,
+            mean_center=mean_center_map,
+            ignore_nan=True,
         )
         if cleaned_data is not None:
             cleaned = cleaned - cleaned_data
+    else:
+        cleaning_matrix = R_mat
+        if cleaning_matrix is None:
+            map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
+                mock.data, dtype=float
+            )
+            cleaning_matrix = get_pca_matrix(
+                map_to_clean, N_fg, pca_map_weights, mean_center_map
+            )
+        if mean_center_map and not project_combined:
+            # Flat-sky gridding aliases field_1 with this map. Subtract in place so
+            # the cross against the cleaned cube uses the mean-centered mock.
+            data_mean = _weighted_channel_mean(mock.data, pca_map_weights)
+            mock.data -= data_mean[None, None, :]
+            cleaned = mock.data @ np.asarray(cleaning_matrix).T
+        else:
+            cleaned = apply_cleaning_matrix(
+                mock.data,
+                uncleaned_data,
+                cleaning_matrix,
+                pca_map_weights,
+                mean_center_map,
+                project_combined,
+            )
+            if cleaned_data is not None:
+                cleaned = cleaned - cleaned_data
     mock.data = cleaned
     mock_map_rg_cleaned, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg_before
