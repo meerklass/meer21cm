@@ -890,9 +890,9 @@ def apply_cleaning_matrix(
         Cleaned cube, shape ``(nx, ny, n_freq)``.
     """
     array_to_clean = (
-        np.asarray(uncleaned_data) + mock_data
+        np.asarray(uncleaned_data, dtype=float) + np.asarray(mock_data, dtype=float)
         if project_combined
-        else np.asarray(mock_data)
+        else np.asarray(mock_data, dtype=float)
     )
     if np.isnan(array_to_clean).any():
         array_to_clean = np.where(np.isnan(array_to_clean), 0.0, array_to_clean)
@@ -1239,7 +1239,9 @@ def run_tf_calculation_cross(
         dilution = np.asarray(mock_dilution, dtype=float)
         valid_dilution = np.isfinite(dilution) & (dilution != 0)
         mock.data = mock.data * np.where(valid_dilution, dilution, 0.0)
-    map_to_clean = np.asarray(uncleaned_data) + mock.data
+    map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
+        mock.data, dtype=float
+    )
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
         cleaning_matrix = get_pca_matrix(
@@ -1415,7 +1417,9 @@ def run_tf_calculation_auto(
     )
     if return_power_3d:
         power_3d_uncleaned = mock.auto_power_3d_1
-    map_to_clean = np.asarray(uncleaned_data) + mock.data
+    map_to_clean = np.asarray(uncleaned_data, dtype=float) + np.asarray(
+        mock.data, dtype=float
+    )
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
         cleaning_matrix = get_pca_matrix(
