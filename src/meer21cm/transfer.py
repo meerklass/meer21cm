@@ -837,6 +837,19 @@ def multipole_power_1d(mock, power3d, k1dweights, multipole_ells):
     return np.stack(spectra, axis=0)
 
 
+def _weighted_channel_mean(cube, map_weights):
+    """Per-channel weighted sky mean, zero for channels with zero total weight."""
+    weights = np.asarray(map_weights, dtype=float)
+    weight_sum = np.sum(weights, axis=(0, 1))
+    weighted_sum = np.sum(weights * cube, axis=(0, 1))
+    return np.divide(
+        weighted_sum,
+        weight_sum,
+        out=np.zeros_like(weight_sum, dtype=float),
+        where=weight_sum != 0,
+    )
+
+
 def apply_cleaning_matrix(
     mock_data,
     uncleaned_data,
@@ -852,6 +865,9 @@ def apply_cleaning_matrix(
     ``uncleaned_data + mock_data`` when ``project_combined`` is True.
     When ``mean_center_map`` is True, the frequency mean of that chosen cube,
     weighted by ``map_weights``, is removed before the matrix is applied.
+    Channels with zero total weight are left unshifted (zero mean), and
+    ``NaN`` entries are zeroed before projection so flagged channels do not
+    propagate ``NaN`` across the cube.
 
     Parameters
     ----------
@@ -873,12 +889,15 @@ def apply_cleaning_matrix(
     np.ndarray
         Cleaned cube, shape ``(nx, ny, n_freq)``.
     """
-    combined = np.asarray(uncleaned_data) + mock_data
-    array_to_clean = combined if project_combined else np.asarray(mock_data)
+    array_to_clean = (
+        np.asarray(uncleaned_data) + mock_data
+        if project_combined
+        else np.asarray(mock_data)
+    )
+    if np.isnan(array_to_clean).any():
+        array_to_clean = np.where(np.isnan(array_to_clean), 0.0, array_to_clean)
     if mean_center_map:
-        data_mean = np.sum(map_weights * array_to_clean, axis=(0, 1)) / np.sum(
-            map_weights, axis=(0, 1)
-        )
+        data_mean = _weighted_channel_mean(array_to_clean, map_weights)
         array_to_clean = array_to_clean - data_mean[None, None, :]
     return np.einsum("ij,abj->abi", cleaning_matrix, array_to_clean)
 
@@ -1215,7 +1234,9 @@ def run_tf_calculation_cross(
     # uncleaned_data and cleaned below, mimicking how a real HI signal would
     # have looked after block combination. See TransferFunction's docstring.
     if mock_dilution is not None:
-        mock.data = mock.data * mock_dilution
+        dilution = np.asarray(mock_dilution, dtype=float)
+        valid_dilution = np.isfinite(dilution) & (dilution != 0)
+        mock.data = mock.data * np.where(valid_dilution, dilution, 0.0)
     map_to_clean = np.asarray(uncleaned_data) + mock.data
     cleaning_matrix = R_mat
     if cleaning_matrix is None:
@@ -1235,7 +1256,12 @@ def run_tf_calculation_cross(
     if mock_dilution is not None:
         # Undo the dilution on the cleaned output, mirroring the hit_nomask/
         # hit rescale applied to the real cleaned data.
-        mock.data = mock.data / mock_dilution
+        mock.data = np.divide(
+            mock.data,
+            dilution,
+            out=np.zeros_like(mock.data, dtype=float),
+            where=valid_dilution,
+        )
     mock_map_rg, _, _ = mock.grid_data_to_field()
     mock.field_1 = mock_map_rg
     mock.weights_field_1 = weights_field_1
@@ -1394,9 +1420,7 @@ def run_tf_calculation_auto(
     if mean_center_map and not project_combined:
         # Flat-sky gridding aliases field_1 with this map. Subtract in place so
         # the cross against the cleaned cube uses the mean-centered mock.
-        data_mean = np.sum(pca_map_weights * mock.data, axis=(0, 1)) / np.sum(
-            pca_map_weights, axis=(0, 1)
-        )
+        data_mean = _weighted_channel_mean(mock.data, pca_map_weights)
         mock.data -= data_mean[None, None, :]
         cleaned = np.einsum("ij,abj->abi", cleaning_matrix, mock.data)
     else:

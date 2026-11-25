@@ -633,6 +633,114 @@ def test_subtract_cleaned_data(tmp_path):
     assert TransferFunction(ps, N_fg=1).get_cleaned_data() is None
 
 
+def test_zero_weight_gap_and_nan_channels(tmp_path):
+    ps = _tiny_transfer_ps()
+    ps.k1dbins = np.linspace(0.02, 0.3, 6)
+    n_freq = int(ps.nu.size)
+    gap = 2
+    phase = np.linspace(0.0, 2.0 * np.pi, n_freq)
+    x_grad = np.linspace(-1.0, 1.0, ps.num_pix_x)[:, None, None]
+    y_grad = np.linspace(-1.0, 1.0, ps.num_pix_y)[None, :, None]
+    cube = (1.5 + x_grad + 0.4 * y_grad) * (2.0 + np.cos(phase))
+
+    saver = MockSimulation(
+        nu=np.asarray(ps.nu, dtype=float),
+        wproj=ps.wproj,
+        num_pix_x=ps.num_pix_x,
+        num_pix_y=ps.num_pix_y,
+        flat_sky=True,
+        seed=0,
+    )
+    saver.data = cube
+    saver._ra_gal = np.array([0.2, -0.3])
+    saver._dec_gal = np.array([0.15, -0.25])
+    saver._z_gal = freq_to_redshift(np.asarray(ps.nu, dtype=float)[[1, -2]])
+    prefix = str(tmp_path) + os.sep
+    saver.save_mock_products(prefix, seed=0)
+
+    weights = np.ones_like(cube)
+    weights[:, :, gap] = 0.0
+    ps.W_HI = weights.copy()
+    ps.w_HI = weights.copy()
+    ps.weights_field_1 = weights.copy()
+    ps.weights_grid_1 = weights.copy()
+
+    rng = np.random.default_rng(7)
+    data_zero = 5.0 * (1.0 + x_grad * y_grad) * np.sin(phase + 0.3) + rng.normal(
+        size=cube.shape
+    )
+    data_zero[:, :, gap] = 0.0
+    data_nan = data_zero.copy()
+    data_nan[:, :, gap] = np.nan
+
+    # Direct apply_cleaning_matrix: zero-weight and NaN gaps must not poison active
+    # channels or emit divide-by-zero warnings
+    R_gap = get_pca_matrix(data_zero, 1, weights, True)
+    expected_pca = pca_clean(
+        data_zero, 1, weights=weights, mean_center=True, ignore_nan=True
+    )
+    with np.errstate(divide="raise", invalid="raise"):
+        cleaned_zero = apply_cleaning_matrix(0.0, data_zero, R_gap, weights, True, True)
+        cleaned_nan = apply_cleaning_matrix(0.0, data_nan, R_gap, weights, True, True)
+        cleaned_mock_only = apply_cleaning_matrix(
+            cube, data_nan, R_gap, weights, True, False
+        )
+    assert np.all(np.isfinite(cleaned_zero))
+    assert np.all(np.isfinite(cleaned_nan))
+    assert np.all(np.isfinite(cleaned_mock_only))
+    assert np.allclose(cleaned_zero[:, :, gap], 0.0)
+    assert np.allclose(cleaned_mock_only[:, :, gap], 0.0)
+    assert np.allclose(cleaned_zero, expected_pca)
+    assert np.allclose(cleaned_nan, expected_pca)
+
+    def run_worker(kind, uncleaned, **kwargs):
+        tf = TransferFunction(
+            ps,
+            N_fg=1,
+            highres_sim=1,
+            upres_transverse=1,
+            upres_radial=1,
+            num_process=1,
+            mock_directory=prefix,
+            uncleaned_data=uncleaned,
+            pca_map_weights=weights,
+            mean_center_map=True,
+            **kwargs,
+        )
+        if kind == "cross":
+            arg = tf.get_arg_list_for_parallel_cross([0], return_power_1d=True)[0]
+            return tf, run_tf_calculation_cross(*arg)
+        arg = tf.get_arg_list_for_parallel_auto([0], return_power_1d=True)[0]
+        return tf, run_tf_calculation_auto(*arg)
+
+    tf_zero, cross_zero = run_worker("cross", data_zero)
+    tf_nan, cross_nan = run_worker("cross", data_nan)
+    assert np.allclose(tf_zero.get_cleaned_data(), expected_pca)
+    assert np.allclose(tf_nan.get_cleaned_data(), expected_pca)
+
+    tf_vals_zero = np.asarray(cross_zero[0])
+    tf_vals_nan = np.asarray(cross_nan[0])
+    occ = np.isfinite(tf_vals_zero)
+    assert np.count_nonzero(occ) >= 1
+    assert np.allclose(tf_vals_zero[occ], tf_vals_nan[occ])
+
+    # Zero or NaN in mock_dilution on the flagged channel must not produce NaNs
+    for gap_dil in (0.0, np.nan):
+        dilution = np.ones(n_freq, dtype=float)
+        dilution[gap] = gap_dil
+        _, cross_dil = run_worker("cross", data_zero, mock_dilution=dilution)
+        tf_vals_dil = np.asarray(cross_dil[0])
+        assert np.all(np.isfinite(tf_vals_dil[occ]))
+        assert np.allclose(tf_vals_dil[occ], tf_vals_zero[occ])
+
+    # Auto path: both project_combined=True and project_combined=False (in-place branch)
+    for proj in (True, False):
+        _, auto_res = run_worker("auto", data_zero, project_combined=proj)
+        auto_tf = np.asarray(auto_res[0])
+        assert np.count_nonzero(np.isfinite(auto_tf)) >= 1
+        assert np.all(np.isfinite(auto_res[-1][np.isfinite(auto_res[-2])]))
+
+
 def test_cross_worker_fkp_matches_parent_randoms(tmp_path):
     ps = _tiny_transfer_ps()
     ps.k1dbins = np.linspace(0.02, 0.3, 6)
