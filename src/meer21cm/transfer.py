@@ -1155,13 +1155,15 @@ def run_tf_calculation_cross(
         cleaned_data: np.ndarray, default None
             ``uncleaned_data`` cleaned with its own PCA matrix. When given, it
             is subtracted from the cleaned ``uncleaned_data + mock`` cube.
-            See ``subtract_cleaned_data`` in
-            :class:`meer21cm.transfer.TransferFunction`.
+            Requires ``project_combined=True``. See ``subtract_cleaned_data``
+            in :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
+    if cleaned_data is not None and not project_combined:
+        raise ValueError("cleaned_data requires project_combined=True")
     mock = MockSimulation(**mock_attr_dict)
     if mock_directory is None:
         if not isinstance(discrete_source_dndz, Callable):
@@ -1368,13 +1370,15 @@ def run_tf_calculation_auto(
         cleaned_data: np.ndarray, default None
             ``uncleaned_data`` cleaned with its own PCA matrix. When given, it
             is subtracted from the cleaned ``uncleaned_data + mock`` cube.
-            See ``subtract_cleaned_data`` in
-            :class:`meer21cm.transfer.TransferFunction`.
+            Requires ``project_combined=True``. See ``subtract_cleaned_data``
+            in :class:`meer21cm.transfer.TransferFunction`.
     Returns
     -------
         result: list
             The list of results, including the transfer function, the 3D power spectrum of the uncleaned and cleaned data, and the 1D power spectrum of the uncleaned and cleaned data.
     """
+    if cleaned_data is not None and not project_combined:
+        raise ValueError("cleaned_data requires project_combined=True")
     mock = MockSimulation(**mock_attr_dict)
     if mock_directory is None:
         if unmask_during_mock:

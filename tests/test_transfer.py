@@ -632,6 +632,17 @@ def test_subtract_cleaned_data(tmp_path):
     assert tf.get_cleaned_data() is None
     assert TransferFunction(ps, N_fg=1).get_cleaned_data() is None
 
+    for arg_func, worker in (
+        (tf.get_arg_list_for_parallel_cross, run_tf_calculation_cross),
+        (tf.get_arg_list_for_parallel_auto, run_tf_calculation_auto),
+    ):
+        arg = list(arg_func([0])[0])
+        names = list(inspect.signature(worker).parameters)
+        arg[names.index("project_combined")] = False
+        arg[names.index("cleaned_data")] = np.zeros_like(data)
+        with pytest.raises(ValueError, match="project_combined"):
+            worker(*arg)
+
 
 def test_zero_weight_gap_and_nan_channels(tmp_path):
     ps = _tiny_transfer_ps()
