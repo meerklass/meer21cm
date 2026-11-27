@@ -838,6 +838,14 @@ class JackknifeCovariance:
         labels = self.get_gal_patch_labels()
         # box_labels = self.box_voxel_labels()
         # hi_footprint = self.ps.counts_in_box > 0
+        if self.ps.field_2_has_random:
+            # FKP: the randoms are removed with the same patch labels as the galaxies
+            rand = (self.ps.ra_rand, self.ps.dec_rand, self.ps.z_rand, self.ps.weights_rand)
+            rand_labels = _digitize_sky_to_patch(
+                rand[0], rand[1], redshift_to_freq(np.asarray(rand[2])),
+                self.ra_range, self.dec_range, self.nu_range,
+                self.ra_patch_num, self.dec_patch_num, self.los_patch_num,
+            )
         ra_gal = self.ps.ra_gal
         dec_gal = self.ps.dec_gal
         z_gal = self.ps.z_gal
@@ -866,6 +874,7 @@ class JackknifeCovariance:
                     self.gal_dndz,
                 )
                 + extra
+                + ((None, rand + (rand_labels != j,)) if self.ps.field_2_has_random else ())
                 # + ((box_labels != j) & hi_footprint,)
             )
         return arg_list
@@ -935,12 +944,6 @@ class JackknifeCovariance:
         """
         if type not in ("cross", "auto"):
             raise ValueError(f"Invalid type: {type}")
-        if type == "cross" and self.ps.field_2_has_random and self.regrid:
-            raise ValueError(
-                "the galaxy field of the input instance is an FKP field "
-                "(D - alpha R), which regrid=True does not reproduce. "
-                "Use regrid=False."
-            )
         if type == "cross":
             outside_hi = self.ps.counts_in_box == 0
             if np.any(self.ps.get_weights_none_to_one("weights_grid_2") * outside_hi):
@@ -1714,6 +1717,7 @@ def run_jackknife_cross(
     field_mean_1: float | None = None,
     field_mean_2: float | None = None,
     gal_keep: ArrayLike | None = None,
+    rand_radecz: tuple | None = None,
 ) -> JackknifeResult:
     """
     Compute the 1D HI x galaxy cross-power spectrum for one jackknife
@@ -1753,6 +1757,11 @@ def run_jackknife_cross(
         The kept HI footprint the galaxy field and grid weights are truncated
         to. ``None`` (default) uses the HI window of this realisation,
         ``get_counts_in_box() > 0`` after the patch is masked.
+    rand_radecz: tuple, default None
+        FKP only: ``(ra, dec, z, weights, keep)`` of the random catalogue,
+        ``keep`` marking the randoms outside the removed patch. The galaxy
+        field is then rebuilt as ``D - alpha R`` from the kept galaxies and
+        randoms, with ``alpha`` of the kept catalogues.
 
     Returns
     -------
@@ -1778,7 +1787,18 @@ def run_jackknife_cross(
     jk._dec_gal = np.asarray(dec_gal)
     jk._z_gal = np.asarray(z_gal)
     jk.weights_gal = weights_gal[0] if weights_gal else None
-    gal_map_rg, gal_weights_rg, _ = jk.grid_gal_to_field()
+    # gal_map_rg, gal_weights_rg, _ = jk.grid_gal_to_field()
+    if rand_radecz is None:
+        gal_map_rg, gal_weights_rg, _ = jk.grid_gal_to_field()
+    else:  
+        # FKP: D - alpha R from the kept galaxies and randoms
+        *radecz_r, weights_r, keep_r = rand_radecz
+        jk.grid_gal_to_field(
+            construct_fkp=True,
+            random_radecz=tuple(np.asarray(a)[keep_r] for a in radecz_r),
+            random_weights=None if weights_r is None else np.asarray(weights_r)[keep_r],
+        )
+        gal_map_rg = gal_weights_rg = None
     gal_window_rg = np.array(jk.weights_field_2, copy=True)
     jk.include_beam = ps_attr_dict["include_beam"]
     jk.include_sky_sampling = ps_attr_dict["include_sky_sampling"]
@@ -1806,6 +1826,8 @@ def run_jackknife_cross(
         field_mean=field_mean_1,
         **bind_kw,
     )
+    if rand_radecz is not None:
+        bind_kw["weights_scheme"] = "_fkp"
     _bind_tracer(
         jk,
         2,
