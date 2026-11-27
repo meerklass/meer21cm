@@ -289,8 +289,8 @@ def _normalise_weights_argument(weights, type_default: str = "cross"):
 
 def _skip_taper_on_tapered_weights(ps, apply_taper, weights):
     """
-    Per-tracer ``apply_taper``, without the taper of tracers whose explicit grid weights are the (already tapered) grid weights of ``ps``.
-    """
+    Per-tracer ``apply_taper``, without the taper of tracers whose explicit
+    grid weights are the (already tapered) grid weights of ``ps``.    """
     if not isinstance(apply_taper, (tuple, list)):
         apply_taper = (apply_taper, apply_taper)
     apply_taper = list(apply_taper)
@@ -321,7 +321,8 @@ class JackknifeCovariance:
     ``type="cross"`` returns the HI × galaxy cross-power (optionally the
     two autos). In the cross, the galaxy field and grid weights are
     truncated to the kept HI footprint (``ps.counts_in_box > 0``); measure
-    the data with the same truncation. Realisations run on a fresh :class:`~meer21cm.power.PowerSpectrum`; if ``field_1`` / ``field_2``
+    the data with the same truncation. Realisations run on a fresh 
+    :class:`~meer21cm.power.PowerSpectrum`; if ``field_1`` / ``field_2``
     are missing, they are painted once onto the input instance so ``run``
     can be called without a prior ``grid_*``.
 
@@ -376,7 +377,11 @@ class JackknifeCovariance:
         simulations); for real data pass ``weights`` explicitly, or the galaxy
         falls back to its binary occupancy.
 
-        If ``"gridded"``, the grid weights of the HI map are the gridded jackknifed pixel weights ``w_HI`` (second output of ``grid_data_to_field``; the jackknifed ``counts_in_box`` when ``regrid=False``) with uniform field weights, and the galaxy weights are controlled by ``gal_grid_weights``.
+        If ``"gridded"``, the grid weights of the HI map are the gridded
+        jackknifed pixel weights ``w_HI`` (second output of
+        ``grid_data_to_field``; the jackknifed ``counts_in_box`` when
+        ``regrid=False``) with uniform field weights, and the galaxy weights
+        are controlled by ``gal_grid_weights``.
 
         If ``"counts"``, the weights follow the cookbook convention:
         the HI grid weights are ``counts_in_box`` (inverse noise variance
@@ -415,7 +420,6 @@ class JackknifeCovariance:
         **full-sample** weighted field means recorded in ``__init__``, not
         the mean of the remaining volume. No effect when both mean-centering
         and unitless conversion are off.
-
     apply_taper: bool or tuple, default None
         The taper multiplied into the (already masked) grid weights of each
         realisation. ``None`` reproduces the data measurement: each tracer gets
@@ -427,12 +431,9 @@ class JackknifeCovariance:
         separately, each entry a bool, a taper array or ``None``.
         Explicit grid ``weights`` equal to the tapered grid weights of ``ps``
         are not tapered again.
-
-
     taper_axis: tuple, default (2,)
-        The box axes along which the taper is applied when
-        ``apply_taper`` is a bool. Default is the z-axis, which
-        is approximately the line-of-sight.
+        The box axes along which the taper is applied when ``apply_taper``
+        is a bool. Default is the z-axis, which is approximately the line-of-sight.
     gal_grid_weights: str, default "binary"
         Only used if ``weights_scheme="gridded"``.
         The scheme for the grid/field weights of the galaxy field.
@@ -518,7 +519,8 @@ class JackknifeCovariance:
         self.freeze_mean = bool(freeze_mean)
         if apply_taper is None:
             apply_taper = tuple(getattr(ps, f"taper_applied_{t}", None) for t in (1, 2))
-        self.apply_taper = _skip_taper_on_tapered_weights(ps, apply_taper, self.weights)        self.taper_axis = tuple(taper_axis)
+        self.apply_taper = _skip_taper_on_tapered_weights(ps, apply_taper, self.weights)
+        self.taper_axis = tuple(taper_axis)
         if gal_grid_weights not in ("binary", "gridded"):
             raise ValueError(f"Invalid gal_grid_weights: {gal_grid_weights}")
         self.gal_grid_weights = gal_grid_weights
@@ -637,6 +639,7 @@ class JackknifeCovariance:
                 )
             painters.append(("field_2", ps.grid_gal_to_field))
         for attr, paint in painters:
+            # PowerSpectrum plants a 1x1x1 placeholder when no field is given
             if np.shape(getattr(ps, attr, None)) != tuple(ps.box_ndim):
                 painted, _, _ = paint()
                 setattr(ps, attr, painted)
@@ -658,6 +661,7 @@ class JackknifeCovariance:
         field_1 = np.array(self.ps.field_1, copy=True)
         field_2 = np.array(self.ps.field_2, copy=True) if type == "cross" else None
         if type == "cross" and self.ps.field_2_has_random:
+            # FKP field: pass (D, R) so that alpha is recomputed on the kept volume
             field_2 = (self.ps.field_2_D, self.ps.field_2_R)
         counts = np.array(self.ps.counts_in_box, copy=True)
         extra = self._jackknife_option_args()
@@ -1123,7 +1127,8 @@ def _bind_tracer(
 ) -> None:
     """Attach one tracer's field, weights, flags, and optional taper."""
     if field is not None:  
-        setattr(jk, f"field_{tracer}", np.asarray(field))    field_w, grid_w = resolve_tracer_weights(
+        setattr(jk, f"field_{tracer}", np.asarray(field))    
+    field_w, grid_w = resolve_tracer_weights(
         tracer=tracer,
         weights_scheme=weights_scheme,
         weights=weights,
@@ -1139,7 +1144,8 @@ def _bind_tracer(
     if tracer == 2 and gal_keep is not None:
         # cross: galaxies outside the kept HI footprint carry no weight
         field_w = None if field_w is None else field_w * gal_keep
-        grid_w = gal_keep.astype(jk.real_dtype) if grid_w is None else grid_w * gal_keep    setattr(jk, f"weights_field_{tracer}", field_w)
+        grid_w = gal_keep.astype(jk.real_dtype) if grid_w is None else grid_w * gal_keep    
+    setattr(jk, f"weights_field_{tracer}", field_w)
     setattr(jk, f"weights_grid_{tracer}", grid_w)
     _apply_jackknife_field_settings(
         jk, tracer, ps_attr_dict, mean_center, unitless, freeze_mean, field_mean
@@ -1276,6 +1282,7 @@ def resolve_tracer_weights(
     ):
         return _restrict_user_weights(weights[tracer - 1], kept)
     schemes = {
+        # FKP field: alpha R of the kept volume, set by set_fkp_field_from_counts
         "_fkp": lambda: (jk.weights_field_2, jk.weights_grid_2),
         "validation": lambda: _validation_tracer_weights(
             tracer, counts_keep_rg, weights_rg, jk, gal_dndz
@@ -1366,7 +1373,8 @@ def _gridded_tracer_weights(
     if tracer == 1:
         # HI carries grid weights only: a field weight equal to the grid weight
         # would normalise by sum(w^4) instead of sum(w^2)
-        return None, (weights_rg if counts_keep_rg is None else counts_keep_rg)    if gal_grid_weights == "gridded":
+        return None, (weights_rg if counts_keep_rg is None else counts_keep_rg)    
+    if gal_grid_weights == "gridded":
         if gal_weights_rg is None:
             raise ValueError(
                 "gal_grid_weights='gridded' needs the gridded galaxy weights, "
@@ -1391,8 +1399,9 @@ def _weighted_field_mean(ps: PowerSpectrum, tracer: int) -> float | None:
     Uses the current grid weights (``weights_{tracer}``). Returns ``None``
     when that field is missing.
     """
+    field = getattr(ps, f"field_{tracer}", None)
     if np.shape(field) != tuple(ps.box_ndim):
-    if field is None:
+    # if field is None:
         return None
     weights = ps.get_weights_none_to_one(f"weights_{tracer}")
     return float(np.sum(weights * field) / np.sum(weights))
@@ -1591,6 +1600,7 @@ def run_jackknife_boxmask(
         mean_center=mean_center_2,
         unitless=unitless_2,
         field_mean=field_mean_2,
+        gal_keep=counts_keep > 0,
         **bind_kw,
     )
     extra = ("auto_power_3d_1", "auto_power_3d_2") if return_auto_power else ()
@@ -1717,8 +1727,9 @@ def run_jackknife_cross(
     patch_mask: np.ndarray of bool
         The mask of the removed patch, True for removed pixels.
     gal_radecz: tuple of np.ndarray
-        The (ra, dec, z) of the galaxies kept in this realisation,
-        optionally followed by their per-object weights (``ps.weights_gal``).    k_sel_3d_to_1d: np.ndarray, default None
+        The (ra, dec, z) of the galaxies kept in this realisation, optionally
+        followed by their per-object weights (``ps.weights_gal``).
+    k_sel_3d_to_1d: np.ndarray, default None
         The weights for averaging the 3D power spectrum k-modes to
         the 1D power spectrum.
     weights_scheme: str, default "validation"
@@ -1739,8 +1750,8 @@ def run_jackknife_cross(
     return_auto_power: bool, default False
         Whether to also return the 1D auto-power spectra of the two fields.
     gal_keep: np.ndarray of bool, default None
-        The kept HI footprint (``counts_in_box > 0`` outside the removed patch).
-        If given, the galaxy field and grid weights are truncated to it.
+        The kept HI footprint (``counts_in_box > 0`` outside the removed
+        patch). If given, the galaxy field and grid weights are truncated to it.
 
     Returns
     -------

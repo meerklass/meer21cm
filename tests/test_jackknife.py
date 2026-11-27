@@ -552,8 +552,9 @@ def test_counts_scheme_is_inverse_noise_for_hi_and_occupancy_for_galaxies():
 def test_gridded_scheme_copies_the_jackknifed_window():
     weights_rg = np.array([1.0, 0.0, 2.0])
     field_w, grid_w = resolve_tracer_weights(1, "gridded", None, None, None, weights_rg)
-    #np.testing.assert_array_equal(field_w, weights_rg)
-    self.taper_applied_2 = None
+    # #np.testing.assert_array_equal(field_w, weights_rg)
+    # self.taper_applied_2 = None
+    assert field_w is None
     np.testing.assert_array_equal(grid_w, weights_rg)
 
 
