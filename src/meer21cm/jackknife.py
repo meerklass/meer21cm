@@ -836,8 +836,8 @@ class JackknifeCovariance:
             )
         masks = self.get_patch_masks()
         labels = self.get_gal_patch_labels()
-        box_labels = self.box_voxel_labels()
-        hi_footprint = self.ps.counts_in_box > 0
+        # box_labels = self.box_voxel_labels()
+        # hi_footprint = self.ps.counts_in_box > 0
         ra_gal = self.ps.ra_gal
         dec_gal = self.ps.dec_gal
         z_gal = self.ps.z_gal
@@ -866,7 +866,7 @@ class JackknifeCovariance:
                     self.gal_dndz,
                 )
                 + extra
-                + ((box_labels != j) & hi_footprint,)
+                # + ((box_labels != j) & hi_footprint,)
             )
         return arg_list
 
@@ -1750,8 +1750,9 @@ def run_jackknife_cross(
     return_auto_power: bool, default False
         Whether to also return the 1D auto-power spectra of the two fields.
     gal_keep: np.ndarray of bool, default None
-        The kept HI footprint (``counts_in_box > 0`` outside the removed
-        patch). If given, the galaxy field and grid weights are truncated to it.
+        The kept HI footprint the galaxy field and grid weights are truncated
+        to. ``None`` (default) uses the HI window of this realisation,
+        ``get_counts_in_box() > 0`` after the patch is masked.
 
     Returns
     -------
@@ -1769,6 +1770,9 @@ def run_jackknife_cross(
         box_reference=box_reference,
     )
     _check_k1dweights(jk, k_sel_3d_to_1d)
+    if gal_keep is None:
+        kept_counts = jk.get_counts_in_box() if counts_keep_rg is None else counts_keep_rg
+        gal_keep = kept_counts > 0
     ra_gal, dec_gal, z_gal, *weights_gal = gal_radecz
     jk._ra_gal = np.asarray(ra_gal)
     jk._dec_gal = np.asarray(dec_gal)
